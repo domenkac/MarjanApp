@@ -1,0 +1,4 @@
+Django>=5.2,<5.3
+pytest
+pytest-django
+ruff
