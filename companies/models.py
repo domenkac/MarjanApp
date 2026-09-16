@@ -1,4 +1,4 @@
-﻿import re
+import re
 
 from django.core.exceptions import ValidationError
 from django.db import models
@@ -148,3 +148,29 @@ class Signatory(models.Model):
 
         if napake:
             raise ValidationError(napake)
+
+
+class NumberSequence(models.Model):
+    class Tip(models.TextChoices):
+        NP = "NP", "NP"
+        ST = "ST", "ST"
+
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    tip = models.CharField(max_length=2, choices=Tip)
+    leto = models.IntegerField()
+    zadnja_stevilka = models.IntegerField(default=0)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["company", "tip", "leto"],
+                name="uniq_number_sequence_company_tip_leto",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(tip="NP", leto=0)
+                    | models.Q(tip="ST", leto__gt=0)
+                ),
+                name="number_sequence_veljaven_tip_leto",
+            ),
+        ]
