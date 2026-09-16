@@ -4,7 +4,7 @@
 
 **Nadomešča:** PRD v1.1. Različica 1.2 nadomešča v1.1; v1.1 ostaja nespremenjena kot prejšnja potrjena različica.
 
-**Spremembe v1.2:** dodan je čarovnik prvega zagona s celotno verigo podatkov za pripravo računov; uvedena sta uporabnikova potrditev vzorca za vseh pet podjetij in ločena uporabnikova potrditev DDV-nastavitev; določena so pravila vzorčnega PDF-ja in zastarelosti potrditev; uspešen neuničujoč preizkus lokalnega arhiva, iCloud arhiva in Dropbox mape je določen kot pogoj zaključka začetne nastavitve; odstranjene so vse potrjevalne vloge računovodje, njegovi vlogi prejemnika BCC in kontrolnega dokumenta pa ostajata nespremenjeni; določena so tudi pravila fizičnega izbrisa, arhiviranja, ponovne aktivacije in minimalne revizijske sledi.
+**Spremembe v1.2:** dodan je čarovnik prvega zagona s celotno verigo podatkov za pripravo računov; uvedena sta uporabnikova potrditev vzorca za vseh pet podjetij in ločena uporabnikova potrditev DDV-nastavitev; določena so pravila vzorčnega PDF-ja in zastarelosti potrditev; uspešen neuničujoč preizkus lokalnega arhiva, iCloud arhiva in Dropbox mape je določen kot pogoj zaključka začetne nastavitve; tehnični način atomskega številčenja je usklajen z Django 5.2 in SQLite transakcijami `IMMEDIATE`; odstranjene so vse potrjevalne vloge računovodje, njegovi vlogi prejemnika BCC in kontrolnega dokumenta pa ostajata nespremenjeni; določena so tudi pravila fizičnega izbrisa, arhiviranja, ponovne aktivacije in minimalne revizijske sledi.
 
 **Spremembe v1.1:** uskladitev s FSD faze 1 v1.1 — pojasnjen prehod iz Excela, indeksacija od februarja in morebitni poračun, primerjava z zadnjim dejansko izdanim računom, posamična atomarnost potrditve ter zaprto vprašanje o nazivu podjetja v imenu datoteke. Dodani so zaključna kontrola pošiljanja, zbirno obvestilo uporabniku, jasna vizualna potrditev uspešnih in neuspešnih korakov ter varna obravnava primerov, ko rezultat pošiljanja ni znan.
 
@@ -217,6 +217,8 @@ Dve ločeni, neodvisni zaporedji na **vsako podjetje**:
 - Številka se dodeli **ob potrditvi**, ne ob nastanku osnutka.
 - Rezervirana številka se nikoli tiho ne uporabi ponovno.
 - Dodeljevanje je atomarno tudi izven mesečnega ciklusa.
+
+**Tehnični način na SQLite.** Aplikacija uporablja Django 5.2 in SQLite transakcijski način `IMMEDIATE`; ne zanaša se na `select_for_update()`, ki na SQLite nima učinka. Dodelitev številke in potrditev računa sta v isti čim krajši atomski transakciji. `NumberSequence.leto` ni `NULL`: za `NP` je interna vrednost `0`, za `ST` pa dejansko koledarsko leto. Baza uveljavi enoličnost `(company, tip, leto)` in veljavne kombinacije tipa ter leta.
 
 ### 6.6 Podpisniki
 
@@ -706,7 +708,7 @@ Ob predaji se izvede **dejanska obnova iz posnetka**, ne le izdelava.
 | P0-11 | Paketni pregled z Δ primerjavo | Zaslon §7.3 primerja z zadnjim dejansko izdanim računom; sprožilci §7.2 delujejo brez izjeme |
 | P0-12 | Ločeni zaporedji `NP` in `ST` | Izdaja `ST` med pripravo `NP` paketa ne vpliva na `NP` zaporedje |
 | P0-13 | Pravila resetiranja | Test prehoda 31. 12. → 1. 1. dokaže reset `ST` in ne-reset `NP` |
-| P0-14 | Atomarno dodeljevanje številk | Prekinitev ne pusti luknje ali dvojnika |
+| P0-14 | Atomarno dodeljevanje številk | Na Django 5.2 + SQLite se uporabi kratka transakcija `IMMEDIATE`; prekinitev ne pusti luknje ali dvojnika, sočasnost pa se preveri z dejanskimi konkurenčnimi transakcijami na ločenih povezavah |
 | P0-15 | Obračun vnaprej | Obdobje storitve je vedno cel koledarski mesec; datum izdaje ga ne premakne |
 | P0-16 | Sorazmerni obračun | Koledarski dnevi za pogodbo ali posamezno postavko; ročni povoz zahteva razlog in ohrani izvirno vrednost |
 | P0-17 | Ročna storitvena faktura | Vnos bruto; vsota osnove in DDV natanko enaka vnesenemu znesku |
@@ -779,7 +781,7 @@ Podrobnosti in utemeljitev izbire so v ločenem dokumentu **SAD (Arhitekturni na
 |---|---|
 | Platforma | macOS, ena naprava, lokalni strežnik na `127.0.0.1`, brez omrežne izpostavljenosti |
 | Jezik | Python 3.12+ |
-| Ogrodje | Django 5.x |
+| Ogrodje | Django 5.2 |
 | Uporabniški vmesnik | Django templates + HTMX (dostop prek brskalnika) |
 | Baza | SQLite, lokalna |
 | PDF | WeasyPrint (HTML/CSS → PDF) |

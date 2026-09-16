@@ -1,15 +1,15 @@
 # Funkcionalna specifikacija — Faza 1 (v1.2)
 
 **Aplikacija Marjan — najemniško zaračunavanje**
-**Različica:** 1.2 · **Datum:** 15. september 2026 · **Status:** osnutek za pregled · **Podlaga:** PRD v1.2 in SAD v1.2
-**Nadomešča:** FSD faze 1 v1.1 FINAL. Različica 1.2 nadomešča v1.1, ki ostaja nespremenjena kot prejšnja potrjena različica; v1.2 je med pregledom osnutek in ne nosi oznake `FINAL`.
+**Različica:** 1.2 · **Datum:** 16. september 2026 · **Status:** FINAL · **Podlaga:** PRD v1.2 in SAD v1.2
+**Nadomešča:** FSD faze 1 v1.1 FINAL. Različica 1.2 nadomešča v1.1, ki ostaja nespremenjena kot prejšnja potrjena različica.
 Interni dokument za razvojno ekipo (AI-podprt razvoj, ChatGPT/Codex). Ni za naročnika.
 
 Obseg te specifikacije: `/domain` + `/data` za module `companies`, `catalogs`, `contracts`, `invoicing` (jedro). Cilj faze 1 po SAD-u: poslovna pravila delujejo in so dokazana s testi, brez zagnanega vmesnika. `/render`, `/ui`, `/delivery`, `MonthlyBatch` kot orkestracijski model in priloge k pogodbi so izven obsega tega dokumenta (faze 2–5).
 
 **Meja prvega zagona:** ta FSD ohranja model `Company.ddv_razporeditev_potrjena` in njegove predpogoje faze 1, vendar ne določa čarovnika, vzorčnega PDF-načina ali podatkovnega zapisa potrditve vzorca. Ti sodijo v prihodnji FSD prvega zagona. Končni sistem mora pred produkcijsko izdajo poleg pogojev iz tega dokumenta preveriti tudi veljavno uporabnikovo potrditev vzorca za vsako podjetje, kot določata PRD v1.2 §16.4 in SAD v1.2 §6.4.
 
-**Spremembe v1.2:** `ddv_razporeditev_potrjena` je izrecno uporabnikova potrditev, odstranjene so vse potrjevalne in blokirne vloge računovodje, meja do prihodnjega FSD prvega zagona pa je zapisana tako, da vzorčni račun ne postane izdani dokument in da bo njegova uporabnikova potrditev ločen produkcijski predpogoj. Dodani so natančni pogoji fizičnega izbrisa, arhiviranja in ponovne aktivacije, zaščita pred kaskadnim izbrisom, strukturirani razlogi za zavrnitev, minimalna revizijska sled ter obvezni testi.
+**Spremembe v1.2:** `ddv_razporeditev_potrjena` je izrecno uporabnikova potrditev, odstranjene so vse potrjevalne in blokirne vloge računovodje, meja do prihodnjega FSD prvega zagona pa je zapisana tako, da vzorčni račun ne postane izdani dokument in da bo njegova uporabnikova potrditev ločen produkcijski predpogoj. Dodani so natančni pogoji fizičnega izbrisa, arhiviranja in ponovne aktivacije, zaščita pred kaskadnim izbrisom, strukturirani razlogi za zavrnitev, minimalna revizijska sled ter obvezni testi. Atomsko številčenje je usklajeno z Django 5.2 in SQLite: `IMMEDIATE` transakcije, `leto=0` za NP, DB omejitve ter transakcijski test z dejansko konkurenco.
 
 **Zgodovina v1.1:** v1.1 FINAL je nastala skozi dve razpravni fazi: (a) pet vsebinskih sklopov (podatkovni model, pravila izračuna, robni primeri, validacija partnerjev, indeksacija) in (b) končni pregled štirih izvornih dokumentov. Priloga B beleži vseh 20 dopolnil v1.1 kronološko, Priloga C pa zgodovinske uskladitve z drugimi dokumenti.
 
@@ -40,6 +40,20 @@ Obseg te specifikacije: `/domain` + `/data` za module `companies`, `catalogs`, `
 | `ddv_razporeditev_potrjena` | BooleanField | default `False` — uporabnikova potrditev razporeditve enot po DDV režimih za to podjetje, PRD v1.2 §16 in §16.4, P0-37/P0-54 (dopolnilo 19) |
 | `aktivno` | BooleanField | default `True` |
 
+DB omejitev za davčno številko:
+
+```python
+models.UniqueConstraint(
+    fields=['davcna_stevilka'],
+    condition=models.Q(aktivno=True),
+    name='uniq_active_company_davcna_stevilka',
+)
+```
+
+`clean()` ostane za razumljivo napako. Ponovna aktivacija se zavrne, če bi omejitev kršila.
+
+**IBAN.** Ob vnosu se odstranijo presledki in vrednost pretvori v velike črke; shrani se kanonična oblika brez presledkov. Validator preveri dovoljene znake, strukturo, predpisano dolžino države ter MOD-97 kontrolno številko. Država ni omejena na `SI`.
+
 *Zakaj `ddv_razporeditev_potrjena` na `Company`, ne kot ločen model v fazi 1.* PRD v1.2 (P0-37/P0-54, §16.4) zahteva uporabnikovo potrditev DDV-nastavitev pred prvo resnično izdajo. V obsegu faze 1 je to stanje predpogoja na podjetju; podrobnejši zapis časa potrditve, pravila samodejne zastarelosti in povezava z ločeno potrditvijo vzorca se določijo v prihodnjem FSD prvega zagona. Računovodja pri tej potrditvi ne sodeluje.
 
 *Zakaj `Company` nima polja `kratica`.* PRD-jevo odprto vprašanje O2 ("polni naziv, kratica ali šifra v imenu datoteke?") je zdaj rešeno — poln naziv, počiščen za datotečni sistem (potrjeno). Ločeno polje za kratico ni več potrebno; ime datoteke se izpelje iz `naziv` prek `core.pravila.slugify_naziv()` (§1.5). Glej Prilogo B, dopolnilo 20.
@@ -57,7 +71,17 @@ Obseg te specifikacije: `/domain` + `/data` za module `companies`, `catalogs`, `
 | `velja_od` | DateField | required |
 | `velja_do` | DateField | `null=True` — `null` = trenutno veljaven |
 
-Omejitev (validirana v `clean()`, ne DB constraint — SQLite ne podpira pogojnih unique): na `company` sme biti kvečjemu en zapis z `velja_do IS NULL` naenkrat.
+Na `company` sme biti največ en trenutni podpisnik; trenutni pomeni `velja_do IS NULL`. Pravilo zagotavljata obe plasti:
+
+```python
+models.UniqueConstraint(
+    fields=['company'],
+    condition=models.Q(velja_do__isnull=True),
+    name='uniq_current_signatory_per_company',
+)
+```
+
+DB omejitev prepreči drugega trenutnega podpisnika tudi zunaj obrazcev in ob sočasnem pisanju. `clean()` ostane za zgodnjo, uporabniku prijazno validacijsko napako.
 
 **NumberSequence**
 
@@ -67,10 +91,26 @@ Omejitev (validirana v `clean()`, ne DB constraint — SQLite ne podpira pogojni
 |---|---|---|
 | `company` | FK → Company | |
 | `tip` | CharField, choices: `NP`/`ST` | |
-| `leto` | IntegerField | `null=True` — obvezno pri `ST`, `null` pri `NP` |
+| `leto` | IntegerField | required, brez `NULL`; `0` pri `NP`, dejansko koledarsko leto pri `ST` |
 | `zadnja_stevilka` | IntegerField | default `0` |
 
-`unique_together = (company, tip, leto)`.
+DB omejitve:
+
+```python
+models.UniqueConstraint(
+    fields=['company', 'tip', 'leto'],
+    name='uniq_number_sequence_company_tip_leto',
+)
+models.CheckConstraint(
+    condition=(
+        models.Q(tip='NP', leto=0)
+        | models.Q(tip='ST', leto__gt=0)
+    ),
+    name='number_sequence_veljaven_tip_leto',
+)
+```
+
+Storitev pri `ST` vedno vzame leto iz `datum_izdaje.year`; DB pogoj `leto > 0` je zadnja zaščita pred neveljavno kombinacijo. Pri `NP` je `0` samo interna vrednost in se v številki ne izpiše.
 
 ### 1.2 `catalogs`
 
@@ -245,12 +285,25 @@ Pravilo (`clean()`): kadar `lease.ima_klavzulo_indeksacije=True`, `indeks_ob_osn
 | `izdajatelj_podpisnik_ime` / `_funkcija` / `_slika_pot` | CharField ×3 | **posnetek** veljavne verzije `Signatory` |
 | `oznaka_pogodbe` | CharField | `null=True` pri `ST` |
 | `objekt_naziv` | CharField | `null=True` |
-| `status` | CharField, choices: `OSNUTEK`/`ZA_PONOVNI_PREGLED`/`IZBRAN_ZA_POSILJANJE`/`POSLAN`/`NAPAKA`/`ARHIVIRAN_NI_IZDAN`/`STORNIRAN`/`POPRAVLJEN` | default `OSNUTEK` — v fazi 1 relevantna dejansko samo `OSNUTEK` in `ARHIVIRAN_NI_IZDAN` (slednji za migracijske zapise, §7) |
+| `status` | CharField, choices: `OSNUTEK`/`ZA_PONOVNI_PREGLED`/`IZBRAN_ZA_POSILJANJE`/`POSLAN`/`NAPAKA`/`REZULTAT_NI_ZNAN`/`ARHIVIRAN_NI_IZDAN`/`STORNIRAN`/`POPRAVLJEN` | default `OSNUTEK` — v fazi 1 so relevantni `OSNUTEK`, `IZBRAN_ZA_POSILJANJE` in `ARHIVIRAN_NI_IZDAN` (slednji za migracijske zapise, §7) |
 | `povezan_racun` | FK → self | `null=True` — za STORNO/DOBROPIS/POPRAVLJEN |
 | `razlog` | TextField | required kadar `document_type` ∈ {STORNO, DOBROPIS} |
 | `razlog_arhiviranja` | TextField | `null=True`; standardna vrednost `"Migracijski zapis – uvoz stanja pred prehodom na aplikacijo"` za sintetične zapise (§7) |
 | `osnova_skupaj` / `ddv_skupaj` / `skupaj_z_ddv` | DecimalField(10,2) ×3 | izračunano ob potrditvi |
 | `rendered_pdf_path` / `rendered_eslog_path` / `checksum` | CharField ×3 | polni se v fazi 2 |
+
+DB omejitev:
+
+```python
+models.UniqueConstraint(
+    fields=['company', 'stevilka'],
+    name='uniq_invoice_company_stevilka',
+)
+```
+
+Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa ostane dovoljenih.
+
+**Nespremenljivost po potrditvi.** Ko ima `Invoice.stevilka` vrednost, domenske storitve zavrnejo spremembo vseh poslovnih in posnetnih polj `Invoice`, dodajanje, spremembo ali izbris `InvoiceLine` ter izbris originalnega računa. Dovoljeni so samo predpisani prehodi `status`, nastavitev render poti oziroma `checksum` prek namenskih storitev in zapis evidence pošiljanja. Popravki nastanejo izključno s storno/dobropisom. DB triggerji se ne uporabljajo.
 
 **InvoiceLine**
 
@@ -366,7 +419,7 @@ Koda razloga mora biti stabilna in primerna za teste. Najmanjši nabor je: `ZAPI
 
 Vsi poslovni tuji ključi, ki bi lahko povzročili odstranitev začetnega ali zgodovinskega zapisa, uporabljajo `on_delete=PROTECT` oziroma enakovredno zaščito. `CASCADE` ni dovoljen za poslovno drevo iz tega razdelka. Če obstaja katerikoli podrejeni zapis, je izbris starša zavrnjen; aplikacija podrejenih zapisov ne izbriše samodejno.
 
-Dovoljeni izbris teče v eni `transaction.atomic()` transakciji: storitev zaklene ciljni zapis, ponovno preveri vse reference, zapiše minimalni `AuditLogEntry(dejanje="FIZICNI_IZBRIS")` in šele nato izbriše poslovni zapis. Če med preverjanjem nastane nova povezava ali zaščitna omejitev zavrne izbris, se transakcija povrne in storitev vrne strukturiran razlog namesto delnega rezultata.
+Dovoljeni izbris teče v eni kratki `transaction.atomic()` transakciji, ki zaradi SQLite `transaction_mode='IMMEDIATE'` pridobi zaklep za pisanje ob začetku: storitev ponovno preveri vse reference, zapiše minimalni `AuditLogEntry(dejanje="FIZICNI_IZBRIS")` in šele nato izbriše poslovni zapis. Če med preverjanjem nastane nova povezava ali zaščitna omejitev zavrne izbris, se transakcija povrne in storitev vrne strukturiran razlog namesto delnega rezultata. `select_for_update()` se ne uporablja.
 
 #### Arhiviranje
 
@@ -459,22 +512,25 @@ Uporabljeno v ročnih storitvenih fakturah (faza 5 kot celoten tok; funkcija je 
 
 ### 2.4 Številčenje in atomarnost
 
+Projekt uporablja Django 5.2 in v nastavitvah SQLite določi `DATABASES['default']['OPTIONS']['transaction_mode'] = 'IMMEDIATE'`. Zunanji `transaction.atomic()` zato pridobi SQLite zaklep za pisanje že ob začetku. Transakcija vsebuje samo povečanje zaporedja, nastanek nespremenljivega posnetka računa in prehod statusa; generiranje PDF/XML, datotečni zapisi ter pošiljanje ostanejo zunaj nje. `select_for_update()` se ne uporablja, ker na SQLite nima učinka.
+
 **Zakaj cela dodelitev in status v eni transakciji.** Če transakcija propade, se števec povrne — nobena številka ni "zažgana". Če uspe, je številka trajno porabljena, tudi če poznejši koraki (PDF) spodletijo — ponovni poskus uporabi isto številko, ne kliče funkcije znova.
 
 ```python
 with transaction.atomic():
-    leto = datum_izdaje.year if tip == 'ST' else None
-    seq, _ = NumberSequence.objects.select_for_update().get_or_create(
+    leto = datum_izdaje.year if tip == 'ST' else 0
+    seq, _ = NumberSequence.objects.get_or_create(
         company=company, tip=tip, leto=leto, defaults={'zadnja_stevilka': 0}
     )
-    seq.zadnja_stevilka += 1
-    seq.save()
+    seq.zadnja_stevilka = F('zadnja_stevilka') + 1
+    seq.save(update_fields=['zadnja_stevilka'])
+    seq.refresh_from_db(fields=['zadnja_stevilka'])
     invoice.stevilka = format_stevilka(tip, seq.zadnja_stevilka, leto)
     invoice.status = 'IZBRAN_ZA_POSILJANJE'
     invoice.save()
 ```
 
-`select_for_update()` je dovolj za SQLite pri enem pisalnem procesu (SAD §5, P0-14). `STORNO`/`DOBROPIS` gresta skozi isto funkcijo, isti `tip` kot izvirnik — ni ločenega števca.
+`STORNO`/`DOBROPIS` gresta skozi isto funkcijo in isti `tip` kot izvirnik — ni ločenega števca. Enolična in kontrolna DB omejitev preprečita več zapisov NP za isto podjetje ter neveljavne kombinacije tipa in leta.
 
 ### 2.5 Δ zaznava — dispečer in predpogoji podjetja
 
@@ -749,6 +805,9 @@ Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izra�
 | Test | Preveri |
 |---|---|
 | `test_fizicni_izbris_dovoljen_za_neuporabljen_zapis_brez_referenc` | Izrecno potrjen izbris uspe samo za zapis brez poslovne uporabe in povezav |
+| `test_dve_aktivni_podjetji_z_isto_davcno_stevilko_zavrnjeni` | DB omejitev zavrne drugi aktivni zapis |
+| `test_arhivirano_podjetje_z_isto_davcno_stevilko_dovoljeno` | Duplikat je dovoljen, kadar je arhiviran |
+| `test_reaktivacija_ob_konfliktu_davcne_stevilke_zavrnjena` | Zapis ostane arhiviran |
 | `test_fizicni_izbris_brez_izrecne_potrditve_zavrnjen` | Razlog `POTRDITEV_MANJKA`; zapis ostane |
 | `test_vsaka_prepovedana_vrsta_reference_blokira_izbris` | Parametrizirano: račun, poslovna povezava, dokument, številčenje, pošiljanje, uporabnikova potrditev in poslovna zgodovina |
 | `test_podrejeni_zapis_blokira_starsa_brez_kaskade` | Razlog `PODREJENI_ZAPISI`; starš in otrok ostaneta |
@@ -763,16 +822,30 @@ Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izra�
 **`companies/tests/test_stevilcenje.py`**
 | Test | Preveri |
 |---|---|
-| `test_atomarno_dodeljevanje_socasno` | Sočasen klic ne proizvede podvojene številke |
+| `test_atomarno_dodeljevanje_socasno` | `TransactionTestCase` oziroma `pytest.mark.django_db(transaction=True)` zažene dejanske konkurenčne transakcije prek ločenih DB povezav; noben klic ne dobi podvojene številke |
 | `test_np_ne_resetira_cez_leto` | `NP` se nadaljuje čez 31.12./1.1. |
 | `test_st_resetira_po_letu_izdaje` | `ST` se resetira glede na `datum_izdaje.year` |
+| `test_np_uporablja_leto_nic_in_je_enolicen` | `NP` uporablja `leto=0`; drugi zapis za isto podjetje krši DB enoličnost |
+| `test_number_sequence_zavrne_neveljavno_kombinacijo_tipa_in_leta` | DB `CheckConstraint` zavrne `NP` z letom, različnim od `0`, in `ST` z letom `0` |
+| `test_podvojena_stevilka_istega_podjetja_zavrnjena` | DB `UniqueConstraint(company, stevilka)` zavrne podvojitev |
+| `test_ista_stevilka_drugega_podjetja_dovoljena` | Enoličnost je omejena na podjetje |
+| `test_vec_null_stevilk_dovoljenih` | Več osnutkov brez številke je dovoljenih |
 | `test_stevilka_dodeljena_sele_ob_potrditvi` | Osnutek nima `stevilka` |
 | `test_neuspesna_transakcija_ne_zazge_stevilke` | Propad transakcije povrne `zadnja_stevilka` |
 | `test_storno_uporabi_isto_zaporedje` | `STORNO` dobi naslednjo številko istega niza |
 
+**`companies/tests/test_iban.py`**
+| Test | Preveri |
+|---|---|
+| `test_veljaven_iban_sprejet` | Veljaven IBAN prestane validacijo |
+| `test_iban_z_napacnim_checksumom_zavrnjen` | MOD-97 napaka blokira shranjevanje |
+| `test_iban_z_napacno_dolzino_zavrnjen` | Dolžina ne ustreza državi |
+| `test_iban_s_presledki_normaliziran` | Shrani se brez presledkov in z velikimi črkami |
+
 **`companies/tests/test_predpogoji.py`**
 | Test | Preveri |
 |---|---|
+| `test_drugi_trenutni_podpisnik_krsi_db_omejitev` | DB zavrne drugi `Signatory` z `velja_do IS NULL` za isto podjetje |
 | `test_nepotrjena_ddv_razporeditev_blokira` | `preveri_predpogoje_podjetja()` — dopolnilo 19 |
 | `test_manjkajoc_podpisnik_blokira_celo_podjetje` | Blokada, ne 15 ponovljenih izjem |
 | `test_veljaven_podpisnik_in_potrjena_razporeditev_prehod` | Prazen seznam blokad |
@@ -835,6 +908,9 @@ Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izra�
 |---|---|
 | `test_sprememba_vatregime_ne_vpliva_na_izdan_racun` | |
 | `test_sprememba_podpisnika_ne_vpliva_na_izdan_racun` | |
+| `test_neposredna_sprememba_potrjenega_racuna_zavrnjena` | Poslovna/snapshot polja ostanejo nespremenjena |
+| `test_neposredna_sprememba_ali_izbris_vrstice_potrjenega_racuna_zavrnjena` | `InvoiceLine` je po potrditvi nespremenljiv |
+| `test_izbris_originalnega_potrjenega_racuna_zavrnjen` | Popravek je možen samo s storno/dobropisom |
 
 **`invoicing/tests/test_storno.py`**
 | Test | Preveri |

@@ -5,7 +5,7 @@
 
 **Nadomešča:** SAD v1.1. Različica 1.2 nadomešča v1.1; v1.1 ostaja nespremenjena kot prejšnja potrjena različica.
 
-**Spremembe v1.2:** arhitektura je razširjena z odgovornostmi čarovnika prvega zagona, varnim vzorčnim izrisom brez izdaje, obveznim neuničujočim preizkusom vseh treh lokacij shranjevanja in ločenima uporabnikovima potrditvama DDV-nastavitev ter vzorca; računovodja nima potrjevalne ali blokirne vloge in ostaja samo možni prejemnik BCC ter kontrolnega dokumenta; življenjski cikel začetnih podatkov uporablja domenske varovalke pred fizičnim in kaskadnim izbrisom, strukturirane razloge za zavrnitev ter minimalno revizijsko sled.
+**Spremembe v1.2:** arhitektura je razširjena z odgovornostmi čarovnika prvega zagona, varnim vzorčnim izrisom brez izdaje, obveznim neuničujočim preizkusom vseh treh lokacij shranjevanja in ločenima uporabnikovima potrditvama DDV-nastavitev ter vzorca; atomsko številčenje na Django 5.2 + SQLite uporablja kratke transakcije `IMMEDIATE`, ne `select_for_update()`; računovodja nima potrjevalne ali blokirne vloge in ostaja samo možni prejemnik BCC ter kontrolnega dokumenta; življenjski cikel začetnih podatkov uporablja domenske varovalke pred fizičnim in kaskadnim izbrisom, strukturirane razloge za zavrnitev ter minimalno revizijsko sled.
 
 **Spremembe v1.1:** fizična struktura je usklajena s standardnimi Django app-i; `RecipientContact` je v `contracts`; Δ primerja zadnji dejansko izdani račun; vsak račun se potrjuje atomarno zase; modeli zaporedij, indeksacije in migracije so usklajeni s FSD v1.1.
 **Ciljna publika:** razvijalec (interni sodelavec, junior, dela z ChatGPT/Codex)
@@ -18,7 +18,7 @@
 | Plast | Izbira | Zakaj (kratko — celotna razprava je bila sprejeta pred tem dokumentom) |
 |---|---|---|
 | Jezik | **Python 3.12+** | En jezik za cel projekt; razvijalec ga pozna |
-| Ogrodje | **Django 5.x** | Vgrajen admin za velik del CRUD obsega, zrel ORM, najbolje zastopan sklad v AI učnih podatkih |
+| Ogrodje | **Django 5.2** | Vgrajen admin za velik del CRUD obsega, zrel ORM, podpora SQLite transakcijskemu načinu `IMMEDIATE` |
 | Baza | **SQLite** | En uporabnik, ena naprava; ni razloga za PostgreSQL |
 | UI vzorec | **Django templates + HTMX** | Dinamika brez ločenega JS ogrodja; en jezik ostane en jezik |
 | PDF | **WeasyPrint** | HTML/CSS predloga → PDF; najbolje zastopan vzorec za rendering |
@@ -26,6 +26,8 @@
 | Poverilnice | **`keyring`** | Samodejno uporabi macOS Keychain, ena vrstica namesto ročne integracije |
 | Namestitev | **`venv` neposredno na macOS** | Brez Dockerja (glej §8); brez notarizacije (ni distribucije tretjim) |
 | Dostop | **Lokalni strežnik na `127.0.0.1`** | Brskalnik kot vmesnik; brez omrežne izpostavljenosti |
+
+**Transakcijski način SQLite.** `DATABASES['default']['OPTIONS']['transaction_mode']` je nastavljen na `'IMMEDIATE'`. Vsak zunanji `transaction.atomic()` zato pridobi SQLite zaklep za pisanje ob začetku transakcije in prepreči, da bi dva pisca hkrati prebrala isto vrednost zaporedja. Transakcije, ki spreminjajo številčenje ali preverjajo reference pred fizičnim izbrisom, morajo ostati kratke in ne smejo vključevati generiranja datotek, omrežnih klicev ali drugega zunanjega dela. `select_for_update()` se za SQLite ne uporablja, ker ne zagotavlja vrstičnega zaklepanja.
 
 **Kaj to ni:** ni prava spletna aplikacija (§4 PRD — en uporabnik, brez prijave), ni SaaS, ni multi-tenant. To je odločitev, sprejeta zavestno in je zapisana tudi v §2 tega dokumenta, da je ne pozabimo, ko projekt zraste.
 
@@ -111,7 +113,7 @@ Podrobni modeli (polja, tipi, omejitve) so v FSD. Tu le entitete in razmerja, da
 
 ```
 Company (izdajatelj)                          5 zapisov
-  ├── Signatory (podpisnik, z zgodovino)
+  ├── Signatory (podpisnik, z zgodovino; največ en trenutni zapis na podjetje zagotavlja pogojni DB UniqueConstraint)
   ├── NumberSequence (NP / ST; NP brez letnega ponastavljanja, ST po letu)
   ├── uporabnikova potrditev DDV-nastavitev (ločeno stanje)
   ├── uporabnikova potrditev vzorca (čas + različica PDF-predloge; podrobnosti v prihodnjem FSD)
@@ -163,7 +165,7 @@ AuditLogEntry
 
 | App | Admin registracija | Prilagoditve |
 |---|---|---|
-| `companies` | `Company`, `Signatory`, `NumberSequence` | Inline za `Signatory` znotraj `Company`; upload polje za JPG/PNG s preverjanjem tipa po vsebini |
+| `companies` | `Company`, `Signatory`, `NumberSequence` | Inline za `Signatory` znotraj `Company`; `clean()` poda prijazne napake, pogojni DB `UniqueConstraint` pa zagotavlja največ en zapis z `velja_do IS NULL` na podjetje in enolično davčno številko med aktivnimi podjetji; upload polje za JPG/PNG s preverjanjem tipa po vsebini |
 | `catalogs` | `VatRegime`, `ServiceCatalogItem` | Filter po `aktiven`; opozorilo v listi, če `velja_do` poteka |
 | `contracts` | `Property`, `Unit`, `Tenant`, `Lease` | `Lease` z inline `LeaseItem`; `clean()` uporablja skupni validator iz `core` in storitve appa `contracts` |
 
@@ -205,9 +207,9 @@ Uporabnik → ui: »Nov mesečni paket«
               ▼
     ZA VSAK označeni račun POSEBEJ:
       transaction.atomic():
-        1. zakleni in povečaj ustrezni NumberSequence
+        1. v transakciji IMMEDIATE preberi in povečaj ustrezni NumberSequence
         2. ustvari Invoice + InvoiceLine kot nespremenljiv posnetek
-        3. shrani številko in status potrditve
+        3. shrani številko in status `IZBRAN_ZA_POSILJANJE`
               │
               ├── rendering: PDF + eSLOG, kontrolni odtis
               ├── delivery: TO/CC/BCC; napaka omogoči ponovni poskus z istim PDF
@@ -317,10 +319,11 @@ Ta razdelek povezuje arhitekturne odločitve neposredno na P0 zahteve, da FSD ne
 |---|---|
 | P0-3 (deterministični izračun) | `izracunaj_osnutke()` je čista funkcija: enak vhod (stanje `Lease` v bazi) → enak izhod. Ne piše v bazo, dokler ni potrjeno. |
 | P0-6 (zgodovinskost šifrantov) | `InvoiceLine` in `Invoice` hranita kopirane vrednosti, ne FK na `VatRegime`. Test: sprememba `VatRegime.stopnja` po izdaji ne sme spremeniti obstoječega `Invoice`. |
+| P0-27 (nespremenljivost izdanega računa) | Po dodelitvi številke domenske storitve preprečijo spremembo poslovnih in posnetnih polj `Invoice`, vseh `InvoiceLine` ter izbris originala. Dovoljeni so le prehodi statusa, render poti/kontrolni odtis in evidenca pošiljanja prek namenskih storitev; popravek je storno ali dobropis. |
 | P0-9 (validacija DDV po statusu prejemnika) | Skupni validator v `core`, klican iz `Lease.clean()` in iz storitve za pripravo kandidatov — ista pravila pri vnosu in izdaji. |
 | P0-11 (sorazmernost postavke) | Vsaka `LeaseItem` ima lastna datuma začetka in prenehanja; izračun se opravi neodvisno za vsako vrstico. |
-| P0-12/13 (ločeni zaporedji, resetiranje) | `NumberSequence(company, tip, leto, zadnja_stevilka)`: NP uporablja `leto=NULL` in se ne ponastavlja, ST uporablja konkretno leto. |
-| P0-14 (atomarno številčenje) | `select_for_update()` na `NumberSequence` znotraj ločene `transaction.atomic()` za vsak račun. |
+| P0-12/13 (ločeni zaporedji, resetiranje) | `NumberSequence(company, tip, leto, zadnja_stevilka)`: NP interno uporablja `leto=0` in se ne ponastavlja, ST uporablja konkretno koledarsko leto; baza uveljavi enoličnost in veljavne kombinacije tipa ter leta. |
+| P0-14 (atomarno številčenje) | Django 5.2 uporablja SQLite `transaction_mode='IMMEDIATE'`; povečanje zaporedja in potrditev računa sta v isti kratki `transaction.atomic()` brez `select_for_update()`. DB `UniqueConstraint(company, stevilka)` prepreči podvojeno številko istega podjetja; test uporablja ločene povezave oziroma dejanske konkurenčne transakcije. |
 | P0-16 (sorazmerni obračun) | Storitev v `invoicing/services.py` izračuna aktivne dni pogodbe in vsake postavke; testi pokrijejo 28/29/30/31 dni. |
 | P0-18 (indeksacija) | `IndexationEvent` učinkuje praviloma 1. februarja; zamujen vnos ustvari uporabniško potrjene `PoracunIndeksacije` vrstice, ne spreminja izdanih računov. |
 | P0-21 (eSLOG XSD validacija) | `rendering/eslog.py` generira in validira XML; napaka blokira kanal eSLOG v appu `delivery`. |
@@ -330,7 +333,7 @@ Ta razdelek povezuje arhitekturne odločitve neposredno na P0 zahteve, da FSD ne
 | P0-31 (Dropbox posnetki) | Periodična naloga v `archive/backup.py` izdela posnetek baze in arhiva; na macOS jo sproži `launchd`. |
 | P0-33 (CSV slovenska lokalizacija) | `accounting_export/csv_renderer.py` uporablja podpičje, decimalno vejico in UTF-8 BOM. |
 | P0-34 (opravilo na nadzorni plošči) | Pogled v `ui/dashboard.py` ob nalaganju izračuna stanje poročila za tekoči/pretekli mesec. |
-| P0-37 (predpogoji podjetja) | `companies/services.py` pred pripravo preveri uporabnikovo `ddv_razporeditev_potrjena`, veljavno uporabnikovo potrditev vzorca in veljavnega `Signatory`; blokira samo prizadeto podjetje. |
+| P0-37 (predpogoji podjetja) | `companies/services.py` pred pripravo preveri uporabnikovo `ddv_razporeditev_potrjena`, veljavno uporabnikovo potrditev vzorca in veljavnega `Signatory`; blokira samo prizadeto podjetje. Pogojni DB `UniqueConstraint` zagotavlja največ enega trenutnega podpisnika (`velja_do IS NULL`) na podjetje, `clean()` pa ohrani uporabniku prijazno validacijo. |
 | P0-52 (čarovnik prvega zagona) | `ui` orkestrira korake, poslovna popolnost podatkov se preverja v storitvah `companies` in `contracts`, `archive/services.py` pa pred zaključkom neuničujoče preveri dejanski zapis in ponovno branje v lokalnem arhivu, iCloud arhivu in Dropbox mapi. Neuspeh katerekoli lokacije blokira zaključek in produkcijsko izdajo. |
 | P0-53 (vzorčni račun) | `rendering` ima način vzorca z isto PDF-predlogo; ne ustvari `Invoice`, ne dodeli številke, ne pošilja in ne arhivira v uradni arhiv. |
 | P0-54 (ločeni potrditvi) | `companies` hrani ločeni stanji in pravila zastarelosti; storitev pred izdajo preveri obe, brez zunanjega potrjevalca. |
@@ -362,7 +365,7 @@ Datoteka v korenu repozitorija. Spodnja vsebina je usklajena s fizično struktur
 ## Projekt
 Django aplikacija za enega uporabnika, ki teče lokalno na 127.0.0.1.
 SQLite baza. Viri zahtev: 01_PRD_v1.2.md, 03_SAD_v1.2.md in
-04_FSD_Faza1_v1.2.md.
+04_FSD_Faza1_v1.2_FINAL.md.
 
 ## Ukazi
 - Zagon: `python manage.py runserver`
@@ -383,8 +386,9 @@ SQLite baza. Viri zahtev: 01_PRD_v1.2.md, 03_SAD_v1.2.md in
 - Vsak izdani Invoice in InvoiceLine hranita nespremenljiv POSNETEK vrednosti.
 - Žive LeaseItem/VatRegime reference niso vir vrednosti že izdanega računa.
 - Sprememba šifranta ne sme vplivati na izdane račune.
+- Po dodelitvi številke domenske storitve zavrnejo neposredno spremembo ali izbris vsebine računa in njegovih vrstic; brez DB triggerjev.
 - Dodelitev številke je znotraj ločene `transaction.atomic()` za vsak račun.
-- NP uporablja `NumberSequence.leto=NULL`; ST uporablja konkretno leto.
+- NP uporablja `NumberSequence.leto=0`; ST uporablja konkretno koledarsko leto.
 - Januarski račun uporablja staro najemnino; indeks praviloma učinkuje 1. februarja.
 - Zamujen indeks ustvari ločene vrstice poračuna in ne spreminja izdanih računov.
 

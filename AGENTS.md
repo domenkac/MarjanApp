@@ -6,7 +6,7 @@ Projektna dokumentacija je v `docs/`.
 
 * `01_PRD_v1.2.md` — poslovne zahteve, cilji in obseg.
 * `03_SAD_v1.2.md` — arhitektura in tehnične odločitve.
-* `04_FSD_Faza1_v1.2.md` — podrobna specifikacija faze 1.
+* `04_FSD_Faza1_v1.2_FINAL.md` — podrobna specifikacija faze 1.
 
 PRD, SAD in FSD so glavni vir projektnih zahtev.
 
