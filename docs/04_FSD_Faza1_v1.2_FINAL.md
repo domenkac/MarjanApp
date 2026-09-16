@@ -36,7 +36,7 @@ Obseg te specifikacije: `/domain` + `/data` za module `companies`, `catalogs`, `
 | `email_posiljatelj` | EmailField | required |
 | `keychain_kljuc_posiljatelja` | CharField | required — referenca v macOS Keychain (`keyring`), NIKOLI geslo v bazi |
 | `privzeti_dostavni_kanal` | CharField, choices: `PDF`/`ESLOG`/`OBOJE` | default `PDF` |
-| `rok_placila_dni_privzeto` | IntegerField | default (npr. 15) |
+| `rok_placila_dni_privzeto` | IntegerField | default 15 |
 | `ddv_razporeditev_potrjena` | BooleanField | default `False` — uporabnikova potrditev razporeditve enot po DDV režimih za to podjetje, PRD v1.2 §16 in §16.4, P0-37/P0-54 (dopolnilo 19) |
 | `aktivno` | BooleanField | default `True` |
 
@@ -311,6 +311,7 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 |---|---|---|
 | `invoice` | FK → Invoice | |
 | `lease` | FK → Lease | `null=True` — **samo sledljivost**, ni vir vrednosti |
+| `lease_item` | FK → LeaseItem | `null=True`, `on_delete=PROTECT` — **samo sledljivost**, ni vir vrednosti |
 | `opis` | TextField | required, sestavljen niz (PRD §6.11), shranjen dobesedno |
 | `osnova` | DecimalField(10,2) | **posnetek** |
 | `ddv_stopnja` | DecimalField(5,2) | **posnetek** |
@@ -321,6 +322,8 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `ddv_rekap_skupina` | CharField | **posnetek** |
 | `razlog_rocnega_popravka` | TextField | `null=True`, required če je vrednost povožena |
 | `izvirno_izracunana_vrednost` | DecimalField(10,2) | `null=True` |
+
+`lease_item` ne nadomešča posnetnih polj: zgodovinske vrednosti vrstice se vedno berejo iz `opis`, `osnova`, `ddv_*` in drugih posnetkov na `InvoiceLine`. Vsaka vrstica, ki izvira iz `LeaseItem`, mora referenco nastaviti; to vključuje NP in poračun indeksacije. Ročna ST vrstica brez izvora v `LeaseItem` sme imeti `lease_item=NULL`.
 
 ### 1.5 `core`
 
@@ -686,7 +689,7 @@ def izracunaj_indeksacijo(lease_item, nov_indeks: Decimal, danes: date) -> Indek
     )
 ```
 
-**Razveljavitev** (PRD: "mogoča le, dokler po njej ni bil izdan noben račun") je guard v domenski funkciji, ne novo polje: preveri obstoj `InvoiceLine` s to `lease_item` po `datum_uskladitve`; če obstaja, zavrne. Sama razveljavitev piše `AuditLogEntry` z razlogom "Razveljavljena indeksacija #{id}" in povrne `znesek_neto_mesecno`.
+**Razveljavitev** (PRD: "mogoča le, dokler po njej ni bil izdan noben račun") je guard v domenski funkciji, ne novo polje: preveri obstoj `InvoiceLine` z `lease_item=indexation_event.lease_item` po `datum_uskladitve`; vrstice drugih postavk iste pogodbe ne blokirajo razveljavitve. Če taka vrstica obstaja, razveljavitev zavrne. Sama razveljavitev piše `AuditLogEntry` z razlogom "Razveljavljena indeksacija #{id}" in povrne `znesek_neto_mesecno`.
 
 ### 4.1 Konkreten primer — 10 let, 2016–2025
 
@@ -741,7 +744,7 @@ def zaznaj_zamujen_poracun(indexation_event) -> list[PoracunIndeksacije]:
     ).values_list('prizadeto_obdobje_od', flat=True)
 
     prizadete = InvoiceLine.objects.filter(
-        lease=lease_item.lease,
+        lease_item=lease_item,
         invoice__obdobje_od__gte=indexation_event.datum_uskladitve,
         invoice__obdobje_od__lt=date.today().replace(day=1),
         invoice__status__in=['IZBRAN_ZA_POSILJANJE', 'POSLAN'],
@@ -767,7 +770,7 @@ Potrditev (uporabniško da/ne, faza 3) vsak `PoracunIndeksacije` s `status='POTR
 Poračun indeksacije za obdobje 01.02.2026 – 28.02.2026
 ```
 
-Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izračun kot vsaka druga vrstica (§2.1). Več prizadetih mesecev naenkrat (zamuda več kot en mesec) da več ločenih vrstic, vsako s svojim obdobjem.
+Vrstica ohrani `lease_item=indexation_event.lease_item`, podeduje njegov `vat_regime` in gre skozi isti DDV izračun kot vsaka druga vrstica (§2.1). Izračunane vrednosti se shranijo v posnetna polja `InvoiceLine`; poznejše spremembe `LeaseItem` jih ne spreminjajo. Več prizadetih mesecev naenkrat (zamuda več kot en mesec) da več ločenih vrstic, vsako s svojim obdobjem.
 
 ---
 
@@ -908,6 +911,9 @@ Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izra�
 |---|---|
 | `test_sprememba_vatregime_ne_vpliva_na_izdan_racun` | |
 | `test_sprememba_podpisnika_ne_vpliva_na_izdan_racun` | |
+| `test_np_vrstica_iz_leaseitem_hrani_referenco` | `lease_item` je nastavljen |
+| `test_st_vrstica_brez_leaseitem_dovoljena` | `lease_item=NULL` |
+| `test_sprememba_leaseitem_ne_vpliva_na_izdano_vrstico` | Posnetna polja ostanejo vir zgodovinskih vrednosti |
 | `test_neposredna_sprememba_potrjenega_racuna_zavrnjena` | Poslovna/snapshot polja ostanejo nespremenjena |
 | `test_neposredna_sprememba_ali_izbris_vrstice_potrjenega_racuna_zavrnjena` | `InvoiceLine` je po potrditvi nespremenljiv |
 | `test_izbris_originalnega_potrjenega_racuna_zavrnjen` | Popravek je možen samo s storno/dobropisom |
@@ -926,15 +932,18 @@ Vrstica podeduje `vat_regime` od izvirne `LeaseItem` in gre skozi isti DDV izra�
 | `test_prag_spremembe_pod_pragom_ni_izpolnjen` | |
 | `test_samo_navzgor_zavrne_padec` | |
 | `test_manjkajoc_izhodiscni_indeks_zavrnjen_ob_shranjevanju` | `LeaseItem.clean()` |
-| `test_razveljavitev_blokirana_po_izdanem_racunu` | |
+| `test_razveljavitev_blokirana_po_izdanem_racunu` | Blokira samo vrstica istega `lease_item` |
+| `test_razveljavitev_ne_blokira_vrstica_druge_postavke` | Drugi `lease_item` iste pogodbe ne blokira |
 | `test_razveljavitev_povrne_prejsnjo_vrednost` | |
 | `test_datum_uskladitve_privzeto_prvi_februar` | §4 |
 
 **`contracts/tests/test_poracun_indeksacije.py`**
 | Test | Preveri |
 |---|---|
-| `test_zamuja_en_mesec_ena_vrstica_poracuna` | §4.2 |
+| `test_zamuja_en_mesec_ena_vrstica_poracuna` | §4.2; zaznava po konkretnem `lease_item` |
 | `test_zamuja_vec_mesecev_vec_locenih_vrstic` | Vsaka s svojim obdobjem |
+| `test_poracun_ne_uporabi_druge_postavke_iste_pogodbe` | Filter uporablja `lease_item`, ne samo `lease` |
+| `test_poracun_vrstica_ohrani_lease_item` | Vrstica referencira izvorni `LeaseItem` |
 | `test_ni_zamude_ni_poracuna` | Pravočasen vnos → prazen seznam |
 | `test_idempotentnost_ponovnega_zaznavanja` | Že pokrita obdobja se ne podvojijo |
 
@@ -979,7 +988,7 @@ def uvozi_migracijsko_stanje(lease, zadnje_zaracunano_obdobje_od, zadnje_zaracun
     )
     for item in lease.leaseitem_set.filter(datum_prenehanja_postavke__isnull=True):
         InvoiceLine.objects.create(
-            invoice=invoice, lease=lease,
+            invoice=invoice, lease=lease, lease_item=item,
             osnova=item.znesek_neto_mesecno,
             # ddv_* izračunano iz item.vat_regime po §2.1
         )
