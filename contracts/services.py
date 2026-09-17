@@ -1,16 +1,27 @@
-﻿from dataclasses import dataclass
+from dataclasses import dataclass
 from datetime import date
 from decimal import Decimal
 
 from django.contrib.contenttypes.models import ContentType
-from django.db import transaction
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError, transaction
 
 from catalogs.models import VatRegime
+from companies.models import Company
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
+from core.services import StanjeRazlog, StanjeRezultat
 from invoicing.models import Invoice, InvoiceLine
 
-from .models import IndexationEvent, Lease, LeaseItem, PoracunIndeksacije
+from .models import (
+    IndexationEvent,
+    Lease,
+    LeaseItem,
+    PoracunIndeksacije,
+    Property,
+    Tenant,
+    Unit,
+)
 
 
 @dataclass(frozen=True)
@@ -275,3 +286,138 @@ def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent
     dogodek.save(update_fields=["izkljucen", "razlog_izkljucitve"])
     audit.save()
     return dogodek
+
+
+_LASTNI_TIPI = (Property, Unit, Tenant, Lease, LeaseItem)
+_POLJA = {
+    Company: ("aktivno", True),
+    Property: ("aktivna", True),
+    Unit: ("aktivna", True),
+    Tenant: ("aktiven", True),
+    Lease: ("arhivirana", False),
+    LeaseItem: ("arhivirana", False),
+}
+_NADREJENI = {
+    Company: (),
+    Property: ("company",),
+    Unit: ("property",),
+    Tenant: (),
+    Lease: ("unit", "tenant"),
+    LeaseItem: ("lease",),
+}
+
+
+def _svezi_zapis(zapis):
+    if type(zapis) not in _LASTNI_TIPI:
+        raise TypeError("Nepodprt tip poslovnega zapisa.")
+    return type(zapis).objects.filter(pk=zapis.pk).first() if zapis.pk else None
+
+
+def _nadrejeni(zapis):
+    for ime in _NADREJENI[type(zapis)]:
+        nadrejeni = getattr(zapis, ime)
+        yield nadrejeni
+        yield from _nadrejeni(nadrejeni)
+
+
+def _audit(zapis, polje, stara_vrednost, nova_vrednost, razlog):
+    revizija = AuditLogEntry(
+        content_type=ContentType.objects.get_for_model(type(zapis)),
+        object_id=zapis.pk,
+        dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
+        polje=polje,
+        stara_vrednost=str(stara_vrednost),
+        nova_vrednost=str(nova_vrednost),
+        razlog=razlog,
+    )
+    revizija.full_clean()
+    return revizija
+
+
+def arhiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
+    with transaction.atomic():
+        svezi = _svezi_zapis(zapis)
+        if svezi is None:
+            return StanjeRezultat(
+                False, (StanjeRazlog("ZAPIS_NE_OBSTAJA", "Zapis ne obstaja."),)
+            )
+
+        polje, aktivna_vrednost = _POLJA[type(svezi)]
+        if getattr(svezi, polje) != aktivna_vrednost:
+            return StanjeRezultat(
+                False, (StanjeRazlog("ZE_ARHIVIRAN", "Zapis je že arhiviran."),)
+            )
+
+        setattr(svezi, polje, not aktivna_vrednost)
+        revizija = _audit(
+            svezi, polje, aktivna_vrednost, not aktivna_vrednost,
+            "Arhiviranje poslovnega zapisa",
+        )
+        svezi.save(update_fields=[polje])
+        revizija.save()
+        return StanjeRezultat(True)
+
+
+def ponovno_aktiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
+    try:
+        with transaction.atomic():
+            svezi = _svezi_zapis(zapis)
+            if svezi is None:
+                return StanjeRezultat(
+                    False, (StanjeRazlog("ZAPIS_NE_OBSTAJA", "Zapis ne obstaja."),)
+                )
+
+            polje, aktivna_vrednost = _POLJA[type(svezi)]
+            if getattr(svezi, polje) == aktivna_vrednost:
+                return StanjeRezultat(
+                    False, (StanjeRazlog("NI_ARHIVIRAN", "Zapis ni arhiviran."),)
+                )
+
+            razlogi = []
+            for nadrejeni in _nadrejeni(svezi):
+                nadrejeno_polje, nadrejena_aktivna = _POLJA[type(nadrejeni)]
+                if getattr(nadrejeni, nadrejeno_polje) != nadrejena_aktivna:
+                    razlogi.append(
+                        StanjeRazlog(
+                            "NEAKTIVEN_NADREJENI",
+                            f"Nadrejeni zapis {type(nadrejeni).__name__} #{nadrejeni.pk} ni aktiven.",
+                        )
+                    )
+            if razlogi:
+                return StanjeRezultat(False, tuple(razlogi))
+
+            setattr(svezi, polje, aktivna_vrednost)
+            try:
+                svezi.full_clean()
+            except ValidationError as napaka:
+                polja = getattr(napaka, "message_dict", {"__all__": napaka.messages})
+                return StanjeRezultat(
+                    False,
+                    tuple(
+                        StanjeRazlog("NEVELJAVEN_ZAPIS", f"{ime}: {sporocilo}")
+                        for ime, sporocila in polja.items()
+                        for sporocilo in sporocila
+                    ),
+                )
+            except OSError:
+                return StanjeRezultat(
+                    False,
+                    (
+                        StanjeRazlog(
+                            "NEVELJAVEN_ZAPIS", "Povezana datoteka ni dostopna."
+                        ),
+                    ),
+                )
+
+            revizija = _audit(
+                svezi, polje, not aktivna_vrednost, aktivna_vrednost,
+                "Ponovna aktivacija poslovnega zapisa",
+            )
+            svezi.save()
+            revizija.save()
+            return StanjeRezultat(True)
+    except IntegrityError:
+        return StanjeRezultat(
+            False,
+            (StanjeRazlog("OMEJITEV_PODATKOV", "Podatkovna omejitev ni izpolnjena."),),
+        )
