@@ -1,4 +1,4 @@
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
@@ -530,3 +530,135 @@ def test_indexation_event_zahteva_datum_in_razlog_samo_ob_izkljucitvi():
 
     dogodek.razlog_izkljucitve = "Ročna izključitev"
     dogodek.full_clean()
+
+
+def aktivna_postavka():
+    postavka = nova_postavka()
+    postavka.lease.datum_zacetka = date.today() - timedelta(days=30)  # noqa: DTZ011
+    postavka.lease.save(update_fields=["datum_zacetka"])
+    postavka.save()
+    return postavka
+
+
+@pytest.mark.django_db
+def test_aktivna_postavka_blokira_samo_deaktivacijo():
+    rezim = aktivna_postavka().vat_regime
+    rezim.full_clean()
+
+    rezim.aktiven = False
+    with pytest.raises(ValidationError) as napaka:
+        rezim.full_clean()
+
+    assert "aktiven" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("arhiviran", ["postavka", "pogodba"])
+def test_arhivirana_postavka_ali_pogodba_ne_blokira(arhiviran):
+    postavka = aktivna_postavka()
+    zapis = postavka if arhiviran == "postavka" else postavka.lease
+    zapis.arhivirana = True
+    zapis.save(update_fields=["arhivirana"])
+
+    rezim = postavka.vat_regime
+    rezim.aktiven = False
+    rezim.full_clean()
+
+
+@pytest.mark.django_db
+def test_neuporabljen_rezim_se_lahko_deaktivira():
+    rezim = ustvari_rezim()
+    rezim.aktiven = False
+    rezim.full_clean()
+
+
+@pytest.mark.django_db
+def test_ze_neaktiven_rezim_in_reaktivacija_nista_blokirana():
+    rezim = aktivna_postavka().vat_regime
+    VatRegime.objects.filter(pk=rezim.pk).update(aktiven=False)
+    rezim.refresh_from_db()
+    rezim.full_clean()
+
+    rezim.aktiven = True
+    rezim.full_clean()
+
+
+@pytest.mark.django_db
+def test_drug_rezim_na_isti_pogodbi_ne_blokira():
+    postavka = aktivna_postavka()
+    postavka.arhivirana = True
+    postavka.save(update_fields=["arhivirana"])
+    drug_rezim = VatRegime.objects.create(
+        sifra="DDV9",
+        naziv="DDV 9 %",
+        nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
+        stopnja=Decimal("9.50"),
+        rekapitulacijska_skupina="DDV 9 %",
+        velja_od=date(2026, 1, 1),
+    )
+    LeaseItem.objects.create(
+        lease=postavka.lease,
+        vat_regime=drug_rezim,
+        znesek_neto_mesecno=Decimal("100.00"),
+    )
+
+    rezim = postavka.vat_regime
+    rezim.aktiven = False
+    rezim.full_clean()
+
+
+@pytest.mark.django_db
+def test_ena_aktivna_postavka_med_vec_zadostuje_za_blokado():
+    postavka = aktivna_postavka()
+    postavka.arhivirana = True
+    postavka.save(update_fields=["arhivirana"])
+    LeaseItem.objects.create(
+        lease=postavka.lease,
+        vat_regime=postavka.vat_regime,
+        znesek_neto_mesecno=Decimal("100.00"),
+    )
+
+    rezim = postavka.vat_regime
+    rezim.aktiven = False
+    with pytest.raises(ValidationError):
+        rezim.full_clean()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("polje", "odmik", "status", "blokira"),
+    [
+        ("datum_prenehanja_postavke", -1, None, False),
+        ("datum_zacetka_postavke", 1, None, False),
+        ("datum_prenehanja_postavke", 0, None, True),
+        ("datum_prenehanja", -1, Lease.Status.PRENEHALA, False),
+        ("datum_prenehanja", 1, Lease.Status.ODPOVEDANA, True),
+        ("datum_prenehanja", -1, Lease.Status.AKTIVNA, True),
+        ("datum_prenehanja", 1, Lease.Status.PRENEHALA, True),
+        ("datum_konca", -1, Lease.Status.AKTIVNA, False),
+        ("datum_konca", 0, Lease.Status.AKTIVNA, True),
+        ("datum_konca", 1, Lease.Status.AKTIVNA, True),
+        ("datum_zacetka", 1, Lease.Status.AKTIVNA, False),
+        ("datum_zacetka", 0, Lease.Status.AKTIVNA, True),
+    ],
+)
+def test_deaktivacija_uposteva_efektivno_veljavnost(polje, odmik, status, blokira):
+    postavka = aktivna_postavka()
+    zapis = postavka if "postavke" in polje else postavka.lease
+    setattr(zapis, polje, date.today() + timedelta(days=odmik))  # noqa: DTZ011
+    polja = [polje]
+    if status is not None:
+        zapis.status = status
+        polja.append("status")
+    if polje == "datum_konca":
+        zapis.tip_trajanja = Lease.TipTrajanja.DOLOCEN_CAS
+        polja.append("tip_trajanja")
+    zapis.save(update_fields=polja)
+
+    rezim = postavka.vat_regime
+    rezim.aktiven = False
+    if blokira:
+        with pytest.raises(ValidationError):
+            rezim.full_clean()
+    else:
+        rezim.full_clean()

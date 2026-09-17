@@ -1,3 +1,5 @@
+from datetime import date
+
 from django.core.exceptions import ValidationError
 from django.db import models
 
@@ -34,6 +36,24 @@ class VatRegime(models.Model):
             raise ValidationError(
                 {"klavzula": "Klavzula je obvezna za izbrani način obračuna."}
             )
+
+        if (
+            not self.aktiven
+            and self.pk
+            and VatRegime.objects.filter(pk=self.pk, aktiven=True).exists()
+        ):
+            from contracts.services import efektivna_veljavnost_postavke
+
+            danes = date.today()  # noqa: DTZ011
+            postavke = self.leaseitem_set.filter(
+                arhivirana=False, lease__arhivirana=False
+            ).select_related("lease")
+            for postavka in postavke:
+                zacetek, konec = efektivna_veljavnost_postavke(postavka)
+                if zacetek <= danes and (konec is None or danes <= konec):
+                    raise ValidationError(
+                        {"aktiven": "DDV režima ni mogoče deaktivirati med aktivno uporabo."}
+                    )
 
 
 class ServiceCatalogItem(models.Model):
