@@ -1,18 +1,21 @@
 from dataclasses import dataclass
 from datetime import date, timedelta
-from decimal import Decimal
+from decimal import Decimal, InvalidOperation
+from itertools import pairwise
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.db.models import Q
 
 from companies.models import NumberSequence, Signatory
 from companies.services import dodeli_naslednjo_stevilko
-from contracts.models import Lease, LeaseItem
+from contracts.models import IndexationEvent, Lease, LeaseItem
 from contracts.services import (
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
     izracunaj_postavko,
 )
+from core.models import AuditLogEntry
 
 from .models import Invoice, InvoiceLine
 
@@ -239,3 +242,193 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         ]
     )
     return invoice
+
+
+@dataclass(frozen=True)
+class DeltaRazlaga:
+    lease_item_id: int | None
+    koda: str
+    opis: str
+
+
+@dataclass(frozen=True)
+class DeltaPrimerjava:
+    prejsnji_racun_id: int | None
+    obstaja_razlika: bool
+    pojasnjena: bool | None
+    razlage: tuple[DeltaRazlaga, ...]
+
+    @property
+    def ima_prejsnji_racun(self) -> bool:
+        return self.prejsnji_racun_id is not None
+
+
+def _razlozi_delta_postavke(
+    lease_item_id: int | None,
+    stare: list[InvoiceLine],
+    nove: list[InvoiceLine],
+    prejsnji: Invoice,
+    osnutek: Invoice,
+) -> DeltaRazlaga:
+    neznano = DeltaRazlaga(lease_item_id, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
+    if lease_item_id is None:
+        return neznano
+    postavka = LeaseItem.objects.filter(pk=lease_item_id, lease_id=osnutek.lease_id).first()
+    if postavka is None:
+        return neznano
+
+    if not stare and nove:
+        zacetek = postavka.datum_zacetka_postavke
+        if zacetek and prejsnji.obdobje_do < zacetek <= osnutek.obdobje_do:
+            return DeltaRazlaga(
+                lease_item_id, "NOVA_POSTAVKA",
+                f"Nova postavka na pogodbi (dodana {zacetek})",
+            )
+    if stare and not nove:
+        konec = postavka.datum_prenehanja_postavke
+        if konec and prejsnji.obdobje_od <= konec < osnutek.obdobje_od:
+            return DeltaRazlaga(
+                lease_item_id, "PRENEHANJE_POSTAVKE",
+                f"Postavka preneha veljati {konec}",
+            )
+
+    if len(stare) == len(nove) == 1:
+        stara, nova = stare[0], nove[0]
+        isti_ddv = (
+            stara.ddv_stopnja == nova.ddv_stopnja
+            and stara.ddv_nacin_obracuna == nova.ddv_nacin_obracuna
+        )
+        dogodki = list(
+            IndexationEvent.objects.filter(
+                lease_item_id=lease_item_id,
+                izkljucen=False,
+                datum_uskladitve__gt=prejsnji.obdobje_do,
+                datum_uskladitve__lte=osnutek.obdobje_do,
+            ).order_by("datum_uskladitve", "pk")
+        )
+        if (
+            dogodki
+            and not stara.je_sorazmerno
+            and not nova.je_sorazmerno
+            and isti_ddv
+            and stara.osnova == dogodki[0].stara_vrednost
+            and nova.osnova == dogodki[-1].nova_vrednost
+            and all(
+                prvi.nova_vrednost == drugi.stara_vrednost
+                for prvi, drugi in pairwise(dogodki)
+            )
+        ):
+            return DeltaRazlaga(
+                lease_item_id, "INDEKSACIJA",
+                f"Indeksacija postavke z dne {dogodki[-1].datum_uskladitve}",
+            )
+        if stara.je_sorazmerno or nova.je_sorazmerno:
+            return DeltaRazlaga(
+                lease_item_id, "SORAZMERNO", "Sorazmerni obračun postavke"
+            )
+        if stara.osnova == nova.osnova and not isti_ddv:
+            return DeltaRazlaga(
+                lease_item_id, "SPREMEMBA_DDV",
+                f"Sprememba DDV: {stara.ddv_nacin_obracuna} {stara.ddv_stopnja}% → {nova.ddv_nacin_obracuna} {nova.ddv_stopnja}%",
+            )
+
+        revizije = AuditLogEntry.objects.filter(
+            content_type=ContentType.objects.get_for_model(LeaseItem),
+            object_id=lease_item_id,
+            dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
+            polje="znesek_neto_mesecno",
+            created_at__date__gte=prejsnji.datum_izdaje,
+        ).order_by("-created_at", "-pk")
+        for revizija in revizije:
+            try:
+                ujema_se = (
+                    Decimal(revizija.stara_vrednost) == stara.osnova
+                    and Decimal(revizija.nova_vrednost) == nova.osnova
+                )
+            except InvalidOperation:
+                continue
+            if ujema_se and isti_ddv:
+                return DeltaRazlaga(
+                    lease_item_id, "ROCNI_POPRAVEK",
+                    f"Ročni popravek zneska: {revizija.razlog}",
+                )
+    return neznano
+
+
+def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
+    """Primerja shranjene vrstice NP osnutka z zadnjim številčenim NP."""
+    osnutek = Invoice.objects.get(pk=osnutek.pk)
+    if (
+        osnutek.document_type != Invoice.DocumentType.NP
+        or osnutek.status != Invoice.Status.OSNUTEK
+        or osnutek.stevilka is not None
+        or osnutek.lease_id is None
+    ):
+        raise ValueError("Primerjati je mogoče samo neoštevilčen NP osnutek.")
+
+    prejsnji = (
+        Invoice.objects.filter(
+            company_id=osnutek.company_id,
+            lease_id=osnutek.lease_id,
+            document_type=Invoice.DocumentType.NP,
+            stevilka__isnull=False,
+            obdobje_do__lt=osnutek.obdobje_od,
+        )
+        .exclude(stevilka="")
+        .exclude(status=Invoice.Status.ARHIVIRAN_NI_IZDAN)
+        .order_by("-obdobje_do", "-datum_izdaje", "-pk")
+        .first()
+    )
+    if prejsnji is None:
+        return DeltaPrimerjava(
+            None, False, None, (DeltaRazlaga(None, "PRVA_IZDAJA", "Prva izdaja"),)
+        )
+
+    stare_vrstice = list(InvoiceLine.objects.filter(invoice=prejsnji))
+    nove_vrstice = list(InvoiceLine.objects.filter(invoice=osnutek))
+    stari_znesek = (
+        prejsnji.skupaj_z_ddv
+        if prejsnji.skupaj_z_ddv is not None
+        else sum((v.skupaj for v in stare_vrstice), Decimal("0.00"))
+    )
+    novi_znesek = sum((v.skupaj for v in nove_vrstice), Decimal("0.00"))
+    if stari_znesek == novi_znesek:
+        return DeltaPrimerjava(
+            prejsnji.pk, False, None,
+            (DeltaRazlaga(None, "BREZ_RAZLIKE", "Znesek je nespremenjen"),),
+        )
+
+    stare_po_postavki = {}
+    nove_po_postavki = {}
+    for vrstica in stare_vrstice:
+        stare_po_postavki.setdefault(vrstica.lease_item_id, []).append(vrstica)
+    for vrstica in nove_vrstice:
+        nove_po_postavki.setdefault(vrstica.lease_item_id, []).append(vrstica)
+
+    razlage = []
+    for lease_item_id in sorted(
+        stare_po_postavki.keys() | nove_po_postavki.keys(),
+        key=lambda value: (value is None, value or 0),
+    ):
+        stare = stare_po_postavki.get(lease_item_id, [])
+        nove = nove_po_postavki.get(lease_item_id, [])
+        if sum((v.skupaj for v in stare), Decimal("0.00")) != sum(
+            (v.skupaj for v in nove), Decimal("0.00")
+        ):
+            razlage.append(
+                _razlozi_delta_postavke(lease_item_id, stare, nove, prejsnji, osnutek)
+            )
+
+    if stari_znesek != sum((v.skupaj for v in stare_vrstice), Decimal("0.00")):
+        razlage.append(
+            DeltaRazlaga(None, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
+        )
+    if not razlage:
+        razlage.append(
+            DeltaRazlaga(None, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
+        )
+    return DeltaPrimerjava(
+        prejsnji.pk, True,
+        all(razlaga.koda != "VZROK_NEZNAN" for razlaga in razlage),
+        tuple(razlage),
+    )
