@@ -2,10 +2,13 @@
 from datetime import date
 from decimal import Decimal
 
+from django.db import transaction
+
 from catalogs.models import VatRegime
 from core.pravila import zaokrozi
+from invoicing.models import Invoice, InvoiceLine
 
-from .models import Lease, LeaseItem
+from .models import IndexationEvent, Lease, LeaseItem, PoracunIndeksacije
 
 
 @dataclass(frozen=True)
@@ -110,3 +113,123 @@ def izracunaj_postavko(
         ddv_rekap_skupina=rezim.rekapitulacijska_skupina,
         je_sorazmerno=dnevi_najema != dnevi_v_mesecu,
     )
+
+
+@dataclass(frozen=True)
+class IndeksacijaPredlog:
+    pogoj_izpolnjen: bool
+    razlog: str
+    stara_vrednost: Decimal | None = None
+    nova_vrednost: Decimal | None = None
+    odstotek_spremembe: Decimal | None = None
+
+
+def izracunaj_indeksacijo(
+    lease_item: LeaseItem, nov_indeks: Decimal, danes: date
+) -> IndeksacijaPredlog:
+    lease = lease_item.lease
+    if not lease.ima_klavzulo_indeksacije:
+        return IndeksacijaPredlog(False, "Pogodba nima klavzule o indeksaciji")
+
+    zadnji = (
+        IndexationEvent.objects.filter(lease_item=lease_item, izkljucen=False)
+        .order_by("-datum_uskladitve")
+        .first()
+    )
+    zadnji_indeks = zadnji.indeks_vrednost if zadnji else lease_item.indeks_ob_osnovi
+    razmerje = nov_indeks / zadnji_indeks
+    odstotek = (razmerje - 1) * 100
+
+    if (
+        lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
+        and abs(odstotek) < lease.prag_spremembe_odstotek
+    ):
+        return IndeksacijaPredlog(
+            False,
+            f"Sprememba {odstotek:.2f}% pod pragom {lease.prag_spremembe_odstotek}%",
+        )
+
+    nova_vrednost = zaokrozi(lease_item.znesek_neto_mesecno * razmerje)
+    if (
+        lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.SAMO_NAVZGOR
+        and nova_vrednost < lease_item.znesek_neto_mesecno
+    ):
+        return IndeksacijaPredlog(
+            False, "Indeks padel — klavzula dovoljuje samo zvišanje"
+        )
+
+    if lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE:
+        razlog = f"Sprememba {odstotek:.2f}% dosega prag {lease.prag_spremembe_odstotek}%"
+    elif lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.SAMO_NAVZGOR:
+        razlog = "Nova vrednost ni nižja od stare"
+    else:
+        razlog = "Klavzula velja vedno"
+
+    return IndeksacijaPredlog(
+        pogoj_izpolnjen=True,
+        razlog=razlog,
+        stara_vrednost=lease_item.znesek_neto_mesecno,
+        nova_vrednost=nova_vrednost,
+        odstotek_spremembe=odstotek,
+    )
+
+
+def zaznaj_zamujen_poracun(
+    indexation_event: IndexationEvent,
+) -> list[PoracunIndeksacije]:
+    ze_pokrita = PoracunIndeksacije.objects.filter(
+        indexation_event=indexation_event
+    ).values_list("prizadeto_obdobje_od", flat=True)
+    prizadete = (
+        InvoiceLine.objects.filter(
+            lease_item=indexation_event.lease_item,
+            invoice__obdobje_od__gte=indexation_event.datum_uskladitve,
+            invoice__obdobje_od__lt=date.today().replace(day=1),  # noqa: DTZ011
+            invoice__status__in=[
+                Invoice.Status.IZBRAN_ZA_POSILJANJE,
+                Invoice.Status.POSLAN,
+            ],
+        )
+        .exclude(invoice__obdobje_od__in=ze_pokrita)
+        .select_related("invoice")
+    )
+    razlika = indexation_event.nova_vrednost - indexation_event.stara_vrednost
+    return [
+        PoracunIndeksacije(
+            indexation_event=indexation_event,
+            original_invoice=line.invoice,
+            prizadeto_obdobje_od=line.invoice.obdobje_od,
+            prizadeto_obdobje_do=line.invoice.obdobje_do,
+            znesek_poracuna=razlika,
+            status=PoracunIndeksacije.Status.PREDLAGAN,
+        )
+        for line in prizadete
+    ]
+
+
+@transaction.atomic
+def potrdi_indeksacijo(
+    lease_item: LeaseItem, nov_indeks: Decimal, danes: date
+) -> IndexationEvent:
+    postavka = LeaseItem.objects.select_for_update().get(pk=lease_item.pk)
+    predlog = izracunaj_indeksacijo(postavka, nov_indeks, danes)
+    if not predlog.pogoj_izpolnjen:
+        raise ValueError(predlog.razlog)
+
+    event = IndexationEvent(
+        lease_item=postavka,
+        datum_uskladitve=date(danes.year, 2, 1),
+        indeks_vrednost=nov_indeks,
+        stara_vrednost=predlog.stara_vrednost,
+        nova_vrednost=predlog.nova_vrednost,
+    )
+    event.full_clean()
+    event.save()
+    postavka.znesek_neto_mesecno = predlog.nova_vrednost
+    postavka.full_clean()
+    postavka.save(update_fields=["znesek_neto_mesecno"])
+
+    for poracun in zaznaj_zamujen_poracun(event):
+        poracun.full_clean()
+        poracun.save()
+    return event
