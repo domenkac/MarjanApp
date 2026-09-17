@@ -9,6 +9,11 @@ def zaokrozi(vrednost: Decimal) -> Decimal:
     return vrednost.quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
 
 
+def izracunaj_iz_bruto(bruto: Decimal, stopnja: Decimal) -> tuple[Decimal, Decimal]:
+    osnova = zaokrozi(bruto / (1 + stopnja / Decimal(100)))
+    return osnova, bruto - osnova
+
+
 def slugify_naziv(naziv: str) -> str:
     """Company.naziv spremeni v del imena datoteke brez šumnikov in pik."""
     brez_sumnikov = naziv.translate(_SUMNIKI)

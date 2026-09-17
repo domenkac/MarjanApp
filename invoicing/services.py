@@ -130,6 +130,7 @@ def pripravi_osnutek_np(
     for postavka in postavke:
         izracun = izracunaj_postavko(postavka, obdobje_od, obdobje_do)
         if izracun is not None:
+            postavka.full_clean()
             vrstice.append((postavka, izracun))
 
     if not vrstice:

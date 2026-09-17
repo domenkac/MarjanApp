@@ -496,3 +496,15 @@ def test_sprememba_in_dodajanje_vrstice_brez_razloga_ne_obideta_validacije(pogod
     assert vrstica.izvirno_izracunana_vrednost is None
     assert vrstica.razlog_rocnega_popravka is None
     assert InvoiceLine.objects.count() == stevilo_vrstic
+
+
+def test_priprava_zavrne_postavko_brez_obvezne_reference(pogodba):
+    postavka = dodaj_postavko(pogodba)
+    postavka.vat_regime.zahteva_referenco = True
+    postavka.vat_regime.save(update_fields=["zahteva_referenco"])
+
+    with pytest.raises(ValidationError) as error:
+        pripravi(pogodba)
+
+    assert {"referenca_listine", "datum_reference"} <= set(error.value.message_dict)
+    assert not Invoice.objects.exists()
