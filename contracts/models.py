@@ -71,3 +71,117 @@ class Tenant(models.Model):
 
         if napake:
             raise ValidationError(napake)
+
+
+class Lease(models.Model):
+    class TipTrajanja(models.TextChoices):
+        DOLOCEN_CAS = "DOLOCEN_CAS", "Določen čas"
+        NEDOLOCEN_CAS = "NEDOLOCEN_CAS", "Nedoločen čas"
+
+    class Status(models.TextChoices):
+        AKTIVNA = "AKTIVNA", "Aktivna"
+        ODPOVEDANA = "ODPOVEDANA", "Odpovedana"
+        PRENEHALA = "PRENEHALA", "Prenehala"
+
+    class TipPogojaIndeksacije(models.TextChoices):
+        VEDNO = "VEDNO", "Vedno"
+        PRAG_SPREMEMBE = "PRAG_SPREMEMBE", "Prag spremembe"
+        SAMO_NAVZGOR = "SAMO_NAVZGOR", "Samo navzgor"
+
+    unit = models.ForeignKey(Unit, on_delete=models.PROTECT)
+    tenant = models.ForeignKey(Tenant, on_delete=models.PROTECT)
+    oznaka_pogodbe = models.CharField()
+    tip_trajanja = models.CharField(max_length=13, choices=TipTrajanja)
+    datum_zacetka = models.DateField()
+    datum_konca = models.DateField(null=True, blank=True)
+    samodejno_podaljsanje = models.BooleanField(default=False)
+    obdobje_podaljsanja_mesecev = models.IntegerField(null=True, blank=True)
+    odpovedni_rok_mesecev = models.IntegerField(null=True, blank=True)
+    datum_odpovedi = models.DateField(null=True, blank=True)
+    datum_prenehanja = models.DateField(null=True, blank=True)
+    status = models.CharField(
+        max_length=10,
+        choices=Status,
+        default=Status.AKTIVNA,
+    )
+    arhivirana = models.BooleanField(default=False)
+    rok_placila_dni = models.IntegerField()
+    ima_klavzulo_indeksacije = models.BooleanField(default=False)
+    opis_pogoja_indeksacije = models.TextField(blank=True)
+    tip_pogoja_indeksacije = models.CharField(
+        max_length=14,
+        choices=TipPogojaIndeksacije,
+        blank=True,
+    )
+    prag_spremembe_odstotek = models.DecimalField(
+        max_digits=5,
+        decimal_places=2,
+        null=True,
+        blank=True,
+    )
+
+    def _nastavi_privzeti_rok_placila(self):
+        if (
+            self._state.adding
+            and self.rok_placila_dni is None
+            and self.unit_id
+        ):
+            self.rok_placila_dni = (
+                Unit.objects.filter(pk=self.unit_id)
+                .values_list(
+                    "property__company__rok_placila_dni_privzeto",
+                    flat=True,
+                )
+                .first()
+            )
+
+    def clean_fields(self, exclude=None):
+        self._nastavi_privzeti_rok_placila()
+        super().clean_fields(exclude=exclude)
+
+    def clean(self):
+        super().clean()
+        napake = {}
+
+        if (
+            self.tip_trajanja == self.TipTrajanja.DOLOCEN_CAS
+            and self.datum_konca is None
+        ):
+            napake["datum_konca"] = (
+                "Za pogodbo za določen čas je datum konca obvezen."
+            )
+        elif (
+            self.tip_trajanja == self.TipTrajanja.NEDOLOCEN_CAS
+            and self.datum_konca is not None
+        ):
+            napake["datum_konca"] = (
+                "Pogodba za nedoločen čas ne sme imeti datuma konca."
+            )
+
+        if (
+            self.samodejno_podaljsanje
+            and self.obdobje_podaljsanja_mesecev is None
+        ):
+            napake["obdobje_podaljsanja_mesecev"] = (
+                "Obdobje podaljšanja je obvezno pri samodejnem podaljšanju."
+            )
+
+        if self.ima_klavzulo_indeksacije and not self.tip_pogoja_indeksacije:
+            napake["tip_pogoja_indeksacije"] = (
+                "Tip pogoja je obvezen pri indeksacijski klavzuli."
+            )
+        if (
+            self.tip_pogoja_indeksacije
+            == self.TipPogojaIndeksacije.PRAG_SPREMEMBE
+            and self.prag_spremembe_odstotek is None
+        ):
+            napake["prag_spremembe_odstotek"] = (
+                "Prag spremembe je obvezen za ta tip indeksacije."
+            )
+
+        if napake:
+            raise ValidationError(napake)
+
+    def save(self, *args, **kwargs):
+        self._nastavi_privzeti_rok_placila()
+        return super().save(*args, **kwargs)

@@ -1,3 +1,4 @@
+from datetime import date
 from decimal import Decimal
 
 import pytest
@@ -5,7 +6,7 @@ from django.core.exceptions import ValidationError
 from django.db.models.deletion import ProtectedError
 
 from companies.models import Company
-from contracts.models import Property, Tenant, Unit
+from contracts.models import Lease, Property, Tenant, Unit
 
 
 def ustvari_podjetje():
@@ -143,3 +144,138 @@ def test_tenant_tip_je_zaprt_textchoices_nabor_in_email_je_veljaven():
         najemnik.full_clean()
 
     assert {"tip", "email"} <= set(napaka.value.message_dict)
+
+
+
+def ustvari_pogodbeni_stranki(rok_placila_dni=15):
+    company = ustvari_podjetje()
+    company.rok_placila_dni_privzeto = rok_placila_dni
+    company.save(update_fields=["rok_placila_dni_privzeto"])
+    nepremicnina = Property.objects.create(
+        company=company,
+        naziv="Poslovna stavba",
+        naslov="Glavna ulica 1",
+    )
+    enota = Unit.objects.create(
+        property=nepremicnina,
+        oznaka="Pisarna 1",
+        tip_enote=Unit.TipEnote.PISARNA,
+    )
+    najemnik = Tenant.objects.create(**podatki_najemnika())
+    return enota, najemnik
+
+
+def nova_pogodba(**spremembe):
+    enota, najemnik = ustvari_pogodbeni_stranki()
+    podatki = {
+        "unit": enota,
+        "tenant": najemnik,
+        "oznaka_pogodbe": "P-2026-001",
+        "tip_trajanja": Lease.TipTrajanja.NEDOLOCEN_CAS,
+        "datum_zacetka": date(2026, 1, 1),
+    }
+    return Lease(**(podatki | spremembe))
+
+
+@pytest.mark.django_db
+def test_lease_textchoices_in_privzete_vrednosti():
+    assert set(Lease.TipTrajanja.values) == {"DOLOCEN_CAS", "NEDOLOCEN_CAS"}
+    assert set(Lease.Status.values) == {"AKTIVNA", "ODPOVEDANA", "PRENEHALA"}
+    assert set(Lease.TipPogojaIndeksacije.values) == {
+        "VEDNO",
+        "PRAG_SPREMEMBE",
+        "SAMO_NAVZGOR",
+    }
+
+    pogodba = nova_pogodba()
+    pogodba.full_clean()
+
+    assert pogodba.samodejno_podaljsanje is False
+    assert pogodba.status == Lease.Status.AKTIVNA
+    assert pogodba.arhivirana is False
+    assert pogodba.ima_klavzulo_indeksacije is False
+
+
+@pytest.mark.django_db
+def test_rok_placila_ob_ustvarjanju_privzame_podjetje_in_ostane_nastavljiv():
+    enota, najemnik = ustvari_pogodbeni_stranki(rok_placila_dni=22)
+    skupni = {
+        "unit": enota,
+        "tenant": najemnik,
+        "tip_trajanja": Lease.TipTrajanja.NEDOLOCEN_CAS,
+        "datum_zacetka": date(2026, 1, 1),
+    }
+    pogodba = Lease.objects.create(oznaka_pogodbe="P-1", **skupni)
+    rocna = Lease.objects.create(
+        oznaka_pogodbe="P-2", rok_placila_dni=30, **skupni
+    )
+
+    assert pogodba.rok_placila_dni == 22
+    assert rocna.rok_placila_dni == 30
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("tip_trajanja", "datum_konca"),
+    [
+        (Lease.TipTrajanja.DOLOCEN_CAS, None),
+        (Lease.TipTrajanja.NEDOLOCEN_CAS, date(2026, 12, 31)),
+    ],
+)
+def test_tip_trajanja_doloca_datum_konca(tip_trajanja, datum_konca):
+    pogodba = nova_pogodba(
+        tip_trajanja=tip_trajanja,
+        datum_konca=datum_konca,
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        pogodba.full_clean()
+
+    assert "datum_konca" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_samodejno_podaljsanje_zahteva_obdobje():
+    pogodba = nova_pogodba(samodejno_podaljsanje=True)
+
+    with pytest.raises(ValidationError) as napaka:
+        pogodba.full_clean()
+
+    assert "obdobje_podaljsanja_mesecev" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_indeksacijska_klavzula_zahteva_tip_in_prag_kadar_ustreza():
+    brez_tipa = nova_pogodba(ima_klavzulo_indeksacije=True)
+    with pytest.raises(ValidationError) as napaka:
+        brez_tipa.full_clean()
+    assert "tip_pogoja_indeksacije" in napaka.value.message_dict
+
+    brez_tipa.tip_pogoja_indeksacije = (
+        Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
+    )
+    with pytest.raises(ValidationError) as napaka:
+        brez_tipa.full_clean()
+    assert "prag_spremembe_odstotek" in napaka.value.message_dict
+
+    brez_tipa.prag_spremembe_odstotek = Decimal("2.00")
+    brez_tipa.full_clean()
+
+
+@pytest.mark.django_db
+def test_datum_prenehanja_status_arhiviranje_in_poslovna_fk():
+    pogodba = nova_pogodba(
+        datum_prenehanja=date(2026, 6, 30),
+        status=Lease.Status.AKTIVNA,
+        arhivirana=True,
+    )
+    pogodba.full_clean()
+    pogodba.save()
+
+    assert pogodba.status == Lease.Status.AKTIVNA
+    assert pogodba.arhivirana is True
+    with pytest.raises(ProtectedError):
+        pogodba.unit.delete()
+    with pytest.raises(ProtectedError):
+        pogodba.tenant.delete()
+
