@@ -320,6 +320,7 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `ddv_nacin_obracuna` | CharField | **posnetek** |
 | `ddv_klavzula` | TextField | **posnetek** |
 | `ddv_rekap_skupina` | CharField | **posnetek** |
+| `je_sorazmerno` | BooleanField | default `False`; `True` pri sorazmernem obračunu (§2.2) |
 | `razlog_rocnega_popravka` | TextField | `null=True`, required če je vrednost povožena |
 | `izvirno_izracunana_vrednost` | DecimalField(10,2) | `null=True` |
 
