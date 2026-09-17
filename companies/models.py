@@ -1,43 +1,12 @@
-import re
-
 from django.core.exceptions import ValidationError
 from django.db import models
 
-_IBAN_SPECS = """
-AD24 AE23 AL28 AT20 AZ28 BA20 BE16 BG22 BH22 BR29 BY28
-CH21 CR22 CY28 CZ24 DE22 DK18 DO28 EE20 EG29 ES24 FI18
-FO18 FR27 GB22 GE22 GI23 GL18 GR27 GT28 HR21 HU28 IE22
-IL23 IQ23 IS26 IT27 JO30 KZ20 LB28 LC32 LI21 LT20 LU20
-LV21 MC27 MD24 ME22 MK19 MR27 MT31 MU30 NL18 NO15 OM23
-PK24 PL28 PS29 PT25 QA29 RO24 RS22 SA24 SC31 SE24 SI19
-SK24 SM27 ST25 SV28 TL23 TN24 TR26 UA29 VA22 VG24 XK20
-""".split()  # noqa: SIM905
-IBAN_LENGTHS = {item[:2]: int(item[2:]) for item in _IBAN_SPECS}
-
-
-def _veljavna_davcna_stevilka(stevilka):
-    if not (len(stevilka) == 8 and stevilka.isdigit()):
-        return False
-    vsota = sum(int(cifra) * ponder for cifra, ponder in zip(stevilka[:7], range(8, 1, -1)))
-    ostanek = vsota % 11
-    if ostanek == 0:
-        return False
-    kontrolna = 11 - ostanek
-    return (0 if kontrolna == 10 else kontrolna) == int(stevilka[7])
-
-
-def _normaliziraj_iban(iban):
-    return "".join(iban.split()).upper()
-
-
-def _veljaven_iban(iban):
-    if not re.fullmatch(r"[A-Z]{2}\d{2}[A-Z0-9]+", iban):
-        return False
-    if len(iban) != IBAN_LENGTHS.get(iban[:2]):
-        return False
-    prestavljeno = iban[4:] + iban[:4]
-    stevilsko = "".join(znak if znak.isdigit() else str(ord(znak) - 55) for znak in prestavljeno)
-    return int(stevilsko) % 97 == 1
+from core.validators import (
+    normaliziraj_iban,
+    preveri_davcno_stevilko,
+    preveri_iban,
+    preveri_maticno_stevilko,
+)
 
 
 def _veljaven_logotip(logotip):
@@ -81,16 +50,20 @@ class Company(models.Model):
             )
         ]
 
+    def clean_fields(self, exclude=None):
+        self.trr = normaliziraj_iban(self.trr)
+        super().clean_fields(exclude=exclude)
+
     def clean(self):
         super().clean()
         napake = {}
-        self.trr = _normaliziraj_iban(self.trr)
+        self.trr = normaliziraj_iban(self.trr)
 
-        if not _veljavna_davcna_stevilka(self.davcna_stevilka):
+        if not preveri_davcno_stevilko(self.davcna_stevilka):
             napake["davcna_stevilka"] = "Neveljavna davčna številka (napačna kontrolna števka)."
-        if not (len(self.maticna_stevilka) == 10 and self.maticna_stevilka.isdigit()):
+        if not preveri_maticno_stevilko(self.maticna_stevilka):
             napake["maticna_stevilka"] = "Matična številka mora vsebovati natanko 10 mest."
-        if not _veljaven_iban(self.trr):
+        if not preveri_iban(self.trr):
             napake["trr"] = "Neveljaven IBAN."
         if self.logotip and not _veljaven_logotip(self.logotip):
             napake["logotip"] = "Logotip mora biti datoteka JPG ali PNG."
@@ -110,7 +83,7 @@ class Company(models.Model):
             raise ValidationError(napake)
 
     def save(self, *args, **kwargs):
-        self.trr = _normaliziraj_iban(self.trr)
+        self.trr = normaliziraj_iban(self.trr)
         return super().save(*args, **kwargs)
 
 

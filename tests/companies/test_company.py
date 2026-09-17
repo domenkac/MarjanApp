@@ -4,6 +4,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 
 from companies.models import Company
+from core.validators import preveri_iban
 
 
 def podatki_podjetja(**spremembe):
@@ -26,6 +27,9 @@ def test_veljavno_podjetje_in_privzete_vrednosti():
     company = Company(**podatki_podjetja())
 
     company.full_clean()
+    company.logotip = "logo.png"
+    company.save()
+    company.refresh_from_db()
 
     assert company.trr == "SI56191000000123438"
     assert company.ddv_zavezanec is True
@@ -45,13 +49,33 @@ def test_veljaven_tuji_iban_je_dovoljen():
 
 
 @pytest.mark.django_db
+def test_daljsi_tuji_iban_s_presledki_se_normalizira_pred_validacijo_polj():
+    vhod = "mt84 malt 0110 0001 2345 mtlc ast0 01s"
+    assert len(vhod) > 34
+
+    company = Company(**podatki_podjetja(trr=vhod))
+    company.full_clean()
+    company.logotip = "logo.png"
+    company.save()
+    company.refresh_from_db()
+
+    assert company.trr == "MT84MALT011000012345MTLCAST001S"
+    assert preveri_iban(company.trr)
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("polje", "vrednost", "sporocilo"),
     [
+        ("davcna_stevilka", "1501255", "Neveljavna davčna številka"),
+        ("davcna_stevilka", "1501255A", "Neveljavna davčna številka"),
         ("davcna_stevilka", "15012558", "Neveljavna davčna številka"),
+        ("maticna_stevilka", "123456789A", "natanko 10 mest"),
         ("maticna_stevilka", "123456789", "natanko 10 mest"),
         ("trr", "SI56191000000123439", "Neveljaven IBAN"),
         ("trr", "DE8937040044053201300", "Neveljaven IBAN"),
+        ("trr", "SI56-191000000123438", "Neveljaven IBAN"),
+        ("trr", "ZZ56191000000123438", "Neveljaven IBAN"),
     ],
 )
 def test_neveljavni_podatki_so_zavrnjeni(polje, vrednost, sporocilo):

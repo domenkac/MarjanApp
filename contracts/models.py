@@ -6,6 +6,7 @@ from django.db import models
 
 from catalogs.models import VatRegime
 from companies.models import Company
+from core.validators import preveri_davcno_stevilko, preveri_maticno_stevilko
 
 
 class Property(models.Model):
@@ -66,9 +67,11 @@ class Tenant(models.Model):
                 napake["maticna_stevilka"] = (
                     "Za pravno osebo je matična številka obvezna."
                 )
-        if maticna_stevilka and not (
-            len(maticna_stevilka) == 10 and maticna_stevilka.isdigit()
-        ):
+        if davcna_stevilka and not preveri_davcno_stevilko(davcna_stevilka):
+            napake["davcna_stevilka"] = (
+                "Neveljavna davčna številka (napačna kontrolna števka)."
+            )
+        if maticna_stevilka and not preveri_maticno_stevilko(maticna_stevilka):
             napake["maticna_stevilka"] = (
                 "Matična številka mora vsebovati natanko 10 mest."
             )

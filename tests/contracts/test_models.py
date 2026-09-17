@@ -145,6 +145,23 @@ def test_maticna_stevilka_mora_imeti_natanko_deset_mest():
 
 
 @pytest.mark.django_db
+@pytest.mark.parametrize("tip", [Tenant.Tip.PRAVNA_OSEBA, Tenant.Tip.FIZICNA_OSEBA])
+@pytest.mark.parametrize("davcna", ["15012558", "1501255", "1501255A"])
+def test_izpolnjena_neveljavna_davcna_je_zavrnjena_za_oba_tipa(tip, davcna):
+    najemnik = Tenant(**podatki_najemnika(tip=tip, davcna_stevilka=davcna))
+
+    with pytest.raises(ValidationError) as napaka:
+        najemnik.full_clean()
+
+    assert "davcna_stevilka" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_veljavna_davcna_pravne_osebe_je_sprejeta():
+    Tenant(**podatki_najemnika()).full_clean()
+
+
+@pytest.mark.django_db
 def test_tenant_tip_je_zaprt_textchoices_nabor_in_email_je_veljaven():
     assert set(Tenant.Tip.values) == {"PRAVNA_OSEBA", "FIZICNA_OSEBA"}
     najemnik = Tenant(**podatki_najemnika(tip="NEVELJAVNO", email="ni-email"))
