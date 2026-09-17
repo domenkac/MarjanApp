@@ -1,10 +1,11 @@
-﻿import pytest
+import pytest
 from django.core.exceptions import ValidationError
 from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 
 from companies.models import Company
 from core.validators import preveri_iban
+from tests.image_data import slika_bytes
 
 
 def podatki_podjetja(**spremembe):
@@ -14,7 +15,7 @@ def podatki_podjetja(**spremembe):
         "maticna_stevilka": "1234567000",
         "naslov": "Glavna ulica 1",
         "trr": "si56 1910 0000 0123 438",
-        "logotip": SimpleUploadedFile("logo.png", b"\x89PNG\r\n\x1a\n"),
+        "logotip": SimpleUploadedFile("logo.png", slika_bytes()),
         "email_racunovodja": "racunovodja@example.com",
         "email_posiljatelj": "racuni@example.com",
         "keychain_kljuc_posiljatelja": "marjanapp-alfa",

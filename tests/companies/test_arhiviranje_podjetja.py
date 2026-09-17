@@ -12,6 +12,7 @@ from companies.services import (
 from core.models import AuditLogEntry
 from invoicing.models import InvoiceLine
 from invoicing.services import potrdi_osnutek_np, pripravi_osnutek_np
+from tests.image_data import slika_bytes
 from tests.invoicing.test_priprava_np import dodaj_postavko
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
@@ -52,7 +53,7 @@ def test_arhiviranje_podjetja_ohrani_zgodovino_in_izkljuci_novi_np(pogodba):
 def test_veljavna_ponovna_aktivacija_podjetja(pogodba, settings, tmp_path):
     company = pogodba.unit.property.company
     settings.MEDIA_ROOT = tmp_path
-    company.logotip.save("logo.png", ContentFile(b"\x89PNG\r\n\x1a\n"), save=True)
+    company.logotip.save("logo.png", ContentFile(slika_bytes()), save=True)
     assert arhiviraj_poslovni_zapis(company).uspesno is True
 
     rezultat = ponovno_aktiviraj_poslovni_zapis(company)
@@ -71,7 +72,7 @@ def test_veljavna_ponovna_aktivacija_podjetja(pogodba, settings, tmp_path):
 def test_company_konflikt_davcne_blokira_reaktivacijo(pogodba, settings, tmp_path):
     company = pogodba.unit.property.company
     settings.MEDIA_ROOT = tmp_path
-    company.logotip.save("logo.png", ContentFile(b"\x89PNG\r\n\x1a\n"), save=True)
+    company.logotip.save("logo.png", ContentFile(slika_bytes()), save=True)
     assert arhiviraj_poslovni_zapis(company).uspesno is True
     Company.objects.create(
         naziv="Drugo podjetje",

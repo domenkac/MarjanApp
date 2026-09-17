@@ -6,14 +6,9 @@ from core.validators import (
     preveri_davcno_stevilko,
     preveri_iban,
     preveri_maticno_stevilko,
+    preveri_sliko,
+    varno_ime_slike,
 )
-
-
-def _veljaven_logotip(logotip):
-    polozaj = logotip.tell()
-    glava = logotip.read(8)
-    logotip.seek(polozaj)
-    return glava.startswith(b"\xff\xd8\xff") or glava == b"\x89PNG\r\n\x1a\n"
 
 
 class Company(models.Model):
@@ -27,7 +22,7 @@ class Company(models.Model):
     maticna_stevilka = models.CharField(max_length=10)
     naslov = models.CharField()
     trr = models.CharField(max_length=34)
-    logotip = models.FileField()
+    logotip = models.FileField(upload_to=varno_ime_slike, validators=[preveri_sliko])
     ddv_zavezanec = models.BooleanField(default=True)
     email_racunovodja = models.EmailField()
     email_posiljatelj = models.EmailField()
@@ -65,8 +60,6 @@ class Company(models.Model):
             napake["maticna_stevilka"] = "Matična številka mora vsebovati natanko 10 mest."
         if not preveri_iban(self.trr):
             napake["trr"] = "Neveljaven IBAN."
-        if self.logotip and not _veljaven_logotip(self.logotip):
-            napake["logotip"] = "Logotip mora biti datoteka JPG ali PNG."
         if (
             self.aktivno
             and self.davcna_stevilka
@@ -91,7 +84,7 @@ class Signatory(models.Model):
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     ime_priimek = models.CharField()
     funkcija = models.CharField(blank=True)
-    podpis_slika = models.FileField()
+    podpis_slika = models.FileField(upload_to=varno_ime_slike, validators=[preveri_sliko])
     velja_od = models.DateField()
     velja_do = models.DateField(null=True, blank=True)
 
@@ -108,8 +101,6 @@ class Signatory(models.Model):
         super().clean()
         napake = {}
 
-        if self.podpis_slika and not _veljaven_logotip(self.podpis_slika):
-            napake["podpis_slika"] = "Podpis mora biti datoteka JPG ali PNG."
         if (
             self.velja_do is None
             and self.company_id

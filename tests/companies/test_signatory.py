@@ -6,6 +6,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.db import IntegrityError, transaction
 
 from companies.models import Company, Signatory
+from tests.image_data import slika_bytes
 
 
 def ustvari_podjetje(naziv="Alfa d.o.o.", davcna_stevilka="15012557"):
@@ -84,7 +85,7 @@ def test_clean_razumljivo_zavrne_drugega_trenutnega_podpisnika():
         **podatki_podpisnika(
             company,
             ime_priimek="Boris Kralj",
-            podpis_slika=SimpleUploadedFile("podpis.png", b"\x89PNG\r\n\x1a\n"),
+            podpis_slika=SimpleUploadedFile("podpis.png", slika_bytes()),
         )
     )
 

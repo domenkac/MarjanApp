@@ -1,4 +1,9 @@
 import re
+import warnings
+from uuid import uuid4
+
+from django.core.exceptions import ValidationError
+from PIL import Image
 
 _IBAN_SPECS = """
 AD24 AE23 AL28 AT20 AZ28 BA20 BE16 BG22 BH22 BR29 BY28
@@ -44,3 +49,40 @@ def preveri_iban(iban: str) -> bool:
     prestavljeno = iban[4:] + iban[:4]
     stevilsko = "".join(znak if znak.isdigit() else str(ord(znak) - 55) for znak in prestavljeno)
     return int(stevilsko) % 97 == 1
+
+NAJVECJA_SLIKA = 5 * 1024 * 1024
+NAJVEC_PIK = 20_000_000
+
+
+def preveri_sliko(slika):
+    polozaj = slika.tell()
+    try:
+        slika.seek(0, 2)
+        if slika.tell() > NAJVECJA_SLIKA:
+            raise ValidationError("Slika ne sme presegati 5 MiB.")
+        slika.seek(0)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", Image.DecompressionBombWarning)
+            with Image.open(slika) as odprta:
+                if odprta.format not in {"JPEG", "PNG"}:
+                    raise ValidationError("Slika mora biti datoteka JPG ali PNG.")
+                if odprta.width * odprta.height > NAJVEC_PIK:
+                    raise ValidationError("Slika ima prevelike dimenzije.")
+                odprta.verify()
+            slika.seek(0)
+            with Image.open(slika) as odprta:
+                odprta.load()
+    except (
+        OSError,
+        ValueError,
+        SyntaxError,
+        Image.DecompressionBombWarning,
+        Image.DecompressionBombError,
+    ) as napaka:
+        raise ValidationError("Slika mora biti datoteka JPG ali PNG.") from napaka
+    finally:
+        slika.seek(polozaj)
+
+
+def varno_ime_slike(_instance, _filename):
+    return f"slike/{uuid4().hex}"
