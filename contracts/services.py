@@ -5,12 +5,13 @@ from decimal import Decimal
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
+from django.db.models.deletion import ProtectedError
 
 from catalogs.models import VatRegime
 from companies.models import Company
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
-from core.services import StanjeRazlog, StanjeRezultat
+from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
 from invoicing.models import Invoice, InvoiceLine
 
 from .models import (
@@ -19,6 +20,7 @@ from .models import (
     LeaseItem,
     PoracunIndeksacije,
     Property,
+    RecipientContact,
     Tenant,
     Unit,
 )
@@ -100,7 +102,9 @@ def izracunaj_postavko(
     zacetek, konec = efektivna_veljavnost_postavke(postavka)
     dnevi_najema = dnevi_v_obdobju(obdobje_od, obdobje_do, zacetek, konec)
     dnevi_v_mesecu = (obdobje_do - obdobje_od).days + 1
-    osnova = izracunaj_osnovo(postavka.znesek_neto_mesecno, dnevi_najema, dnevi_v_mesecu)
+    osnova = izracunaj_osnovo(
+        postavka.znesek_neto_mesecno, dnevi_najema, dnevi_v_mesecu
+    )
     if osnova is None:
         return None
 
@@ -172,7 +176,9 @@ def izracunaj_indeksacijo(
         )
 
     if lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE:
-        razlog = f"Sprememba {odstotek:.2f}% dosega prag {lease.prag_spremembe_odstotek}%"
+        razlog = (
+            f"Sprememba {odstotek:.2f}% dosega prag {lease.prag_spremembe_odstotek}%"
+        )
     elif lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.SAMO_NAVZGOR:
         razlog = "Nova vrednost ni nižja od stare"
     else:
@@ -350,7 +356,10 @@ def arhiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
 
         setattr(svezi, polje, not aktivna_vrednost)
         revizija = _audit(
-            svezi, polje, aktivna_vrednost, not aktivna_vrednost,
+            svezi,
+            polje,
+            aktivna_vrednost,
+            not aktivna_vrednost,
             "Arhiviranje poslovnega zapisa",
         )
         svezi.save(update_fields=[polje])
@@ -410,7 +419,10 @@ def ponovno_aktiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
                 )
 
             revizija = _audit(
-                svezi, polje, not aktivna_vrednost, aktivna_vrednost,
+                svezi,
+                polje,
+                not aktivna_vrednost,
+                aktivna_vrednost,
                 "Ponovna aktivacija poslovnega zapisa",
             )
             svezi.save()
@@ -421,3 +433,169 @@ def ponovno_aktiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
             False,
             (StanjeRazlog("OMEJITEV_PODATKOV", "Podatkovna omejitev ni izpolnjena."),),
         )
+
+
+def odloci_o_fizicnem_izbrisu(zapis, *, izrecna_potrditev=False) -> IzbrisOdlocitev:
+    svezi = _svezi_zapis(zapis)
+    if svezi is None:
+        return IzbrisOdlocitev(
+            False,
+            (
+                IzbrisRazlog(
+                    "ZAPIS_NE_OBSTAJA",
+                    "Zapis ne obstaja.",
+                    type(zapis).__name__,
+                    0,
+                ),
+            ),
+        )
+
+    reference = {
+        Property: ((Unit, "property_id", "PODREJENI_ZAPISI"),),
+        Unit: ((Lease, "unit_id", "PODREJENI_ZAPISI"),),
+        Tenant: ((Lease, "tenant_id", "PODREJENI_ZAPISI"),),
+        Lease: (
+            (LeaseItem, "lease_id", "PODREJENI_ZAPISI"),
+            (RecipientContact, "lease_id", "PODREJENI_ZAPISI"),
+            (Invoice, "lease_id", "POVEZAN_RACUN"),
+            (InvoiceLine, "lease_id", "POVEZAN_RACUN"),
+        ),
+        LeaseItem: (
+            (InvoiceLine, "lease_item_id", "POVEZAN_RACUN"),
+            (IndexationEvent, "lease_item_id", "POSLOVNA_ZGODOVINA"),
+        ),
+    }
+    razlogi = []
+    for model, polje, koda in reference[type(svezi)]:
+        stevilo = model.objects.filter(**{polje: svezi.pk}).count()
+        if stevilo:
+            razlogi.append(
+                IzbrisRazlog(
+                    koda,
+                    f"Povezani zapisi {model.__name__} preprečujejo izbris.",
+                    model.__name__,
+                    stevilo,
+                )
+            )
+    if type(svezi) is Lease:
+        racuni = Invoice.objects.filter(lease_id=svezi.pk)
+    elif type(svezi) is LeaseItem:
+        racuni = Invoice.objects.filter(
+            pk__in=InvoiceLine.objects.filter(lease_item_id=svezi.pk).values(
+                "invoice_id"
+            )
+        )
+    else:
+        racuni = None
+    if racuni is not None:
+        stevilo = racuni.filter(stevilka__isnull=False).count()
+        if stevilo:
+            razlogi.append(
+                IzbrisRazlog(
+                    "ZAPIS_UPORABLJEN",
+                    "Zapis je bil uporabljen na izdanem računu.",
+                    "Invoice",
+                    stevilo,
+                )
+            )
+        stevilo = racuni.exclude(rendered_pdf_path="", rendered_eslog_path="").count()
+        if stevilo:
+            razlogi.append(
+                IzbrisRazlog(
+                    "POVEZAN_DOKUMENT",
+                    "Ustvarjen dokument preprečuje izbris.",
+                    "Invoice",
+                    stevilo,
+                )
+            )
+        stevilo = racuni.filter(status=Invoice.Status.POSLAN).count()
+        if stevilo:
+            razlogi.append(
+                IzbrisRazlog(
+                    "POVEZANO_POSILJANJE",
+                    "Poslan račun preprečuje izbris.",
+                    "Invoice",
+                    stevilo,
+                )
+            )
+    if type(svezi) is LeaseItem:
+        stevilo = PoracunIndeksacije.objects.filter(
+            indexation_event__lease_item_id=svezi.pk
+        ).count()
+        if stevilo:
+            razlogi.append(
+                IzbrisRazlog(
+                    "POSLOVNA_ZGODOVINA",
+                    "Poračun indeksacije preprečuje izbris.",
+                    "PoracunIndeksacije",
+                    stevilo,
+                )
+            )
+    stevilo = AuditLogEntry.objects.filter(
+        content_type=ContentType.objects.get_for_model(type(svezi)),
+        object_id=svezi.pk,
+    ).count()
+    if stevilo:
+        razlogi.append(
+            IzbrisRazlog(
+                "POSLOVNA_ZGODOVINA",
+                "Revizijska zgodovina preprečuje izbris.",
+                "AuditLogEntry",
+                stevilo,
+            )
+        )
+    if izrecna_potrditev is not True:
+        razlogi.append(
+            IzbrisRazlog(
+                "POTRDITEV_MANJKA",
+                "Uporabnik ni izrecno potrdil fizičnega izbrisa.",
+                "potrditev",
+                0,
+            )
+        )
+    return IzbrisOdlocitev(not razlogi, tuple(razlogi), bool(razlogi))
+
+
+def fizicno_izbrisi_poslovni_zapis(
+    zapis, *, izrecna_potrditev=False
+) -> IzbrisOdlocitev:
+    odlocitev = odloci_o_fizicnem_izbrisu(zapis, izrecna_potrditev=izrecna_potrditev)
+    if not odlocitev.dovoljeno:
+        return odlocitev
+
+    try:
+        with transaction.atomic():
+            odlocitev = odloci_o_fizicnem_izbrisu(
+                zapis, izrecna_potrditev=izrecna_potrditev
+            )
+            if not odlocitev.dovoljeno:
+                return odlocitev
+            svezi = _svezi_zapis(zapis)
+            revizija = AuditLogEntry(
+                content_type=ContentType.objects.get_for_model(type(svezi)),
+                object_id=svezi.pk,
+                dejanje=AuditLogEntry.Dejanje.FIZICNI_IZBRIS,
+                razlog="Uporabnik je izrecno potrdil fizični izbris neuporabljenega zapisa.",
+            )
+            revizija.full_clean()
+            revizija.save()
+            svezi.delete()
+    except (ProtectedError, IntegrityError):
+        odlocitev = odloci_o_fizicnem_izbrisu(
+            zapis, izrecna_potrditev=izrecna_potrditev
+        )
+        if not odlocitev.dovoljeno:
+            return odlocitev
+        return IzbrisOdlocitev(
+            False,
+            (
+                IzbrisRazlog(
+                    "POSLOVNA_POVEZAVA",
+                    "Podatkovna povezava preprečuje izbris.",
+                    "omejitev_podatkov",
+                    1,
+                ),
+            ),
+            True,
+        )
+    return IzbrisOdlocitev(True)
