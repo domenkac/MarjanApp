@@ -83,6 +83,8 @@ models.UniqueConstraint(
 
 DB omejitev prepreči drugega trenutnega podpisnika tudi zunaj obrazcev in ob sočasnem pisanju. `clean()` ostane za zgodnjo, uporabniku prijazno validacijsko napako.
 
+Za pripravo računa mora biti na `datum_izdaje` veljaven natanko en `Signatory`. Nič veljavnih podpisnikov blokira pripravo; več kot eden pomeni nekonsistentno zgodovino in prav tako blokira pripravo, dokler se obdobja veljavnosti ne popravijo. Podpisnika se ne izbira z razreševanjem po najnovejšem `velja_od`.
+
 **NumberSequence**
 
 *Zakaj ločen model, ne polje na `Company`.* Dve neodvisni zaporedji (NP, ST) z različnim obnašanjem resetiranja (§2.4) potrebujeta lasten prostor za `zadnja_stevilka`, ne moreta biti dve polji na `Company`, ker bi to podvojilo logiko za vsak nov tip dokumenta.
@@ -547,10 +549,13 @@ def preveri_predpogoje_podjetja(company, datum_izdaje) -> list[Blokada]:
     blokade = []
     if not company.ddv_razporeditev_potrjena:
         blokade.append(Blokada("DDV razporeditev enot še ni potrjena — Nastavitve"))
-    if not Signatory.objects.filter(company=company, velja_od__lte=datum_izdaje).filter(
+    podpisniki = Signatory.objects.filter(company=company, velja_od__lte=datum_izdaje).filter(
         Q(velja_do__isnull=True) | Q(velja_do__gte=datum_izdaje)
-    ).exists():
+    )
+    if not podpisniki.exists():
         blokade.append(Blokada(f"Ni veljavnega podpisnika za {company.naziv} na {datum_izdaje}"))
+    elif podpisniki.count() > 1:
+        blokade.append(Blokada(f"Več veljavnih podpisnikov za {company.naziv} na {datum_izdaje}; popravite obdobja veljavnosti"))
     return blokade
 ```
 
