@@ -1,10 +1,12 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
+from decimal import Decimal
 
 from django.db import transaction
 from django.db.models import Q
 
-from companies.models import Signatory
+from companies.models import NumberSequence, Signatory
+from companies.services import dodeli_naslednjo_stevilko
 from contracts.models import Lease, LeaseItem
 from contracts.services import (
     dnevi_v_obdobju,
@@ -109,3 +111,43 @@ def pripravi_osnutek_np(
         ]
     )
     return PripravaOsnutka(invoice)
+
+
+@transaction.atomic
+def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
+    invoice = Invoice.objects.get(pk=osnutek.pk)
+    if invoice.document_type != Invoice.DocumentType.NP:
+        raise ValueError("Potrditi je mogoče samo NP osnutek.")
+    if invoice.status != Invoice.Status.OSNUTEK or invoice.stevilka is not None:
+        raise ValueError("Račun ni neoštevilčen osnutek.")
+    if invoice.lease_id is None:
+        raise ValueError("NP osnutek nima pogodbe.")
+
+    vrstice = list(
+        InvoiceLine.objects.filter(invoice=invoice).values_list("osnova", "ddv_znesek")
+    )
+    if not vrstice:
+        raise ValueError("NP osnutek nima vrstic.")
+
+    invoice.osnova_skupaj = sum((osnova for osnova, _ in vrstice), Decimal("0.00"))
+    invoice.ddv_skupaj = sum((ddv for _, ddv in vrstice), Decimal("0.00"))
+    invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
+    invoice.rok_placila = invoice.datum_izdaje + timedelta(
+        days=invoice.lease.rok_placila_dni
+    )
+    zaporedna = dodeli_naslednjo_stevilko(
+        invoice.company, NumberSequence.Tip.NP, invoice.datum_izdaje
+    )
+    invoice.stevilka = f"NP-{zaporedna:05d}"
+    invoice.status = Invoice.Status.IZBRAN_ZA_POSILJANJE
+    invoice.save(
+        update_fields=[
+            "stevilka",
+            "osnova_skupaj",
+            "ddv_skupaj",
+            "skupaj_z_ddv",
+            "rok_placila",
+            "status",
+        ]
+    )
+    return invoice

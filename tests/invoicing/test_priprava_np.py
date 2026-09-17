@@ -5,10 +5,10 @@ from unittest.mock import patch
 import pytest
 
 from catalogs.models import VatRegime
-from companies.models import Company, Signatory
+from companies.models import Company, NumberSequence, Signatory
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine
-from invoicing.services import pripravi_osnutek_np
+from invoicing.services import potrdi_osnutek_np, pripravi_osnutek_np
 
 OBDOBJE_OD = date(2026, 8, 1)
 OBDOBJE_DO = date(2026, 8, 31)
@@ -232,3 +232,138 @@ def test_predpogoji_blokirajo_pripravo(pogodba, razlog):
     with pytest.raises(ValueError):
         pripravi(pogodba)
     assert not Invoice.objects.exists()
+
+
+def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
+    postavka = dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    prvotni_naziv = invoice.prejemnik_naziv
+    prvotna_vrstica = InvoiceLine.objects.get(invoice=invoice)
+    pogodba.tenant.naziv = "Spremenjen najemnik"
+    pogodba.tenant.save(update_fields=["naziv"])
+    postavka.naziv_postavke = "Spremenjena postavka"
+    postavka.save(update_fields=["naziv_postavke"])
+
+    potrjen = potrdi_osnutek_np(invoice)
+
+    assert potrjen.stevilka == "NP-00001"
+    assert potrjen.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert (potrjen.osnova_skupaj, potrjen.ddv_skupaj, potrjen.skupaj_z_ddv) == (
+        Decimal("100.00"), Decimal("22.00"), Decimal("122.00")
+    )
+    assert potrjen.rok_placila == date(2026, 9, 16)
+    assert potrjen.prejemnik_naziv == prvotni_naziv
+    assert InvoiceLine.objects.get(pk=prvotna_vrstica.pk).opis == prvotna_vrstica.opis
+
+
+def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):
+    pogodba.rok_placila_dni = 23
+    pogodba.save(update_fields=["rok_placila_dni"])
+    dodaj_postavko(pogodba)
+    dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00", nacin="OPROSCENO")
+    invoice = pripravi(pogodba).invoice
+
+    potrjen = potrdi_osnutek_np(invoice)
+
+    assert (potrjen.osnova_skupaj, potrjen.ddv_skupaj, potrjen.skupaj_z_ddv) == (
+        Decimal("130.00"), Decimal("22.00"), Decimal("152.00")
+    )
+    assert potrjen.rok_placila == date(2026, 9, 24)
+
+
+def test_potrditvi_porabita_zaporedni_np_stevilki_brez_letnega_reseta(pogodba):
+    dodaj_postavko(pogodba)
+    prvi = pripravi(pogodba).invoice
+    drugi = pripravi(pogodba).invoice
+    drugi.datum_izdaje = date(2027, 1, 1)
+    drugi.save(update_fields=["datum_izdaje"])
+
+    assert potrdi_osnutek_np(prvi).stevilka == "NP-00001"
+    assert potrdi_osnutek_np(drugi).stevilka == "NP-00002"
+    zaporedje = NumberSequence.objects.get(company=prvi.company)
+    assert (zaporedje.tip, zaporedje.leto, zaporedje.zadnja_stevilka) == (
+        NumberSequence.Tip.NP, 0, 2
+    )
+
+
+def test_ponovna_potrditev_ne_porabi_druge_stevilke(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    potrdi_osnutek_np(invoice)
+
+    with pytest.raises(ValueError):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert invoice.stevilka == "NP-00001"
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+
+
+def test_neostevilcen_racun_z_drugim_statusom_je_zavrnjen(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    invoice.status = Invoice.Status.ZA_PONOVNI_PREGLED
+    invoice.save(update_fields=["status"])
+
+    with pytest.raises(ValueError):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+def test_ostevilcen_osnutek_se_ne_popravlja_tiho(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    invoice.stevilka = "NP-00042"
+    invoice.save(update_fields=["stevilka"])
+
+    with pytest.raises(ValueError):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+
+def test_osnutek_brez_vrstic_je_zavrnjen(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    InvoiceLine.objects.filter(invoice=invoice).delete()
+
+    with pytest.raises(ValueError):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+
+def test_drug_tip_dokumenta_je_zavrnjen(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    invoice.document_type = Invoice.DocumentType.ST
+    invoice.save(update_fields=["document_type"])
+
+    with pytest.raises(ValueError):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+
+def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    NumberSequence.objects.create(
+        company=invoice.company, tip=NumberSequence.Tip.NP, leto=0,
+        zadnja_stevilka=41,
+    )
+
+    with (
+        patch.object(Invoice, "save", side_effect=RuntimeError("napaka po dodelitvi")),
+        pytest.raises(RuntimeError, match="napaka po dodelitvi"),
+    ):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert (invoice.stevilka, invoice.status, invoice.rok_placila) == (
+        None, Invoice.Status.OSNUTEK, None
+    )
+    assert (invoice.osnova_skupaj, invoice.ddv_skupaj, invoice.skupaj_z_ddv) == (
+        None, None, None
+    )
+    assert NumberSequence.objects.get().zadnja_stevilka == 41
