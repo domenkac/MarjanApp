@@ -5,8 +5,17 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db.models.deletion import ProtectedError
 
+from catalogs.models import VatRegime
 from companies.models import Company
-from contracts.models import Lease, Property, Tenant, Unit
+from contracts.models import (
+    IndexationEvent,
+    Lease,
+    LeaseItem,
+    Property,
+    RecipientContact,
+    Tenant,
+    Unit,
+)
 
 
 def ustvari_podjetje():
@@ -279,3 +288,228 @@ def test_datum_prenehanja_status_arhiviranje_in_poslovna_fk():
     with pytest.raises(ProtectedError):
         pogodba.tenant.delete()
 
+
+
+def ustvari_rezim(zahteva_referenco=False):
+    return VatRegime.objects.create(
+        sifra="DDV22",
+        naziv="DDV 22 %",
+        nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
+        stopnja=Decimal("22.00"),
+        rekapitulacijska_skupina="DDV 22 %",
+        zahteva_referenco=zahteva_referenco,
+        velja_od=date(2026, 1, 1),
+    )
+
+
+def nova_postavka(zahteva_referenco=False, **spremembe):
+    pogodba = nova_pogodba()
+    pogodba.save()
+    rezim = ustvari_rezim(zahteva_referenco=zahteva_referenco)
+    podatki = {
+        "lease": pogodba,
+        "vat_regime": rezim,
+        "znesek_neto_mesecno": Decimal("500.00"),
+    }
+    return LeaseItem(**(podatki | spremembe))
+
+
+@pytest.mark.django_db
+def test_lease_item_polja_privzete_vrednosti_in_pozitiven_znesek():
+    postavka = nova_postavka()
+    postavka.full_clean()
+    postavka.save()
+
+    assert postavka.naziv_postavke == "Najemnina"
+    assert postavka.arhivirana is False
+    assert postavka.datum_zacetka_postavke is None
+    assert postavka.datum_prenehanja_postavke is None
+    assert not hasattr(postavka, "aktivna")
+    assert (
+        LeaseItem._meta.get_field("znesek_neto_mesecno").max_digits,
+        LeaseItem._meta.get_field("znesek_neto_mesecno").decimal_places,
+    ) == (10, 2)
+
+    postavka.znesek_neto_mesecno = Decimal("0.00")
+    with pytest.raises(ValidationError) as napaka:
+        postavka.full_clean()
+    assert "znesek_neto_mesecno" in napaka.value.message_dict
+
+    postavka.znesek_neto_mesecno = Decimal("-1.00")
+    with pytest.raises(ValidationError):
+        postavka.full_clean()
+
+
+@pytest.mark.django_db
+def test_referenca_listine_in_datum_sta_obvezna_le_ce_ju_zahteva_rezim():
+    postavka = nova_postavka(zahteva_referenco=True)
+
+    with pytest.raises(ValidationError) as napaka:
+        postavka.full_clean()
+    assert {"referenca_listine", "datum_reference"} <= set(
+        napaka.value.message_dict
+    )
+
+    postavka.referenca_listine = "Pogodba P-1"
+    with pytest.raises(ValidationError) as napaka:
+        postavka.full_clean()
+    assert "datum_reference" in napaka.value.message_dict
+
+    postavka.datum_reference = date(2026, 1, 1)
+    postavka.full_clean()
+
+
+@pytest.mark.django_db
+def test_indeksacijska_klavzula_zahteva_oba_izhodiscna_podatka():
+    postavka = nova_postavka()
+    postavka.lease.ima_klavzulo_indeksacije = True
+    postavka.lease.save(update_fields=["ima_klavzulo_indeksacije"])
+
+    with pytest.raises(ValidationError) as napaka:
+        postavka.full_clean()
+    assert {"indeks_ob_osnovi", "datum_osnove_indeksacije"} <= set(
+        napaka.value.message_dict
+    )
+
+    postavka.indeks_ob_osnovi = Decimal("100.000")
+    with pytest.raises(ValidationError) as napaka:
+        postavka.full_clean()
+    assert "datum_osnove_indeksacije" in napaka.value.message_dict
+
+    postavka.datum_osnove_indeksacije = date(2026, 1, 1)
+    postavka.full_clean()
+
+
+@pytest.mark.django_db
+def test_lease_item_datumi_in_arhiv_so_loceni_in_fk_sciteni():
+    postavka = nova_postavka(
+        datum_zacetka_postavke=date(2026, 2, 1),
+        datum_prenehanja_postavke=date(2026, 12, 31),
+        arhivirana=True,
+        osnovna_najemnina_ob_sklenitvi=Decimal("450.00"),
+    )
+    postavka.full_clean()
+    postavka.save()
+
+    assert postavka.arhivirana is True
+    with pytest.raises(ProtectedError):
+        postavka.lease.delete()
+    with pytest.raises(ProtectedError):
+        postavka.vat_regime.delete()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("vloga", RecipientContact.Vloga.values)
+@pytest.mark.parametrize("kanal", RecipientContact.Kanal.values)
+def test_recipient_contact_pravna_oseba_dovoljuje_vse_vloge_in_kanale(
+    vloga, kanal
+):
+    pogodba = nova_pogodba()
+    pogodba.save()
+    kontakt = RecipientContact(
+        lease=pogodba,
+        email="prejemnik@example.com",
+        vloga=vloga,
+        kanal=kanal,
+    )
+
+    kontakt.full_clean()
+    kontakt.save()
+    assert kontakt.aktiven is True
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("kanal", "dovoljen"),
+    [
+        (RecipientContact.Kanal.PDF, True),
+        (RecipientContact.Kanal.ESLOG, False),
+        (RecipientContact.Kanal.OBOJE, False),
+    ],
+)
+def test_recipient_contact_fizicna_oseba_samo_pdf(kanal, dovoljen):
+    pogodba = nova_pogodba()
+    pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
+    pogodba.tenant.save(update_fields=["tip"])
+    pogodba.save()
+    kontakt = RecipientContact(
+        lease=pogodba,
+        email="ana@example.com",
+        vloga=RecipientContact.Vloga.TO,
+        kanal=kanal,
+    )
+
+    if dovoljen:
+        kontakt.full_clean()
+        kontakt.save()
+        with pytest.raises(ProtectedError):
+            pogodba.delete()
+    else:
+        with pytest.raises(ValidationError) as napaka:
+            kontakt.full_clean()
+        assert "kanal" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_recipient_contact_zavrne_neveljavne_izbire_in_email():
+    pogodba = nova_pogodba()
+    pogodba.save()
+    kontakt = RecipientContact(
+        lease=pogodba,
+        email="neveljavno",
+        vloga="NEVELJAVNO",
+        kanal="NEVELJAVNO",
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        kontakt.full_clean()
+
+    assert {"email", "vloga", "kanal"} <= set(napaka.value.message_dict)
+
+
+@pytest.mark.django_db
+def test_indexation_event_polja_privzete_vrednosti_in_fk():
+    postavka = nova_postavka()
+    postavka.save()
+    dogodek = IndexationEvent(
+        lease_item=postavka,
+        datum_uskladitve=date(2026, 2, 1),
+        indeks_vrednost=Decimal("103.200"),
+        stara_vrednost=Decimal("500.00"),
+        nova_vrednost=Decimal("516.00"),
+    )
+    dogodek.full_clean()
+    dogodek.save()
+
+    assert dogodek.izkljucen is False
+    assert (
+        IndexationEvent._meta.get_field("indeks_vrednost").max_digits,
+        IndexationEvent._meta.get_field("indeks_vrednost").decimal_places,
+    ) == (6, 3)
+    with pytest.raises(ProtectedError):
+        postavka.delete()
+
+
+@pytest.mark.django_db
+def test_indexation_event_zahteva_datum_in_razlog_samo_ob_izkljucitvi():
+    postavka = nova_postavka()
+    postavka.save()
+    dogodek = IndexationEvent(
+        lease_item=postavka,
+        indeks_vrednost=Decimal("103.200"),
+        stara_vrednost=Decimal("500.00"),
+        nova_vrednost=Decimal("516.00"),
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        dogodek.full_clean()
+    assert "datum_uskladitve" in napaka.value.message_dict
+
+    dogodek.datum_uskladitve = date(2026, 2, 1)
+    dogodek.izkljucen = True
+    with pytest.raises(ValidationError) as napaka:
+        dogodek.full_clean()
+    assert "razlog_izkljucitve" in napaka.value.message_dict
+
+    dogodek.razlog_izkljucitve = "Ročna izključitev"
+    dogodek.full_clean()
