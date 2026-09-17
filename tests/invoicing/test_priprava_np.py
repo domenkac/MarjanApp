@@ -3,12 +3,22 @@ from decimal import Decimal
 from unittest.mock import patch
 
 import pytest
+from django.core.exceptions import ValidationError
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine
-from invoicing.services import potrdi_osnutek_np, pripravi_osnutek_np
+from invoicing.services import (
+    dodaj_vrstico,
+    izbrisi_racun,
+    izbrisi_vrstico,
+    potrdi_osnutek_np,
+    preveri_uredljiv_osnutek,
+    pripravi_osnutek_np,
+    spremeni_podatke_racuna,
+    spremeni_vrstico,
+)
 
 OBDOBJE_OD = date(2026, 8, 1)
 OBDOBJE_DO = date(2026, 8, 31)
@@ -367,3 +377,122 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
         None, None, None
     )
     assert NumberSequence.objects.get().zadnja_stevilka == 41
+
+
+def test_neostevilcen_osnutek_se_lahko_ureja(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    assert preveri_uredljiv_osnutek(invoice).pk == invoice.pk
+
+    spremeni_podatke_racuna(invoice, prejemnik_naziv="Popravljen najemnik")
+    nova = dodaj_vrstico(
+        invoice,
+        opis="Ročna vrstica",
+        osnova=Decimal("10.00"),
+        ddv_stopnja=Decimal("0.00"),
+        ddv_znesek=Decimal("0.00"),
+        skupaj=Decimal("10.00"),
+        ddv_nacin_obracuna="OPROSCENO",
+        ddv_rekap_skupina="OPROSCENO",
+    )
+    spremeni_vrstico(nova, opis="Popravljena vrstica")
+    nova.refresh_from_db()
+    assert nova.opis == "Popravljena vrstica"
+    izbrisi_vrstico(nova)
+
+    invoice.refresh_from_db()
+    assert invoice.prejemnik_naziv == "Popravljen najemnik"
+    assert not InvoiceLine.objects.filter(pk=nova.pk).exists()
+    with pytest.raises(ValueError, match="poslovna in posnetna polja"):
+        spremeni_podatke_racuna(invoice, status=Invoice.Status.POSLAN)
+    with pytest.raises(ValueError, match="poslovna in posnetna polja"):
+        spremeni_podatke_racuna(invoice, rendered_pdf_path="racun.pdf")
+
+
+def test_ostevilcen_racun_in_vrstice_se_ne_spremenijo(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    potrdi_osnutek_np(invoice)
+    assert invoice.stevilka is None  # preveri tudi zastarel objekt v pomnilniku
+    vrstica = InvoiceLine.objects.get(invoice=invoice)
+    prvotni_naziv = invoice.prejemnik_naziv
+    prvotni_opis = vrstica.opis
+    stevilo_vrstic = InvoiceLine.objects.count()
+
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        preveri_uredljiv_osnutek(invoice)
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        spremeni_podatke_racuna(invoice, prejemnik_naziv="Nedovoljena sprememba")
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        dodaj_vrstico(invoice, opis="Nedovoljena vrstica")
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        spremeni_vrstico(vrstica, opis="Nedovoljena sprememba")
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        izbrisi_vrstico(vrstica)
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        izbrisi_racun(invoice)
+
+    invoice.refresh_from_db()
+    vrstica.refresh_from_db()
+    assert invoice.prejemnik_naziv == prvotni_naziv
+    assert vrstica.opis == prvotni_opis
+    assert InvoiceLine.objects.count() == stevilo_vrstic
+    assert Invoice.objects.filter(pk=invoice.pk).exists()
+
+
+def test_neostevilcen_racun_z_drugim_statusom_ni_uredljiv(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    invoice.status = Invoice.Status.ZA_PONOVNI_PREGLED
+    invoice.save(update_fields=["status"])
+
+    with pytest.raises(ValueError, match="neoštevilčen osnutek"):
+        spremeni_podatke_racuna(invoice, prejemnik_naziv="Nedovoljena sprememba")
+    invoice.refresh_from_db()
+    assert invoice.prejemnik_naziv == "Najemnik d.o.o."
+
+
+@pytest.mark.parametrize(
+    "document_type", [Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS]
+)
+def test_sprememba_racuna_brez_razloga_ne_obide_validacije(pogodba, document_type):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+
+    with pytest.raises(ValidationError) as error:
+        spremeni_podatke_racuna(invoice, document_type=document_type)
+
+    assert "razlog" in error.value.message_dict
+    invoice.refresh_from_db()
+    assert invoice.document_type == Invoice.DocumentType.NP
+    assert invoice.razlog == ""
+
+
+def test_sprememba_in_dodajanje_vrstice_brez_razloga_ne_obideta_validacije(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    vrstica = InvoiceLine.objects.get(invoice=invoice)
+    stevilo_vrstic = InvoiceLine.objects.count()
+
+    with pytest.raises(ValidationError) as error:
+        spremeni_vrstico(vrstica, izvirno_izracunana_vrednost=Decimal("90.00"))
+    assert "razlog_rocnega_popravka" in error.value.message_dict
+
+    with pytest.raises(ValidationError) as error:
+        dodaj_vrstico(
+            invoice,
+            opis="Ročno popravljena vrstica",
+            osnova=Decimal("100.00"),
+            ddv_stopnja=Decimal("22.00"),
+            ddv_znesek=Decimal("22.00"),
+            skupaj=Decimal("122.00"),
+            ddv_nacin_obracuna="OBDAVCENO",
+            ddv_rekap_skupina="OBDAVCENO",
+            izvirno_izracunana_vrednost=Decimal("90.00"),
+        )
+    assert "razlog_rocnega_popravka" in error.value.message_dict
+
+    vrstica.refresh_from_db()
+    assert vrstica.izvirno_izracunana_vrednost is None
+    assert vrstica.razlog_rocnega_popravka is None
+    assert InvoiceLine.objects.count() == stevilo_vrstic
