@@ -291,3 +291,51 @@ class IndexationEvent(models.Model):
             raise ValidationError(
                 {"razlog_izkljucitve": "Razlog izključitve je obvezen."}
             )
+
+
+class PoracunIndeksacije(models.Model):
+    class Status(models.TextChoices):
+        PREDLAGAN = "PREDLAGAN", "Predlagan"
+        POTRJEN = "POTRJEN", "Potrjen"
+        ZAVRNJEN = "ZAVRNJEN", "Zavrnjen"
+
+    indexation_event = models.ForeignKey(IndexationEvent, on_delete=models.PROTECT)
+    original_invoice = models.ForeignKey(
+        "invoicing.Invoice", on_delete=models.PROTECT, related_name="poracuni_izvirnika"
+    )
+    prizadeto_obdobje_od = models.DateField()
+    prizadeto_obdobje_do = models.DateField()
+    znesek_poracuna = models.DecimalField(max_digits=10, decimal_places=2)
+    status = models.CharField(max_length=9, choices=Status, default=Status.PREDLAGAN)
+    razlog_zavrnitve = models.TextField(blank=True)
+    vkljucen_v_racun = models.ForeignKey(
+        "invoicing.Invoice",
+        on_delete=models.PROTECT,
+        null=True,
+        blank=True,
+        related_name="vkljuceni_poracuni",
+    )
+
+    def clean(self):
+        super().clean()
+        if self.status == self.Status.ZAVRNJEN and not (
+            self.razlog_zavrnitve or ""
+        ).strip():
+            raise ValidationError(
+                {"razlog_zavrnitve": "Razlog zavrnitve je obvezen."}
+            )
+
+        if self.indexation_event_id and self.znesek_poracuna is not None:
+            pricakovano = (
+                self.indexation_event.nova_vrednost
+                - self.indexation_event.stara_vrednost
+            )
+            if self.znesek_poracuna != pricakovano:
+                raise ValidationError(
+                    {"znesek_poracuna": "Znesek poračuna se ne ujema z indeksacijo."}
+                )
+
+        if self.original_invoice_id and self.original_invoice.stevilka is None:
+            raise ValidationError(
+                {"original_invoice": "Originalni račun mora biti izdan."}
+            )

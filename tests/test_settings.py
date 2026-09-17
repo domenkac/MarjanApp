@@ -3,6 +3,7 @@
 
 def test_minimal_settings():
     assert settings.INSTALLED_APPS == [
+        "django.contrib.contenttypes",
         "core",
         "companies",
         "catalogs",
