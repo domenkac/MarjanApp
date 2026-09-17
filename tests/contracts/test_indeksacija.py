@@ -2,6 +2,7 @@ from datetime import date, timedelta
 from decimal import Decimal
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 
 from catalogs.models import VatRegime
 from companies.models import Company
@@ -15,6 +16,7 @@ from contracts.models import (
     Tenant,
     Unit,
 )
+from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine
 
 LETO = date.today().year - 1  # noqa: DTZ011
@@ -300,3 +302,132 @@ def test_izpuscen_letnik_samodejno_dohiti(postavka):
         Decimal("100.05"), Decimal("102.55")
     )
     assert postavka.znesek_neto_mesecno == Decimal("102.55")
+
+
+def test_razveljavitev_povrne_vrednost_in_zapise_audit(postavka):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+
+    services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    event.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.05")
+    assert event.izkljucen is True
+    assert event.razlog_izkljucitve
+    assert IndexationEvent.objects.count() == 1
+
+    audit = AuditLogEntry.objects.get()
+    assert audit.content_type == ContentType.objects.get_for_model(LeaseItem)
+    assert audit.object_id == postavka.pk
+    assert audit.dejanje == AuditLogEntry.Dejanje.SPREMEMBA
+    assert audit.polje == "znesek_neto_mesecno"
+    assert (audit.stara_vrednost, audit.nova_vrednost) == ("110.06", "100.05")
+    assert audit.razlog == f"Razveljavljena indeksacija #{event.pk}"
+
+
+@pytest.mark.parametrize(
+    "status", [Invoice.Status.IZBRAN_ZA_POSILJANJE, Invoice.Status.POSLAN]
+)
+def test_razveljavitev_blokirana_po_izdanem_racunu(postavka, status):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    racun_s_postavkami(postavka, status=status)
+
+    with pytest.raises(ValueError):
+        services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    event.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("110.06")
+    assert event.izkljucen is False
+    assert event.razlog_izkljucitve == ""
+    assert not AuditLogEntry.objects.exists()
+
+
+@pytest.mark.parametrize(
+    "status", [Invoice.Status.NAPAKA, Invoice.Status.REZULTAT_NI_ZNAN]
+)
+def test_ostevilcen_racun_blokira_ne_glede_na_status(postavka, status):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    invoice = racun_s_postavkami(postavka, status=status)
+    invoice.stevilka = "NP-00001"
+    invoice.save(update_fields=["stevilka"])
+
+    with pytest.raises(ValueError):
+        services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    event.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("110.06")
+    assert event.izkljucen is False
+    assert not AuditLogEntry.objects.exists()
+
+
+def test_osnutek_brez_stevilke_ne_blokira_razveljavitve(postavka):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    racun_s_postavkami(postavka, status=Invoice.Status.OSNUTEK)
+
+    services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.05")
+
+
+def test_vrstica_druge_postavke_ne_blokira_razveljavitve(postavka):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    druga = LeaseItem.objects.create(
+        lease=postavka.lease,
+        naziv_postavke="Parkiranje",
+        znesek_neto_mesecno=Decimal("25.00"),
+        vat_regime=postavka.vat_regime,
+        indeks_ob_osnovi=Decimal("100.000"),
+        datum_osnove_indeksacije=date(LETO - 1, 1, 1),
+    )
+    racun_s_postavkami(druga)
+
+    services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.05")
+    assert AuditLogEntry.objects.count() == 1
+
+
+def test_razveljavitev_rollback_ob_napaki_audita(postavka, monkeypatch):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+
+    def napaka(_self, *args, **kwargs):
+        raise RuntimeError("napaka audita")
+
+    monkeypatch.setattr(AuditLogEntry, "save", napaka)
+    with pytest.raises(RuntimeError, match="napaka audita"):
+        services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    event.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("110.06")
+    assert event.izkljucen is False
+    assert event.razlog_izkljucitve == ""
+    assert not AuditLogEntry.objects.exists()
+
+
+def test_ze_izkljucen_event_se_ne_razveljavi_ponovno(postavka):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    services.razveljavi_indeksacijo(event)
+
+    with pytest.raises(ValueError):
+        services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    event.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.05")
+    assert event.izkljucen is True
+    assert AuditLogEntry.objects.count() == 1
+
+
+def test_racun_izdan_pred_uskladitvijo_ne_blokira(postavka):
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES)
+    racun_s_postavkami(postavka, mesec=1)
+
+    services.razveljavi_indeksacijo(event)
+
+    postavka.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.05")

@@ -2,9 +2,11 @@
 from datetime import date
 from decimal import Decimal
 
+from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 
 from catalogs.models import VatRegime
+from core.models import AuditLogEntry
 from core.pravila import zaokrozi
 from invoicing.models import Invoice, InvoiceLine
 
@@ -233,3 +235,43 @@ def potrdi_indeksacijo(
         poracun.full_clean()
         poracun.save()
     return event
+
+
+@transaction.atomic
+def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent:
+    dogodek = IndexationEvent.objects.select_for_update().get(pk=indexation_event.pk)
+    if dogodek.izkljucen:
+        raise ValueError("Indeksacija je že razveljavljena.")
+
+    if InvoiceLine.objects.filter(
+        lease_item_id=dogodek.lease_item_id,
+        invoice__datum_izdaje__gte=dogodek.datum_uskladitve,
+        invoice__stevilka__isnull=False,
+    ).exists():
+        raise ValueError("Po uskladitvi je bil izdan račun za to postavko.")
+
+    postavka = LeaseItem.objects.select_for_update().get(pk=dogodek.lease_item_id)
+    prejsnja_vrednost = postavka.znesek_neto_mesecno
+    postavka.znesek_neto_mesecno = dogodek.stara_vrednost
+    postavka.full_clean()
+
+    razlog = f"Razveljavljena indeksacija #{dogodek.pk}"
+    dogodek.izkljucen = True
+    dogodek.razlog_izkljucitve = razlog
+    dogodek.full_clean()
+
+    audit = AuditLogEntry(
+        content_type=ContentType.objects.get_for_model(LeaseItem),
+        object_id=postavka.pk,
+        dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
+        polje="znesek_neto_mesecno",
+        stara_vrednost=str(prejsnja_vrednost),
+        nova_vrednost=str(dogodek.stara_vrednost),
+        razlog=razlog,
+    )
+    audit.full_clean()
+
+    postavka.save(update_fields=["znesek_neto_mesecno"])
+    dogodek.save(update_fields=["izkljucen", "razlog_izkljucitve"])
+    audit.save()
+    return dogodek
