@@ -1,9 +1,11 @@
+from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Q
 
@@ -191,9 +193,21 @@ def spremeni_podatke_racuna(invoice: Invoice, **spremembe) -> Invoice:
     svezi = preveri_uredljiv_osnutek(invoice)
     if not spremembe or not spremembe.keys() <= POSLOVNA_POLJA_RACUNA:
         raise ValueError("Dovoljena so samo poslovna in posnetna polja računa.")
+    if svezi.document_type in (
+        Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS
+    ) and not spremembe.keys() <= {"datum_izdaje", "razlog"}:
+        raise ValueError("Korekcijski osnutek dovoljuje samo datum izdaje in razlog.")
     for polje, vrednost in spremembe.items():
         setattr(svezi, polje, vrednost)
     svezi.full_clean()
+    if (
+        "document_type" in spremembe
+        and svezi.document_type in (
+            Invoice.DocumentType.STORNO,
+            Invoice.DocumentType.DOBROPIS,
+        )
+    ):
+        raise ValueError("Korekcijski osnutek se ustvari z namensko storitvijo.")
     svezi.save(update_fields=spremembe)
     return svezi
 
@@ -203,7 +217,11 @@ def dodaj_vrstico(invoice: Invoice, **podatki) -> InvoiceLine:
     svezi = preveri_uredljiv_osnutek(invoice)
     if "invoice" in podatki or "invoice_id" in podatki:
         raise ValueError("Račun vrstice določa argument invoice.")
+    if svezi.document_type == Invoice.DocumentType.STORNO:
+        raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
     vrstica = InvoiceLine(invoice=svezi, **podatki)
+    if svezi.document_type == Invoice.DocumentType.DOBROPIS:
+        _preveri_rocno_vrstico_dobropisa(vrstica)
     vrstica.full_clean()
     vrstica.save()
     return vrstica
@@ -212,11 +230,15 @@ def dodaj_vrstico(invoice: Invoice, **podatki) -> InvoiceLine:
 @transaction.atomic
 def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
     sveza = InvoiceLine.objects.get(pk=vrstica.pk)
-    preveri_uredljiv_osnutek(sveza.invoice)
+    invoice = preveri_uredljiv_osnutek(sveza.invoice)
+    if invoice.document_type == Invoice.DocumentType.STORNO:
+        raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
     if not spremembe or not spremembe.keys() <= POSLOVNA_POLJA_VRSTICE:
         raise ValueError("Dovoljena so samo poslovna in posnetna polja vrstice.")
     for polje, vrednost in spremembe.items():
         setattr(sveza, polje, vrednost)
+    if invoice.document_type == Invoice.DocumentType.DOBROPIS:
+        _preveri_rocno_vrstico_dobropisa(sveza)
     sveza.full_clean()
     sveza.save(update_fields=spremembe)
     return sveza
@@ -225,7 +247,9 @@ def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
 @transaction.atomic
 def izbrisi_vrstico(vrstica: InvoiceLine) -> None:
     sveza = InvoiceLine.objects.get(pk=vrstica.pk)
-    preveri_uredljiv_osnutek(sveza.invoice)
+    invoice = preveri_uredljiv_osnutek(sveza.invoice)
+    if invoice.document_type == Invoice.DocumentType.STORNO:
+        raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
     sveza.delete()
 
 
@@ -316,6 +340,163 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
             "status",
         ]
     )
+    return invoice
+
+
+_SNAPSHOT_POLJA_KOREKCIJE = (
+    "prejemnik_naziv", "prejemnik_naslov",
+    "prejemnik_davcna_stevilka", "prejemnik_maticna_stevilka",
+    "izdajatelj_naziv", "izdajatelj_naslov",
+    "izdajatelj_davcna_stevilka", "izdajatelj_maticna_stevilka",
+    "izdajatelj_trr", "izdajatelj_podpisnik_ime",
+    "izdajatelj_podpisnik_funkcija", "izdajatelj_podpisnik_slika_pot",
+    "oznaka_pogodbe", "objekt_naziv",
+)
+
+
+def _preveri_izvirnik_korekcije(original: Invoice) -> Invoice:
+    original = Invoice.objects.get(pk=original.pk)
+    if not original.stevilka:
+        raise ValueError("Izvirnik ni izdan.")
+    if original.document_type not in (Invoice.DocumentType.NP, Invoice.DocumentType.ST):
+        raise ValueError("Korekcija zahteva izvirni NP ali ST.")
+    return original
+
+
+def _preveri_rocno_vrstico_dobropisa(vrstica: InvoiceLine) -> None:
+    napake = {}
+    for polje in ("osnova", "ddv_stopnja", "ddv_znesek", "skupaj"):
+        vrednost = getattr(vrstica, polje)
+        if (
+            not isinstance(vrednost, Decimal)
+            or not vrednost.is_finite()
+            or vrednost.as_tuple().exponent < -2
+        ):
+            napake[polje] = "Zahtevana je končna Decimal vrednost z največ dvema decimalkama."
+    if not napake and vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
+        napake["skupaj"] = "Skupaj mora biti vsota osnove in DDV."
+    if napake:
+        raise ValidationError(napake)
+
+
+def _storno_vrstica(originalna: InvoiceLine, storno: Invoice) -> InvoiceLine:
+    return InvoiceLine(
+        invoice=storno,
+        lease_id=originalna.lease_id,
+        lease_item_id=originalna.lease_item_id,
+        opis=originalna.opis,
+        osnova=-originalna.osnova,
+        ddv_stopnja=originalna.ddv_stopnja,
+        ddv_znesek=-originalna.ddv_znesek,
+        skupaj=-originalna.skupaj,
+        ddv_nacin_obracuna=originalna.ddv_nacin_obracuna,
+        ddv_klavzula=originalna.ddv_klavzula,
+        ddv_rekap_skupina=originalna.ddv_rekap_skupina,
+        je_sorazmerno=originalna.je_sorazmerno,
+        razlog_rocnega_popravka=originalna.razlog_rocnega_popravka,
+        izvirno_izracunana_vrednost=(
+            -originalna.izvirno_izracunana_vrednost
+            if originalna.izvirno_izracunana_vrednost is not None
+            else None
+        ),
+    )
+
+
+def _kljuc_storno_vrstice(vrstica: InvoiceLine) -> tuple:
+    return (
+        vrstica.lease_id, vrstica.lease_item_id, vrstica.opis,
+        vrstica.osnova, vrstica.ddv_stopnja, vrstica.ddv_znesek,
+        vrstica.skupaj, vrstica.ddv_nacin_obracuna, vrstica.ddv_klavzula,
+        vrstica.ddv_rekap_skupina, vrstica.je_sorazmerno,
+        vrstica.razlog_rocnega_popravka, vrstica.izvirno_izracunana_vrednost,
+    )
+
+
+@transaction.atomic
+def pripravi_korekcijski_osnutek(
+    original: Invoice, document_type: str, razlog: str, datum_izdaje: date
+) -> Invoice:
+    if document_type not in (
+        Invoice.DocumentType.STORNO,
+        Invoice.DocumentType.DOBROPIS,
+    ):
+        raise ValueError("Dovoljen je samo storno ali dobropis.")
+    original = _preveri_izvirnik_korekcije(original)
+    invoice = Invoice(
+        company_id=original.company_id,
+        lease_id=original.lease_id,
+        document_type=document_type,
+        povezan_racun=original,
+        razlog=razlog,
+        datum_izdaje=datum_izdaje,
+        obdobje_od=original.obdobje_od,
+        obdobje_do=original.obdobje_do,
+        status=Invoice.Status.OSNUTEK,
+        **{polje: getattr(original, polje) for polje in _SNAPSHOT_POLJA_KOREKCIJE},
+    )
+    invoice.full_clean()
+    invoice.save()
+    if document_type == Invoice.DocumentType.STORNO:
+        vrstice = [
+            _storno_vrstica(vrstica, invoice)
+            for vrstica in InvoiceLine.objects.filter(invoice=original).order_by("pk")
+        ]
+        for vrstica in vrstice:
+            vrstica.full_clean()
+        InvoiceLine.objects.bulk_create(vrstice)
+    return invoice
+
+
+@transaction.atomic
+def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
+    invoice = preveri_uredljiv_osnutek(osnutek)
+    if invoice.document_type not in (
+        Invoice.DocumentType.STORNO,
+        Invoice.DocumentType.DOBROPIS,
+    ) or invoice.povezan_racun_id is None:
+        raise ValueError("Račun ni korekcijski osnutek.")
+    original = _preveri_izvirnik_korekcije(invoice.povezan_racun)
+    if (
+        invoice.company_id != original.company_id
+        or invoice.lease_id != original.lease_id
+        or invoice.obdobje_od != original.obdobje_od
+        or invoice.obdobje_do != original.obdobje_do
+        or any(
+            getattr(invoice, polje) != getattr(original, polje)
+            for polje in _SNAPSHOT_POLJA_KOREKCIJE
+        )
+    ):
+        raise ValueError("Posnetek korekcije se ne ujema z izvirnikom.")
+    invoice.full_clean()
+    vrstice = list(InvoiceLine.objects.filter(invoice=invoice).order_by("pk"))
+    if not vrstice:
+        raise ValueError("Korekcijski osnutek nima vrstic.")
+    if invoice.document_type == Invoice.DocumentType.STORNO:
+        pricakovane = Counter(
+            _kljuc_storno_vrstice(_storno_vrstica(v, invoice))
+            for v in InvoiceLine.objects.filter(invoice=original)
+        )
+        dejanske = Counter(_kljuc_storno_vrstice(v) for v in vrstice)
+        if pricakovane != dejanske:
+            raise ValueError("Vrstice storna se ne ujemajo z izvirnikom.")
+    else:
+        for vrstica in vrstice:
+            _preveri_rocno_vrstico_dobropisa(vrstica)
+            vrstica.full_clean()
+
+    invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
+    invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
+    invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
+    tip = original.document_type
+    zaporedna = dodeli_naslednjo_stevilko(invoice.company, tip, invoice.datum_izdaje)
+    if tip == Invoice.DocumentType.NP:
+        invoice.stevilka = f"NP-{zaporedna:05d}"
+    else:
+        invoice.stevilka = f"ST-{invoice.datum_izdaje.year}-{zaporedna:04d}"
+    invoice.status = Invoice.Status.IZBRAN_ZA_POSILJANJE
+    invoice.save(update_fields=[
+        "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv", "stevilka", "status"
+    ])
     return invoice
 
 
