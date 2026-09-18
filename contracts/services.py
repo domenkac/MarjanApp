@@ -132,6 +132,45 @@ def izracunaj_postavko(
     )
 
 
+_ROCNO_UREDLJIVA_POLJA_POSTAVKE = frozenset(
+    {
+        "znesek_neto_mesecno",
+        "datum_zacetka_postavke",
+        "datum_prenehanja_postavke",
+    }
+)
+
+
+@transaction.atomic
+def rocno_popravi_postavko(
+    postavka: LeaseItem, *, razlog: str, **spremembe
+) -> LeaseItem:
+    if not isinstance(razlog, str) or not razlog.strip():
+        raise ValidationError({"razlog": "Razlog ročnega popravka je obvezen."})
+    if spremembe.keys() - _ROCNO_UREDLJIVA_POLJA_POSTAVKE:
+        raise ValueError("Nedovoljena poslovna polja za ročni popravek postavke.")
+
+    sveza = LeaseItem.objects.get(pk=postavka.pk)
+    stare_vrednosti = {polje: getattr(sveza, polje) for polje in spremembe}
+    for polje, vrednost in spremembe.items():
+        polje_modela = LeaseItem._meta.get_field(polje)
+        setattr(sveza, polje, polje_modela.to_python(vrednost))
+
+    sveza.full_clean()
+    spremenjena = [
+        polje for polje, stara in stare_vrednosti.items()
+        if stara != getattr(sveza, polje)
+    ]
+    if spremenjena:
+        sveza.save(update_fields=spremenjena)
+        sveza.refresh_from_db(fields=spremenjena)
+        for polje in spremenjena:
+            _audit(
+                sveza, polje, stare_vrednosti[polje], getattr(sveza, polje), razlog
+            ).save()
+    return sveza
+
+
 @dataclass(frozen=True)
 class IndeksacijaPredlog:
     pogoj_izpolnjen: bool

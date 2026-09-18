@@ -4,6 +4,7 @@ from decimal import Decimal
 from django.contrib.contenttypes.models import ContentType
 
 from contracts.models import IndexationEvent, LeaseItem
+from contracts.services import rocno_popravi_postavko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
@@ -73,12 +74,8 @@ def test_znesek_pojasnjen_z_novo_postavko(pogodba):
 def test_znesek_pojasnjen_z_rocnim_popravkom(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
-    item.znesek_neto_mesecno = Decimal("120.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
-    AuditLogEntry.objects.create(
-        content_type=ContentType.objects.get_for_model(LeaseItem),
-        object_id=item.pk, polje="znesek_neto_mesecno",
-        stara_vrednost="100.00", nova_vrednost="120.00", razlog="Ročni popravek",
+    rocno_popravi_postavko(
+        item, razlog="Ročni popravek", znesek_neto_mesecno=Decimal("120.00")
     )
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
