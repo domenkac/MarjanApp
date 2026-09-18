@@ -7,6 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.db.models import Q
 
+from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from companies.services import dodeli_naslednjo_stevilko
 from contracts.models import IndexationEvent, Lease, LeaseItem
@@ -16,8 +17,77 @@ from contracts.services import (
     izracunaj_postavko,
 )
 from core.models import AuditLogEntry
+from core.pravila import zaokrozi
 
 from .models import Invoice, InvoiceLine
+
+MIGRACIJSKI_RAZLOG = "Migracijski zapis – uvoz stanja pred prehodom na aplikacijo"
+
+
+@transaction.atomic
+def uvozi_migracijsko_stanje(
+    lease: Lease,
+    zadnje_zaracunano_obdobje_od: date,
+    zadnje_zaracunano_obdobje_do: date,
+) -> Invoice:
+    if zadnje_zaracunano_obdobje_od > zadnje_zaracunano_obdobje_do:
+        raise ValueError("Začetek obdobja mora biti pred koncem obdobja.")
+
+    lease = Lease.objects.select_for_update().select_related(
+        "unit__property__company"
+    ).get(pk=lease.pk)
+    if Invoice.objects.filter(
+        lease=lease,
+        document_type=Invoice.DocumentType.NP,
+        status=Invoice.Status.ARHIVIRAN_NI_IZDAN,
+        razlog_arhiviranja=MIGRACIJSKI_RAZLOG,
+    ).exists():
+        raise ValueError("Migracijsko stanje za pogodbo je že uvoženo.")
+
+    invoice = Invoice.objects.create(
+        company=lease.unit.property.company,
+        document_type=Invoice.DocumentType.NP,
+        lease=lease,
+        status=Invoice.Status.ARHIVIRAN_NI_IZDAN,
+        razlog_arhiviranja=MIGRACIJSKI_RAZLOG,
+        datum_izdaje=zadnje_zaracunano_obdobje_od,
+        obdobje_od=zadnje_zaracunano_obdobje_od,
+        obdobje_do=zadnje_zaracunano_obdobje_do,
+    )
+    vrstice = []
+    for item in LeaseItem.objects.filter(
+        lease=lease, datum_prenehanja_postavke__isnull=True
+    ).select_related("vat_regime"):
+        item.full_clean()
+        rezim = item.vat_regime
+        osnova = item.znesek_neto_mesecno
+        if rezim.nacin_obracuna == VatRegime.NacinObracuna.OBDAVCENO:
+            ddv_znesek = zaokrozi(osnova * rezim.stopnja / Decimal(100))
+        elif rezim.nacin_obracuna in {
+            VatRegime.NacinObracuna.OPROSCENO,
+            VatRegime.NacinObracuna.NI_PREDMET,
+            VatRegime.NacinObracuna.OBRNJENA_DAVCNA,
+        }:
+            ddv_znesek = Decimal("0.00")
+        else:
+            raise ValueError(f"Neznan način obračuna DDV: {rezim.nacin_obracuna}")
+        vrstica = InvoiceLine(
+            invoice=invoice,
+            lease=lease,
+            lease_item=item,
+            opis=item.naziv_postavke,
+            osnova=osnova,
+            ddv_stopnja=rezim.stopnja,
+            ddv_znesek=ddv_znesek,
+            skupaj=osnova + ddv_znesek,
+            ddv_nacin_obracuna=rezim.nacin_obracuna,
+            ddv_klavzula=rezim.klavzula,
+            ddv_rekap_skupina=rezim.rekapitulacijska_skupina,
+        )
+        vrstica.full_clean()
+        vrstice.append(vrstica)
+    InvoiceLine.objects.bulk_create(vrstice)
+    return invoice
 
 
 @dataclass(frozen=True)
@@ -357,7 +427,7 @@ def _razlozi_delta_postavke(
 
 
 def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
-    """Primerja shranjene vrstice NP osnutka z zadnjim številčenim NP."""
+    """Primerja NP osnutek z zadnjim izdanim ali migracijskim stanjem."""
     osnutek = Invoice.objects.get(pk=osnutek.pk)
     if (
         osnutek.document_type != Invoice.DocumentType.NP
@@ -380,11 +450,20 @@ def _primerjaj_delta_np(
             company_id=osnutek.company_id,
             lease_id=osnutek.lease_id,
             document_type=Invoice.DocumentType.NP,
-            stevilka__isnull=False,
             obdobje_do__lt=osnutek.obdobje_od,
         )
-        .exclude(stevilka="")
-        .exclude(status=Invoice.Status.ARHIVIRAN_NI_IZDAN)
+        .filter(
+            (
+                Q(stevilka__isnull=False)
+                & ~Q(stevilka="")
+                & ~Q(status=Invoice.Status.ARHIVIRAN_NI_IZDAN)
+            )
+            | Q(
+                stevilka__isnull=True,
+                status=Invoice.Status.ARHIVIRAN_NI_IZDAN,
+                razlog_arhiviranja=MIGRACIJSKI_RAZLOG,
+            )
+        )
         .order_by("-obdobje_do", "-datum_izdaje", "-pk")
         .first()
     )
