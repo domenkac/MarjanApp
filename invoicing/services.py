@@ -7,7 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.db import transaction
 from django.db.models import Q
 
-from companies.models import NumberSequence, Signatory
+from companies.models import Company, NumberSequence, Signatory
 from companies.services import dodeli_naslednjo_stevilko
 from contracts.models import IndexationEvent, Lease, LeaseItem
 from contracts.services import (
@@ -24,6 +24,54 @@ from .models import Invoice, InvoiceLine
 class PripravaOsnutka:
     invoice: Invoice | None
     razlog_neizdaje: str | None = None
+
+
+@dataclass(frozen=True)
+class Blokada:
+    koda: str
+    sporocilo: str
+
+
+@dataclass(frozen=True)
+class RacunKandidat:
+    vrstice: tuple[InvoiceLine, ...]
+    skupaj_z_ddv: Decimal
+    se_izda: bool
+    izjeme: tuple["DeltaRazlaga", ...]
+    razlog_neizdaje: str | None = None
+
+
+def _podpisniki_na_dan(company: Company, datum_izdaje: date):
+    return Signatory.objects.filter(
+        company=company, velja_od__lte=datum_izdaje
+    ).filter(Q(velja_do__isnull=True) | Q(velja_do__gte=datum_izdaje))
+
+
+def preveri_predpogoje_podjetja(
+    company: Company, datum_izdaje: date
+) -> list[Blokada]:
+    blokade = []
+    if not company.ddv_razporeditev_potrjena:
+        blokade.append(
+            Blokada("DDV_NEPOTRJEN", "DDV razporeditev enot še ni potrjena — Nastavitve")
+        )
+    podpisniki = list(_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2])
+    if not podpisniki:
+        blokade.append(
+            Blokada(
+                "PODPISNIK_MANJKA",
+                f"Ni veljavnega podpisnika za {company.naziv} na {datum_izdaje}",
+            )
+        )
+    elif len(podpisniki) > 1:
+        blokade.append(
+            Blokada(
+                "PODPISNIK_PREKRIVANJE",
+                f"Več veljavnih podpisnikov za {company.naziv} na {datum_izdaje}; "
+                "popravite obdobja veljavnosti",
+            )
+        )
+    return blokade
 
 
 POSLOVNA_POLJA_RACUNA = {
@@ -120,49 +168,18 @@ def izbrisi_racun(invoice: Invoice) -> None:
 def pripravi_osnutek_np(
     lease: Lease, obdobje_od: date, obdobje_do: date, datum_izdaje: date
 ) -> PripravaOsnutka:
-    if obdobje_od > obdobje_do:
-        raise ValueError("Začetek obdobja mora biti pred koncem obdobja.")
+    kandidat = izracunaj_kandidata(lease, obdobje_od, obdobje_do, datum_izdaje)
+    if not kandidat.se_izda:
+        if kandidat.izjeme:
+            raise ValueError(kandidat.razlog_neizdaje)
+        return PripravaOsnutka(None, kandidat.razlog_neizdaje)
 
-    vrstice = []
-    postavke = LeaseItem.objects.filter(lease=lease).select_related(
-        "vat_regime", "lease__tenant", "lease__unit__property__company"
-    )
-    for postavka in postavke:
-        izracun = izracunaj_postavko(postavka, obdobje_od, obdobje_do)
-        if izracun is not None:
-            postavka.full_clean()
-            vrstice.append((postavka, izracun))
-
-    if not vrstice:
-        zacetek, konec = efektivna_veljavnost_pogodbe(lease)
-        razlog = (
-            "Pogodba ne velja v tem obdobju"
-            if dnevi_v_obdobju(obdobje_od, obdobje_do, zacetek, konec) == 0
-            else "Pogodba nima obračunljivih postavk v tem obdobju"
-        )
-        return PripravaOsnutka(None, razlog)
-
-    lease = vrstice[0][0].lease
+    lease = kandidat.vrstice[0].lease
     tenant = lease.tenant
     unit = lease.unit
     property = unit.property
     company = property.company
-
-    if not company.ddv_razporeditev_potrjena:
-        raise ValueError("DDV razporeditev enot še ni potrjena — Nastavitve")
-
-    podpisniki = list(
-        Signatory.objects.filter(company=company, velja_od__lte=datum_izdaje)
-        .filter(Q(velja_do__isnull=True) | Q(velja_do__gte=datum_izdaje))
-        .order_by("pk")[:2]
-    )
-    if not podpisniki:
-        raise ValueError(
-            f"Ni veljavnega podpisnika za {company.naziv} na {datum_izdaje}"
-        )
-    if len(podpisniki) > 1:
-        raise ValueError("Več veljavnih podpisnikov. Popravite obdobja veljavnosti.")
-    podpisnik = podpisniki[0]
+    podpisnik = _podpisniki_na_dan(company, datum_izdaje).get()
 
     invoice = Invoice.objects.create(
         company=company,
@@ -187,23 +204,10 @@ def pripravi_osnutek_np(
         oznaka_pogodbe=lease.oznaka_pogodbe,
         objekt_naziv=property.naziv,
     )
-    InvoiceLine.objects.bulk_create(
-        [
-            InvoiceLine(
-                invoice=invoice,
-                lease=lease,
-                lease_item=postavka,
-                opis=(
-                    f"{postavka.naziv_postavke} za obdobje "
-                    f"{obdobje_od:%d.%m.%Y} – {obdobje_do:%d.%m.%Y}\n"
-                    f"{unit.oznaka}, {property.naziv} · "
-                    f"Pogodba št. {lease.oznaka_pogodbe}"
-                ),
-                **vars(izracun),
-            )
-            for postavka, izracun in vrstice
-        ]
-    )
+    vrstice = list(kandidat.vrstice)
+    for vrstica in vrstice:
+        vrstica.invoice = invoice
+    InvoiceLine.objects.bulk_create(vrstice)
     return PripravaOsnutka(invoice)
 
 
@@ -323,10 +327,6 @@ def _razlozi_delta_postavke(
                 lease_item_id, "INDEKSACIJA",
                 f"Indeksacija postavke z dne {dogodki[-1].datum_uskladitve}",
             )
-        if stara.je_sorazmerno or nova.je_sorazmerno:
-            return DeltaRazlaga(
-                lease_item_id, "SORAZMERNO", "Sorazmerni obračun postavke"
-            )
         if stara.osnova == nova.osnova and not isti_ddv:
             return DeltaRazlaga(
                 lease_item_id, "SPREMEMBA_DDV",
@@ -367,6 +367,14 @@ def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
     ):
         raise ValueError("Primerjati je mogoče samo neoštevilčen NP osnutek.")
 
+    return _primerjaj_delta_np(
+        osnutek, list(InvoiceLine.objects.filter(invoice=osnutek))
+    )
+
+
+def _primerjaj_delta_np(
+    osnutek: Invoice, nove_vrstice: tuple[InvoiceLine, ...] | list[InvoiceLine]
+) -> DeltaPrimerjava:
     prejsnji = (
         Invoice.objects.filter(
             company_id=osnutek.company_id,
@@ -386,7 +394,6 @@ def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
         )
 
     stare_vrstice = list(InvoiceLine.objects.filter(invoice=prejsnji))
-    nove_vrstice = list(InvoiceLine.objects.filter(invoice=osnutek))
     stari_znesek = (
         prejsnji.skupaj_z_ddv
         if prejsnji.skupaj_z_ddv is not None
@@ -407,12 +414,16 @@ def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
         nove_po_postavki.setdefault(vrstica.lease_item_id, []).append(vrstica)
 
     razlage = []
+    pokrito_s_sorazmernostjo = False
     for lease_item_id in sorted(
         stare_po_postavki.keys() | nove_po_postavki.keys(),
         key=lambda value: (value is None, value or 0),
     ):
         stare = stare_po_postavki.get(lease_item_id, [])
         nove = nove_po_postavki.get(lease_item_id, [])
+        if any(v.je_sorazmerno for v in (*stare, *nove)):
+            pokrito_s_sorazmernostjo = True
+            continue
         if sum((v.skupaj for v in stare), Decimal("0.00")) != sum(
             (v.skupaj for v in nove), Decimal("0.00")
         ):
@@ -424,7 +435,7 @@ def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
         razlage.append(
             DeltaRazlaga(None, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
         )
-    if not razlage:
+    if not razlage and not pokrito_s_sorazmernostjo:
         razlage.append(
             DeltaRazlaga(None, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
         )
@@ -433,3 +444,80 @@ def primerjaj_delta_np(osnutek: Invoice) -> DeltaPrimerjava:
         all(razlaga.koda != "VZROK_NEZNAN" for razlaga in razlage),
         tuple(razlage),
     )
+
+
+
+def _izracunaj_vrstice_np(
+    lease: Lease, obdobje_od: date, obdobje_do: date
+) -> tuple[InvoiceLine, ...]:
+    vrstice = []
+    postavke = LeaseItem.objects.filter(lease=lease).select_related(
+        "vat_regime", "lease__tenant", "lease__unit__property__company"
+    )
+    for postavka in postavke:
+        izracun = izracunaj_postavko(postavka, obdobje_od, obdobje_do)
+        if izracun is None:
+            continue
+        postavka.full_clean()
+        pogodba = postavka.lease
+        unit = pogodba.unit
+        property = unit.property
+        vrstice.append(
+            InvoiceLine(
+                lease=pogodba,
+                lease_item=postavka,
+                opis=(
+                    f"{postavka.naziv_postavke} za obdobje "
+                    f"{obdobje_od:%d.%m.%Y} – {obdobje_do:%d.%m.%Y}\n"
+                    f"{unit.oznaka}, {property.naziv} · "
+                    f"Pogodba št. {pogodba.oznaka_pogodbe}"
+                ),
+                **vars(izracun),
+            )
+        )
+    return tuple(vrstice)
+
+
+def izracunaj_kandidata(
+    lease: Lease, obdobje_od: date, obdobje_do: date, datum_izdaje: date
+) -> RacunKandidat:
+    if obdobje_od > obdobje_do:
+        raise ValueError("Začetek obdobja mora biti pred koncem obdobja.")
+
+    vrstice = _izracunaj_vrstice_np(lease, obdobje_od, obdobje_do)
+    if not vrstice:
+        zacetek, konec = efektivna_veljavnost_pogodbe(lease)
+        razlog = (
+            "Pogodba ne velja v tem obdobju"
+            if dnevi_v_obdobju(obdobje_od, obdobje_do, zacetek, konec) == 0
+            else "Pogodba nima obračunljivih postavk v tem obdobju"
+        )
+        return RacunKandidat((), Decimal("0.00"), False, (), razlog)
+
+    lease = vrstice[0].lease
+    company = lease.unit.property.company
+    skupaj = sum((vrstica.skupaj for vrstica in vrstice), Decimal("0.00"))
+    blokade = preveri_predpogoje_podjetja(company, datum_izdaje)
+    if blokade:
+        return RacunKandidat(
+            vrstice, skupaj, False,
+            tuple(DeltaRazlaga(None, b.koda, b.sporocilo) for b in blokade),
+            blokade[0].sporocilo,
+        )
+
+    izjeme = [
+        DeltaRazlaga(v.lease_item_id, "SORAZMERNO", "Sorazmerni obračun postavke")
+        for v in vrstice if v.je_sorazmerno
+    ]
+    osnutek = Invoice(
+        company=company,
+        lease=lease,
+        document_type=Invoice.DocumentType.NP,
+        status=Invoice.Status.OSNUTEK,
+        datum_izdaje=datum_izdaje,
+        obdobje_od=obdobje_od,
+        obdobje_do=obdobje_do,
+    )
+    delta = _primerjaj_delta_np(osnutek, vrstice)
+    izjeme.extend(r for r in delta.razlage if r.koda != "BREZ_RAZLIKE")
+    return RacunKandidat(vrstice, skupaj, True, tuple(izjeme))

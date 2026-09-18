@@ -188,16 +188,14 @@ def test_prenehanje_postavke_pojasni_razliko(pogodba):
     ]
 
 
-def test_sorazmernost_pojasni_razliko(pogodba):
+def test_sorazmernost_ne_podvoji_delta_razlage(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     item.datum_prenehanja_postavke = date(2026, 2, 15)
     item.save(update_fields=["datum_prenehanja_postavke"])
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
-    assert [(r.koda, r.lease_item_id) for r in rezultat.razlage] == [
-        ("SORAZMERNO", item.pk)
-    ]
+    assert rezultat.razlage == ()
 
 
 def test_sprememba_ddv_pojasni_razliko(pogodba):
