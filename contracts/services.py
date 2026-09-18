@@ -241,6 +241,7 @@ def zaznaj_zamujen_poracun(
     prizadete = (
         InvoiceLine.objects.filter(
             lease_item=indexation_event.lease_item,
+            invoice__document_type=Invoice.DocumentType.NP,
             invoice__obdobje_od__gte=indexation_event.datum_uskladitve,
             invoice__obdobje_od__lt=date.today().replace(day=1),  # noqa: DTZ011
             invoice__status__in=[

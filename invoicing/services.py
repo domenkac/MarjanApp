@@ -312,15 +312,26 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
     if invoice.lease_id is None:
         raise ValueError("NP osnutek nima pogodbe.")
+    if invoice.company_id != invoice.lease.unit.property.company_id:
+        raise ValueError("NP podjetje se ne ujema s pogodbo.")
 
     vrstice = list(
-        InvoiceLine.objects.filter(invoice=invoice).values_list("osnova", "ddv_znesek")
+        InvoiceLine.objects.filter(invoice=invoice).select_related("lease_item")
     )
     if not vrstice:
         raise ValueError("NP osnutek nima vrstic.")
+    for vrstica in vrstice:
+        if (
+            vrstica.lease_id != invoice.lease_id
+            or vrstica.lease_item_id is None
+            or vrstica.lease_item.lease_id != invoice.lease_id
+        ):
+            raise ValueError("NP vrstica mora imeti postavko iste pogodbe.")
+        if vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
+            raise ValueError("NP vrstica: vsota osnove in DDV se ne ujema s skupaj.")
 
-    invoice.osnova_skupaj = sum((osnova for osnova, _ in vrstice), Decimal("0.00"))
-    invoice.ddv_skupaj = sum((ddv for _, ddv in vrstice), Decimal("0.00"))
+    invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
+    invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
     invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
     invoice.rok_placila = invoice.datum_izdaje + timedelta(
         days=invoice.lease.rok_placila_dni
@@ -653,6 +664,12 @@ def _primerjaj_delta_np(
             None, False, None, (DeltaRazlaga(None, "PRVA_IZDAJA", "Prva izdaja"),)
         )
 
+    opozorila = (
+        (DeltaRazlaga(None, "PREJSNJI_MESEC_NI_IZDAN",
+                      "Prejšnji mesec ni bil izdan"),)
+        if prejsnji.obdobje_do + timedelta(days=1) < osnutek.obdobje_od
+        else ()
+    )
     stare_vrstice = list(InvoiceLine.objects.filter(invoice=prejsnji))
     stari_znesek = (
         prejsnji.skupaj_z_ddv
@@ -663,7 +680,8 @@ def _primerjaj_delta_np(
     if stari_znesek == novi_znesek:
         return DeltaPrimerjava(
             prejsnji.pk, False, None,
-            (DeltaRazlaga(None, "BREZ_RAZLIKE", "Znesek je nespremenjen"),),
+            (DeltaRazlaga(None, "BREZ_RAZLIKE", "Znesek je nespremenjen"),)
+            + opozorila,
         )
 
     stare_po_postavki = {}
@@ -702,7 +720,7 @@ def _primerjaj_delta_np(
     return DeltaPrimerjava(
         prejsnji.pk, True,
         all(razlaga.koda != "VZROK_NEZNAN" for razlaga in razlage),
-        tuple(razlage),
+        tuple(razlage) + opozorila,
     )
 
 

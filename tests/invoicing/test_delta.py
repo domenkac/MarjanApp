@@ -8,6 +8,7 @@ from contracts.services import rocno_popravi_postavko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
+    izracunaj_kandidata,
     potrdi_osnutek_np,
     primerjaj_delta_np,
     pripravi_osnutek_np,
@@ -140,6 +141,24 @@ def test_preskocen_mesec_primerja_z_zadnjim_izdanim(pogodba):
     assert (rezultat.obstaja_razlika, rezultat.pojasnjena) == (False, None)
 
 
+def test_preskocen_mesec_sprozi_izjemo_tudi_brez_spremembe_zneska(pogodba):
+    dodaj_postavko(pogodba)
+    prejsnji = racun(pogodba, 1, potrdi=True)
+    osnutek = racun(pogodba, 3)
+
+    primerjava = primerjaj_delta_np(osnutek)
+    assert primerjava.prejsnji_racun_id == prejsnji.pk
+    assert primerjava.obstaja_razlika is False
+    assert "PREJSNJI_MESEC_NI_IZDAN" in kode(primerjava)
+
+    kandidat = izracunaj_kandidata(
+        pogodba, date(2026, 3, 1), date(2026, 3, 31), date(2026, 4, 1)
+    )
+    assert "PREJSNJI_MESEC_NI_IZDAN" in {
+        izjema.koda for izjema in kandidat.izjeme
+    }
+
+
 def test_dve_postavki_razlaga_zadene_pravo(pogodba):
     prva = dodaj_postavko(pogodba)
     druga = dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00")
@@ -169,7 +188,7 @@ def test_neostevilcen_osnutek_ni_referenca(pogodba):
     rezultat = primerjaj_delta_np(racun(pogodba, 3))
     assert rezultat.prejsnji_racun_id == prejsnji.pk
     assert (rezultat.obstaja_razlika, rezultat.pojasnjena) == (False, None)
-    assert kode(rezultat) == {"BREZ_RAZLIKE"}
+    assert kode(rezultat) == {"BREZ_RAZLIKE", "PREJSNJI_MESEC_NI_IZDAN"}
 
 
 def test_prenehanje_postavke_pojasni_razliko(pogodba):

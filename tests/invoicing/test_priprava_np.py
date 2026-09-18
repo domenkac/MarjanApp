@@ -379,6 +379,55 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
     assert NumberSequence.objects.get().zadnja_stevilka == 41
 
 
+def test_np_potrditev_zavrne_neskladno_vsoto_vrstice(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    vrstica = InvoiceLine.objects.get(invoice=invoice)
+    spremeni_vrstico(vrstica, skupaj=Decimal("999.00"))
+
+    with pytest.raises(ValueError, match="vsota"):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert (invoice.stevilka, invoice.status) == (None, Invoice.Status.OSNUTEK)
+    assert not NumberSequence.objects.exists()
+
+
+def test_np_potrditev_zavrne_vrstico_brez_izvorne_postavke(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    InvoiceLine.objects.filter(invoice=invoice).update(lease_item=None)
+
+    with pytest.raises(ValueError, match="postavko"):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+
+def test_np_potrditev_zavrne_podjetje_drugo_od_pogodbe(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    izvirno = invoice.company
+    drugo = Company.objects.create(
+        naziv="Druga d.o.o.",
+        davcna_stevilka=izvirno.davcna_stevilka,
+        maticna_stevilka=izvirno.maticna_stevilka,
+        naslov=izvirno.naslov,
+        trr=izvirno.trr,
+        logotip=izvirno.logotip.name,
+        email_racunovodja=izvirno.email_racunovodja,
+        email_posiljatelj=izvirno.email_posiljatelj,
+        keychain_kljuc_posiljatelja=izvirno.keychain_kljuc_posiljatelja,
+        aktivno=False,
+    )
+    spremeni_podatke_racuna(invoice, company=drugo)
+
+    with pytest.raises(ValueError, match="podjetje"):
+        potrdi_osnutek_np(invoice)
+
+    assert not NumberSequence.objects.exists()
+
+
 def test_neostevilcen_osnutek_se_lahko_ureja(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice

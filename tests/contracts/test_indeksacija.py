@@ -5,7 +5,7 @@ import pytest
 from django.contrib.contenttypes.models import ContentType
 
 from catalogs.models import VatRegime
-from companies.models import Company
+from companies.models import Company, NumberSequence
 from contracts import services
 from contracts.models import (
     IndexationEvent,
@@ -18,6 +18,7 @@ from contracts.models import (
 )
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine
+from invoicing.services import potrdi_korekcijski_osnutek, pripravi_korekcijski_osnutek
 
 LETO = date.today().year - 1  # noqa: DTZ011
 DANES = date(LETO, 3, 15)
@@ -219,6 +220,26 @@ def test_zamujen_poracun_samo_za_pravo_postavko(postavka, status):
     assert poracun.status == PoracunIndeksacije.Status.PREDLAGAN
     assert InvoiceLine.objects.filter(invoice=original).count() == 2
     assert services.zaznaj_zamujen_poracun(event) == []
+
+
+def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka):
+    original = racun_s_postavkami(postavka)
+    NumberSequence.objects.create(
+        company=original.company, tip=NumberSequence.Tip.NP, leto=0,
+        zadnja_stevilka=1,
+    )
+    storno = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.STORNO, "Napaka",
+        date(LETO, 4, 1),
+    )
+    potrdi_korekcijski_osnutek(storno)
+
+    event = services.potrdi_indeksacijo(
+        postavka, Decimal("110.000"), date(LETO, 4, 15)
+    )
+    poracuni = list(PoracunIndeksacije.objects.filter(indexation_event=event))
+    assert len(poracuni) == 1
+    assert poracuni[0].original_invoice_id == original.pk
 
 
 def test_zamuda_vec_mesecev_ustvari_locena_poracuna(postavka):
