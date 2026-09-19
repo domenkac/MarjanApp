@@ -106,6 +106,7 @@ def racun_s_postavkami(
             ddv_znesek=Decimal("22.01"),
             skupaj=item.znesek_neto_mesecno + Decimal("22.01"),
             ddv_nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
+            ddv_eslog_koda="S",
             ddv_rekap_skupina="STANDARD",
         )
     return invoice

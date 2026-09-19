@@ -82,6 +82,7 @@ def izdani_racun(db, tmp_path, settings):
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
         stopnja=Decimal("22.00"),
         rekapitulacijska_skupina="DDV 22 %",
+        eslog_koda="S",
         velja_od=date(2026, 1, 1),
     )
     LeaseItem.objects.create(
@@ -235,6 +236,7 @@ def test_korekcija_brez_roka_placila_ohrani_referenco_in_razlog(izdani_racun, ti
             ddv_znesek=Decimal("0.00"),
             skupaj=Decimal("-10.00"),
             ddv_nacin_obracuna="NI_PREDMET",
+            ddv_eslog_koda="O",
             ddv_rekap_skupina="NI_PREDMET",
         )
     popravek = potrdi_korekcijski_osnutek(osnutek)

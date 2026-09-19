@@ -121,6 +121,7 @@ def test_korekcijski_pdf_prikaze_referenco_razlog_in_brez_roka(
             ddv_znesek=Decimal("0.00"),
             skupaj=Decimal("-10.00"),
             ddv_nacin_obracuna=VatRegime.NacinObracuna.NI_PREDMET,
+            ddv_eslog_koda="O",
             ddv_rekap_skupina="NI",
         )
     popravek = potrdi_korekcijski_osnutek(osnutek)
