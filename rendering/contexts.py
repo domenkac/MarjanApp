@@ -262,5 +262,5 @@ def pripravi_vzorcni_pdf_context(
         skupaj_z_ddv=osnova + ddv,
         vrstice=vrstice,
         pdf_template_version=settings.PDF_TEMPLATE_VERSION,
-        oznaka_vzorca="VZOREC – NI RAČUN",
+        oznaka_vzorca="VZOREC \u2013 NI RA\u010cUN",
     )

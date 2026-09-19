@@ -20,10 +20,16 @@ from weasyprint import HTML
 from weasyprint.urls import URLFetcherResponse
 
 from catalogs.models import VatRegime
+from core.pravila import slugify_naziv
 from invoicing.models import Invoice
 from invoicing.rendering import nastavi_pdf_artifact
 
-from .contexts import PdfContext, PdfRenderNapaka, pripravi_pdf_context
+from .contexts import (
+    PdfContext,
+    PdfRenderNapaka,
+    pripravi_pdf_context,
+    pripravi_vzorcni_pdf_context,
+)
 from .paths import NeveljavnaRenderPot, varna_render_pot
 
 
@@ -205,4 +211,21 @@ def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
     except Exception as napaka:
         raise PdfRenderNapaka("PDF_METAPODATKI_NISO_SHRANJENI", "PDF metapodatki niso shranjeni.") from napaka
     return PdfRenderRezultat(ime_datoteke, checksum, pdf_bytes)
+
+def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRenderRezultat:
+    context = pripravi_vzorcni_pdf_context(
+        lease,
+        datum_izdaje=datum_izdaje,
+        obdobje_od=obdobje_od,
+        obdobje_do=obdobje_do,
+    )
+    ime_datoteke = f"VZOREC-{slugify_naziv(context.izdajatelj_naziv)}.pdf"
+    try:
+        pot = varna_render_pot(ime_datoteke)
+    except NeveljavnaRenderPot as napaka:
+        raise PdfRenderNapaka("PDF_POT_NEVELJAVNA", "PDF ime ni veljavno.") from napaka
+    pdf_bytes = _generiraj_pdf_bytes(context)
+    rezultat = PdfRenderRezultat(ime_datoteke, hashlib.sha256(pdf_bytes).hexdigest(), pdf_bytes)
+    _zapisi_atomsko(pot, pdf_bytes)
+    return rezultat
 

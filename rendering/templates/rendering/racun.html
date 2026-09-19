@@ -3,7 +3,7 @@
 <head><meta charset="utf-8">
 <style>
 @page { size:A4; margin:16mm 15mm 18mm; @bottom-center { content:"Stran " counter(page) " od " counter(pages); font-size:8pt; } }
-* { box-sizing:border-box; } body { color:#1d2730; font:9.5pt Arial,sans-serif; line-height:1.35; } h1,h2,p { margin:0; }
+* { box-sizing:border-box; } body { color:#1d2730; font:9.5pt Arial,sans-serif; line-height:1.35; } h1,h2,p { margin:0; } .sample-watermark { position:fixed; top:50%; left:0; width:100%; color:#a22525; font-size:20pt; font-weight:bold; opacity:.28; text-align:center; transform:rotate(-25deg); }
 .header,.columns,.summary { display:table; width:100%; } .header { border-bottom:2px solid #263746; padding-bottom:5mm; } .header > div,.columns > section,.vat,.totals { display:table-cell; vertical-align:top; }
 .logo { max-width:54mm; max-height:24mm; } .document { text-align:right; } .document h1 { font-size:18pt; } .number { font-weight:bold; margin-top:2mm; } .meta { margin-top:3mm; }
 .columns { margin-top:7mm; } .columns > section { width:50%; padding-right:7mm; } .columns > section + section { padding-left:7mm; padding-right:0; }
@@ -14,6 +14,7 @@ table { border-collapse:collapse; width:100%; } .items { margin-top:7mm; } .item
 .clauses { margin-top:4mm; font-size:8.5pt; } .signature { break-inside:avoid; margin:10mm 0 0 auto; text-align:center; width:65mm; } .signature img { display:block; margin:3mm auto 1mm; max-width:50mm; max-height:19mm; } .signature .name { border-top:.3mm solid #7d8991; font-weight:bold; padding-top:1.5mm; }
 </style></head>
 <body>
+{% if context.oznaka_vzorca %}<div class="sample-watermark">{{ context.oznaka_vzorca }}</div>{% endif %}
 <header class="header"><div><img class="logo" src="{{ logo }}" alt="Logotip izdajatelja"></div><div class="document"><h1>{{ context.document_type }}</h1>{% if context.stevilka %}<p class="number">&#352;t. {{ context.stevilka }}</p>{% endif %}<div class="meta"><div>Datum izdaje: {{ datum_izdaje }}</div><div>Obdobje: {{ obdobje }}</div>{% if rok_placila %}<div>Rok pla&#269;ila: {{ rok_placila }}</div>{% endif %}</div></div></header>
 <div class="columns"><section><h2>Izdajatelj</h2><p><strong>{{ context.izdajatelj_naziv }}</strong><br>{{ context.izdajatelj_naslov }}<br>Dav&#269;na &#353;t.: {{ context.izdajatelj_davcna_stevilka }}<br>Mati&#269;na &#353;t.: {{ context.izdajatelj_maticna_stevilka }}<br>IBAN: {{ context.izdajatelj_trr }}</p></section><section><h2>Prejemnik</h2><p><strong>{{ context.prejemnik_naziv }}</strong><br>{{ context.prejemnik_naslov }}{% if context.prejemnik_davcna_stevilka %}<br>Dav&#269;na &#353;t.: {{ context.prejemnik_davcna_stevilka }}{% endif %}{% if context.prejemnik_maticna_stevilka %}<br>Mati&#269;na &#353;t.: {{ context.prejemnik_maticna_stevilka }}{% endif %}</p></section></div>
 {% if context.oznaka_pogodbe or context.objekt_naziv %}<section class="details">{% if context.oznaka_pogodbe %}<div><span>Pogodba:</span>{{ context.oznaka_pogodbe }}</div>{% endif %}{% if context.objekt_naziv %}<div><span>Objekt:</span>{{ context.objekt_naziv }}</div>{% endif %}</section>{% endif %}
