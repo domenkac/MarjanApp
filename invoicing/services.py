@@ -29,6 +29,24 @@ from core.pravila import zaokrozi
 
 from .models import Invoice, InvoiceLine
 
+ESLOG_KODE_DDV = {
+    VatRegime.NacinObracuna.OBDAVCENO: "S",
+    VatRegime.NacinObracuna.OPROSCENO: "E",
+    VatRegime.NacinObracuna.OBRNJENA_DAVCNA: "AE",
+    VatRegime.NacinObracuna.NI_PREDMET: "O",
+}
+
+
+def _preveri_eslog_kodo(nacin: str, koda: str, vir: str) -> str:
+    pricakovana = ESLOG_KODE_DDV[nacin]
+    if not koda:
+        raise ValueError(f"{vir} nima eSLOG kode.")
+    if koda != pricakovana:
+        raise ValueError(
+            f"{vir} ima napačno eSLOG kodo {koda}; pričakovana je {pricakovana}."
+        )
+    return koda
+
 MIGRACIJSKI_RAZLOG = "Migracijski zapis – uvoz stanja pred prehodom na aplikacijo"
 
 
@@ -155,6 +173,7 @@ POSLOVNA_POLJA_RACUNA = {
     "obdobje_do",
     "rok_placila",
     "prejemnik_naziv",
+    "prejemnik_tip",
     "prejemnik_naslov",
     "prejemnik_davcna_stevilka",
     "prejemnik_maticna_stevilka",
@@ -316,7 +335,9 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         raise ValueError("NP podjetje se ne ujema s pogodbo.")
 
     vrstice = list(
-        InvoiceLine.objects.filter(invoice=invoice).select_related("lease_item")
+        InvoiceLine.objects.filter(invoice=invoice).select_related(
+            "lease_item__vat_regime"
+        )
     )
     if not vrstice:
         raise ValueError("NP osnutek nima vrstic.")
@@ -329,6 +350,16 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
             raise ValueError("NP vrstica mora imeti postavko iste pogodbe.")
         if vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
             raise ValueError("NP vrstica: vsota osnove in DDV se ne ujema s skupaj.")
+
+    invoice.prejemnik_tip = invoice.lease.tenant.tip
+    for vrstica in vrstice:
+        rezim = vrstica.lease_item.vat_regime
+        vrstica.ddv_eslog_koda = _preveri_eslog_kodo(
+            rezim.nacin_obracuna,
+            rezim.eslog_koda,
+            f"DDV režim {rezim.sifra}",
+        )
+    InvoiceLine.objects.bulk_update(vrstice, ["ddv_eslog_koda"])
 
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
@@ -351,6 +382,7 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.save(
         update_fields=[
             "stevilka",
+            "prejemnik_tip",
             "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot",
             "pdf_template_version",
@@ -367,6 +399,7 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
 _SNAPSHOT_POLJA_KOREKCIJE = (
     "prejemnik_naziv", "prejemnik_naslov",
     "prejemnik_davcna_stevilka", "prejemnik_maticna_stevilka",
+    "prejemnik_tip",
     "izdajatelj_naziv", "izdajatelj_naslov",
     "izdajatelj_davcna_stevilka", "izdajatelj_maticna_stevilka",
     "izdajatelj_trr", "izdajatelj_podpisnik_ime",
@@ -413,6 +446,7 @@ def _storno_vrstica(originalna: InvoiceLine, storno: Invoice) -> InvoiceLine:
         ddv_nacin_obracuna=originalna.ddv_nacin_obracuna,
         ddv_klavzula=originalna.ddv_klavzula,
         ddv_rekap_skupina=originalna.ddv_rekap_skupina,
+        ddv_eslog_koda=originalna.ddv_eslog_koda,
         je_sorazmerno=originalna.je_sorazmerno,
         razlog_rocnega_popravka=originalna.razlog_rocnega_popravka,
         izvirno_izracunana_vrednost=(
@@ -428,7 +462,7 @@ def _kljuc_storno_vrstice(vrstica: InvoiceLine) -> tuple:
         vrstica.lease_id, vrstica.lease_item_id, vrstica.opis,
         vrstica.osnova, vrstica.ddv_stopnja, vrstica.ddv_znesek,
         vrstica.skupaj, vrstica.ddv_nacin_obracuna, vrstica.ddv_klavzula,
-        vrstica.ddv_rekap_skupina, vrstica.je_sorazmerno,
+        vrstica.ddv_rekap_skupina, vrstica.ddv_eslog_koda, vrstica.je_sorazmerno,
         vrstica.razlog_rocnega_popravka, vrstica.izvirno_izracunana_vrednost,
     )
 
@@ -504,6 +538,13 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
         for vrstica in vrstice:
             _preveri_rocno_vrstico_dobropisa(vrstica)
             vrstica.full_clean()
+
+    for vrstica in vrstice:
+        _preveri_eslog_kodo(
+            vrstica.ddv_nacin_obracuna,
+            vrstica.ddv_eslog_koda,
+            "Vrstica dobropisa" if invoice.document_type == Invoice.DocumentType.DOBROPIS else "Izvirna vrstica storna",
+        )
 
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))

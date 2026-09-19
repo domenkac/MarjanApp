@@ -35,6 +35,15 @@ class Invoice(models.Model):
     prejemnik_naslov = models.CharField(blank=True)
     prejemnik_davcna_stevilka = models.CharField(blank=True)
     prejemnik_maticna_stevilka = models.CharField(blank=True)
+    prejemnik_tip = models.CharField(
+        max_length=13,
+        choices=[
+            ("PRAVNA_OSEBA", "Pravna oseba"),
+            ("FIZICNA_OSEBA", "Fizična oseba"),
+        ],
+        blank=True,
+        default="",
+    )
     izdajatelj_naziv = models.CharField(blank=True)
     izdajatelj_naslov = models.CharField(blank=True)
     izdajatelj_davcna_stevilka = models.CharField(blank=True)
@@ -68,6 +77,7 @@ class Invoice(models.Model):
     rendered_pdf_path = models.CharField(blank=True)
     rendered_eslog_path = models.CharField(blank=True)
     checksum = models.CharField(blank=True)
+    rendered_eslog_checksum = models.CharField(blank=True, default="")
 
     class Meta:
         constraints = [  # noqa: RUF012
@@ -104,6 +114,7 @@ class InvoiceLine(models.Model):
     ddv_nacin_obracuna = models.CharField()
     ddv_klavzula = models.TextField(blank=True)
     ddv_rekap_skupina = models.CharField()
+    ddv_eslog_koda = models.CharField(blank=True, default="")
     je_sorazmerno = models.BooleanField(default=False)
     razlog_rocnega_popravka = models.TextField(null=True, blank=True)
     izvirno_izracunana_vrednost = models.DecimalField(

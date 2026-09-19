@@ -9,6 +9,7 @@ from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine
+from invoicing.rendering import nastavi_eslog_artifact
 from invoicing.services import (
     dodaj_vrstico,
     izbrisi_racun,
@@ -74,6 +75,12 @@ def pogodba(db, tmp_path, settings):
 
 
 def dodaj_postavko(pogodba, *, naziv="Najemnina", znesek="100.00", nacin="OBDAVCENO", **spremembe):
+    eslog_kode = {
+        "OBDAVCENO": "S",
+        "OPROSCENO": "E",
+        "OBRNJENA_DAVCNA": "AE",
+        "NI_PREDMET": "O",
+    }
     rezim = VatRegime.objects.create(
         sifra=f"R{VatRegime.objects.count() + 1}",
         naziv=nacin,
@@ -81,6 +88,7 @@ def dodaj_postavko(pogodba, *, naziv="Najemnina", znesek="100.00", nacin="OBDAVC
         stopnja=Decimal("22.00"),
         klavzula="Davčna klavzula" if nacin != "OBDAVCENO" else "",
         rekapitulacijska_skupina=nacin,
+        eslog_koda=eslog_kode[nacin],
         velja_od=date(2026, 1, 1),
     )
     return LeaseItem.objects.create(
@@ -267,6 +275,76 @@ def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
     assert potrjen.rok_placila == date(2026, 9, 16)
     assert potrjen.prejemnik_naziv == prvotni_naziv
     assert InvoiceLine.objects.get(pk=prvotna_vrstica.pk).opis == prvotna_vrstica.opis
+
+
+@pytest.mark.parametrize(
+    ("nacin", "koda"),
+    [("OBDAVCENO", "S"), ("OPROSCENO", "E"), ("OBRNJENA_DAVCNA", "AE"), ("NI_PREDMET", "O")],
+)
+def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
+    postavka = dodaj_postavko(pogodba, nacin=nacin)
+    invoice = pripravi(pogodba).invoice
+    assert invoice.prejemnik_tip == ""
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == ""
+
+    potrjen = potrdi_osnutek_np(invoice)
+
+    assert potrjen.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
+
+    pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
+    pogodba.tenant.save(update_fields=["tip"])
+    postavka.vat_regime.eslog_koda = "SPREMENJENA"
+    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    potrjen.refresh_from_db()
+    assert potrjen.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
+
+
+@pytest.mark.parametrize("koda", ["", "E"])
+def test_potrditev_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
+    postavka = dodaj_postavko(pogodba)
+    postavka.vat_regime.eslog_koda = koda
+    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    invoice = pripravi(pogodba).invoice
+
+    with pytest.raises(ValueError, match="eSLOG kod"):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert invoice.stevilka is None
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == ""
+
+def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
+    pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
+    pogodba.tenant.davcna_stevilka = ""
+    pogodba.tenant.maticna_stevilka = ""
+    pogodba.tenant.save(update_fields=["tip", "davcna_stevilka", "maticna_stevilka"])
+    dodaj_postavko(pogodba)
+
+    potrjen = potrdi_osnutek_np(pripravi(pogodba).invoice)
+
+    assert potrjen.prejemnik_tip == Tenant.Tip.FIZICNA_OSEBA
+    assert potrjen.prejemnik_davcna_stevilka == ""
+
+
+def test_eslog_artifact_se_nastavi_samo_z_namensko_storitvijo(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = potrdi_osnutek_np(pripravi(pogodba).invoice)
+
+    shranjen = nastavi_eslog_artifact(
+        invoice, rendered_eslog_path="racun.xml", checksum="abc123"
+    )
+    assert (shranjen.rendered_eslog_path, shranjen.rendered_eslog_checksum) == (
+        "racun.xml", "abc123"
+    )
+    assert nastavi_eslog_artifact(
+        invoice, rendered_eslog_path="racun.xml", checksum="abc123"
+    ).pk == invoice.pk
+    with pytest.raises(ValueError, match="že vsebuje eSLOG"):
+        nastavi_eslog_artifact(
+            invoice, rendered_eslog_path="drug.xml", checksum="drug"
+        )
 
 
 def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):

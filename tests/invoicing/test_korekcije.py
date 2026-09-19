@@ -111,6 +111,32 @@ def test_storno_zrcali_vrstice_in_ohrani_original(pogodba):
     )
 
 
+def test_storno_ohrani_eslog_snapshote_po_spremembi_zivih_podatkov(pogodba):
+    original = izdan_np(pogodba)
+    pricakovane_kode = list(
+        InvoiceLine.objects.filter(invoice=original)
+        .order_by("pk")
+        .values_list("ddv_eslog_koda", flat=True)
+    )
+    storno = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.STORNO, "Napaka", date(2026, 9, 2)
+    )
+
+    pogodba.tenant.tip = pogodba.tenant.Tip.FIZICNA_OSEBA
+    pogodba.tenant.save(update_fields=["tip"])
+    for postavka in pogodba.leaseitem_set.select_related("vat_regime"):
+        postavka.vat_regime.eslog_koda = "SPREMENJENA"
+        postavka.vat_regime.save(update_fields=["eslog_koda"])
+
+    potrjen = potrdi_korekcijski_osnutek(storno)
+    assert potrjen.prejemnik_tip == original.prejemnik_tip
+    assert list(
+        InvoiceLine.objects.filter(invoice=potrjen)
+        .order_by("pk")
+        .values_list("ddv_eslog_koda", flat=True)
+    ) == pricakovane_kode
+
+
 def test_dobropis_uporabi_rocno_vrstico_brez_izracuna_iz_pogodbe(pogodba):
     original = izdan_np(pogodba)
     dobropis = pripravi_korekcijski_osnutek(
@@ -128,6 +154,7 @@ def test_dobropis_uporabi_rocno_vrstico_brez_izracuna_iz_pogodbe(pogodba):
         ddv_znesek=Decimal("-2.20"),
         skupaj=Decimal("-12.20"),
         ddv_nacin_obracuna="OBDAVCENO",
+        ddv_eslog_koda="S",
         ddv_rekap_skupina="OBDAVCENO",
     )
     potrjen = potrdi_korekcijski_osnutek(dobropis)
@@ -140,6 +167,28 @@ def test_dobropis_uporabi_rocno_vrstico_brez_izracuna_iz_pogodbe(pogodba):
     assert (
         vrstica.osnova != -InvoiceLine.objects.filter(invoice=original).first().osnova
     )
+
+
+@pytest.mark.parametrize("koda", ["", "E"])
+def test_dobropis_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
+    original = izdan_np(pogodba)
+    dobropis = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.DOBROPIS, "Popust", date(2026, 9, 2)
+    )
+    dodaj_vrstico(
+        dobropis,
+        opis="Ročni dobropis",
+        osnova=Decimal("-10.00"),
+        ddv_stopnja=Decimal("22.00"),
+        ddv_znesek=Decimal("-2.20"),
+        skupaj=Decimal("-12.20"),
+        ddv_nacin_obracuna="OBDAVCENO",
+        ddv_eslog_koda=koda,
+        ddv_rekap_skupina="OBDAVCENO",
+    )
+
+    with pytest.raises(ValueError, match="eSLOG kod"):
+        potrdi_korekcijski_osnutek(dobropis)
 
 
 @pytest.mark.parametrize(
@@ -165,6 +214,7 @@ def test_dobropis_zavrne_neveljavne_rocne_zneske(pogodba, osnova, ddv, skupaj):
             ddv_znesek=ddv,
             skupaj=skupaj,
             ddv_nacin_obracuna="OBDAVCENO",
+            ddv_eslog_koda="S",
             ddv_rekap_skupina="OBDAVCENO",
         )
     assert not InvoiceLine.objects.filter(invoice=dobropis).exists()
@@ -185,6 +235,7 @@ def test_korekcija_np_uporabi_np_zaporedje(pogodba, tip):
             ddv_znesek=Decimal("0.00"),
             skupaj=Decimal("-10.00"),
             ddv_nacin_obracuna="NI_PREDMET",
+            ddv_eslog_koda="O",
             ddv_rekap_skupina="NI_PREDMET",
         )
     assert popravek.stevilka is None
@@ -221,6 +272,7 @@ def test_korekcija_st_uporabi_letno_st_zaporedje(pogodba, tip):
         ddv_znesek=Decimal("4.40"),
         skupaj=Decimal("24.40"),
         ddv_nacin_obracuna="OBDAVCENO",
+        ddv_eslog_koda="S",
         ddv_rekap_skupina="OBDAVCENO",
     )
     popravek = pripravi_korekcijski_osnutek(original, tip, "Napaka", date(2027, 1, 2))
@@ -233,6 +285,7 @@ def test_korekcija_st_uporabi_letno_st_zaporedje(pogodba, tip):
             ddv_znesek=Decimal("0.00"),
             skupaj=Decimal("-5.00"),
             ddv_nacin_obracuna="NI_PREDMET",
+            ddv_eslog_koda="O",
             ddv_rekap_skupina="NI_PREDMET",
         )
     assert potrdi_korekcijski_osnutek(popravek).stevilka == "ST-2027-0001"
@@ -275,6 +328,7 @@ def test_dobropis_nepotrjena_vrstica_mora_biti_konsistentna(pogodba):
         ddv_znesek=Decimal("-2.20"),
         skupaj=Decimal("-12.20"),
         ddv_nacin_obracuna="OBDAVCENO",
+        ddv_eslog_koda="S",
         ddv_rekap_skupina="OBDAVCENO",
     )
     with pytest.raises(ValidationError):
@@ -369,6 +423,7 @@ def test_izdan_korekcijski_dokument_je_immutable(pogodba, tip):
             ddv_znesek=Decimal("0.00"),
             skupaj=Decimal("-5.00"),
             ddv_nacin_obracuna="NI_PREDMET",
+            ddv_eslog_koda="O",
             ddv_rekap_skupina="NI_PREDMET",
         )
     potrdi_korekcijski_osnutek(popravek)

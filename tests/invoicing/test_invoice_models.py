@@ -109,6 +109,7 @@ def test_invoice_polja_izbire_in_privzeti_status(company):
         "oznaka_pogodbe", "objekt_naziv", "status", "povezan_racun", "razlog",
         "razlog_arhiviranja", "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv",
         "rendered_pdf_path", "rendered_eslog_path", "checksum",
+        "prejemnik_tip", "rendered_eslog_checksum",
     }
     invoice = Invoice(**podatki_racuna(company))
     invoice.full_clean()
@@ -230,7 +231,7 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
     assert {field.name for field in InvoiceLine._meta.concrete_fields} == {
         "id", "invoice", "lease", "lease_item", "opis", "osnova",
         "ddv_stopnja", "ddv_znesek", "skupaj", "ddv_nacin_obracuna",
-        "ddv_klavzula", "ddv_rekap_skupina", "je_sorazmerno",
+        "ddv_klavzula", "ddv_rekap_skupina", "ddv_eslog_koda", "je_sorazmerno",
         "razlog_rocnega_popravka",
         "izvirno_izracunana_vrednost",
     }
