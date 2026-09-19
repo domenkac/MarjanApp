@@ -26,7 +26,10 @@ DATUM_IZDAJE = date(2026, 9, 1)
 
 
 @pytest.fixture
-def pogodba(db):
+def pogodba(db, tmp_path, settings):
+    settings.MEDIA_ROOT = tmp_path
+    (tmp_path / "logo.png").write_bytes(b"logo")
+    (tmp_path / "podpis.png").write_bytes(b"podpis")
     company = Company.objects.create(
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",

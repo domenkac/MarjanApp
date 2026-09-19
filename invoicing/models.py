@@ -40,6 +40,8 @@ class Invoice(models.Model):
     izdajatelj_davcna_stevilka = models.CharField(blank=True)
     izdajatelj_maticna_stevilka = models.CharField(blank=True)
     izdajatelj_trr = models.CharField(blank=True)
+    izdajatelj_logotip_slika_pot = models.CharField(blank=True, default="")
+    pdf_template_version = models.CharField(blank=True, default="")
     izdajatelj_podpisnik_ime = models.CharField(blank=True)
     izdajatelj_podpisnik_funkcija = models.CharField(blank=True)
     izdajatelj_podpisnik_slika_pot = models.CharField(blank=True)

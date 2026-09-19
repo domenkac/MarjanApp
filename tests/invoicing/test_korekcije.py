@@ -208,6 +208,7 @@ def test_korekcija_st_uporabi_letno_st_zaporedje(pogodba, tip):
         datum_izdaje=date(2026, 9, 1),
         obdobje_od=np.obdobje_od,
         obdobje_do=np.obdobje_do,
+        izdajatelj_podpisnik_slika_pot=np.izdajatelj_podpisnik_slika_pot,
     )
     NumberSequence.objects.create(
         company=np.company, tip=NumberSequence.Tip.ST, leto=2026, zadnja_stevilka=1

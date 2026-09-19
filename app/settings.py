@@ -9,7 +9,7 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
-INSTALLED_APPS = ["django.contrib.contenttypes", "core", "companies", "catalogs", "contracts", "invoicing"]
+INSTALLED_APPS = ["django.contrib.contenttypes", "core", "companies", "catalogs", "contracts", "invoicing", "rendering"]
 MIDDLEWARE = ["django.middleware.csrf.CsrfViewMiddleware"]
 ROOT_URLCONF = "app.urls"
 
@@ -21,3 +21,6 @@ DATABASES = {
         "TEST": {"NAME": BASE_DIR / "test.sqlite3"},
     }
 }
+
+PDF_TEMPLATE_VERSION = "1"
+RENDERING_ROOT = BASE_DIR / "rendered"

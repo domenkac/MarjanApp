@@ -1,12 +1,59 @@
+from hashlib import sha256
+
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
+from django.core.files.base import ContentFile
+from django.core.files.storage import default_storage
 from django.db import IntegrityError, transaction
-from django.db.models import F
+from django.db.models import F, Q
 from django.db.models.deletion import ProtectedError
 
 from companies.models import Company, NumberSequence, Signatory
 from core.models import AuditLogEntry
 from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
+
+
+def veljavni_podpisniki_na_dan(company: Company, datum_izdaje):
+    return Signatory.objects.filter(
+        company=company, velja_od__lte=datum_izdaje
+    ).filter(Q(velja_do__isnull=True) | Q(velja_do__gte=datum_izdaje))
+
+
+def izberi_veljavnega_podpisnika(company: Company, datum_izdaje) -> Signatory:
+    podpisniki = list(
+        veljavni_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2]
+    )
+    if not podpisniki:
+        raise ValueError(
+            f"Ni veljavnega podpisnika za {company.naziv} na {datum_izdaje}"
+        )
+    if len(podpisniki) > 1:
+        raise ValueError(
+            f"Več veljavnih podpisnikov za {company.naziv} na {datum_izdaje}; "
+            "popravite obdobja veljavnosti"
+        )
+    return podpisniki[0]
+
+
+def shrani_nespremenljiv_asset(pot: str) -> str:
+    try:
+        with default_storage.open(pot, "rb") as datoteka:
+            vsebina = datoteka.read()
+    except (OSError, ValueError) as napaka:
+        raise ValueError(f"Asset ni dostopen: {pot}.") from napaka
+
+    digest = sha256(vsebina).hexdigest()
+    cilj = f"nespremenljivi-asseti/{digest}"
+    if default_storage.exists(cilj):
+        with default_storage.open(cilj, "rb") as datoteka:
+            if sha256(datoteka.read()).hexdigest() != digest:
+                raise ValueError(f"Nespremenljiv asset je poškodovan: {cilj}.")
+        return cilj
+
+    shranjena_pot = default_storage.save(cilj, ContentFile(vsebina))
+    if shranjena_pot != cilj:
+        raise ValueError("Nespremenljivega asseta ni bilo mogoče varno shraniti.")
+    return cilj
 
 
 @transaction.atomic

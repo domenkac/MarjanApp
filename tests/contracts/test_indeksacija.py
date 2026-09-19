@@ -222,8 +222,15 @@ def test_zamujen_poracun_samo_za_pravo_postavko(postavka, status):
     assert services.zaznaj_zamujen_poracun(event) == []
 
 
-def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka):
+def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(
+    postavka, tmp_path, settings
+):
+    settings.MEDIA_ROOT = tmp_path
+    (tmp_path / 'logo.png').write_bytes(b'logo')
+    (tmp_path / 'podpis.png').write_bytes(b'podpis')
     original = racun_s_postavkami(postavka)
+    original.izdajatelj_podpisnik_slika_pot = 'podpis.png'
+    original.save(update_fields=['izdajatelj_podpisnik_slika_pot'])
     NumberSequence.objects.create(
         company=original.company, tip=NumberSequence.Tip.NP, leto=0,
         zadnja_stevilka=1,

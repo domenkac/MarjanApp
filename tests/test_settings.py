@@ -9,6 +9,7 @@ def test_minimal_settings():
         "catalogs",
         "contracts",
         "invoicing",
+        "rendering",
     ]
     assert settings.DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3"
     assert settings.DATABASES["default"]["OPTIONS"]["transaction_mode"] == "IMMEDIATE"

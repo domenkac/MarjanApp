@@ -4,14 +4,20 @@ from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
 from itertools import pairwise
 
+from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import transaction
 from django.db.models import Q
 
 from catalogs.models import VatRegime
-from companies.models import Company, NumberSequence, Signatory
-from companies.services import dodeli_naslednjo_stevilko
+from companies.models import Company, NumberSequence
+from companies.services import (
+    dodeli_naslednjo_stevilko,
+    izberi_veljavnega_podpisnika,
+    shrani_nespremenljiv_asset,
+    veljavni_podpisniki_na_dan,
+)
 from contracts.models import IndexationEvent, Lease, LeaseItem
 from contracts.services import (
     dnevi_v_obdobju,
@@ -113,12 +119,6 @@ class RacunKandidat:
     razlog_neizdaje: str | None = None
 
 
-def _podpisniki_na_dan(company: Company, datum_izdaje: date):
-    return Signatory.objects.filter(
-        company=company, velja_od__lte=datum_izdaje
-    ).filter(Q(velja_do__isnull=True) | Q(velja_do__gte=datum_izdaje))
-
-
 def preveri_predpogoje_podjetja(
     company: Company, datum_izdaje: date
 ) -> list[Blokada]:
@@ -127,7 +127,7 @@ def preveri_predpogoje_podjetja(
         blokade.append(
             Blokada("DDV_NEPOTRJEN", "DDV razporeditev enot še ni potrjena — Nastavitve")
         )
-    podpisniki = list(_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2])
+    podpisniki = list(veljavni_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2])
     if not podpisniki:
         blokade.append(
             Blokada(
@@ -273,7 +273,7 @@ def pripravi_osnutek_np(
     unit = lease.unit
     property = unit.property
     company = property.company
-    podpisnik = _podpisniki_na_dan(company, datum_izdaje).get()
+    podpisnik = izberi_veljavnega_podpisnika(company, datum_izdaje)
 
     invoice = Invoice.objects.create(
         company=company,
@@ -336,6 +336,13 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.rok_placila = invoice.datum_izdaje + timedelta(
         days=invoice.lease.rok_placila_dni
     )
+    invoice.izdajatelj_logotip_slika_pot = shrani_nespremenljiv_asset(
+        invoice.company.logotip.name
+    )
+    invoice.izdajatelj_podpisnik_slika_pot = shrani_nespremenljiv_asset(
+        invoice.izdajatelj_podpisnik_slika_pot
+    )
+    invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(
         invoice.company, NumberSequence.Tip.NP, invoice.datum_izdaje
     )
@@ -344,6 +351,9 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.save(
         update_fields=[
             "stevilka",
+            "izdajatelj_logotip_slika_pot",
+            "izdajatelj_podpisnik_slika_pot",
+            "pdf_template_version",
             "osnova_skupaj",
             "ddv_skupaj",
             "skupaj_z_ddv",
@@ -499,6 +509,13 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
     invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
     tip = original.document_type
+    invoice.izdajatelj_logotip_slika_pot = shrani_nespremenljiv_asset(
+        invoice.company.logotip.name
+    )
+    invoice.izdajatelj_podpisnik_slika_pot = shrani_nespremenljiv_asset(
+        invoice.izdajatelj_podpisnik_slika_pot
+    )
+    invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(invoice.company, tip, invoice.datum_izdaje)
     if tip == Invoice.DocumentType.NP:
         invoice.stevilka = f"NP-{zaporedna:05d}"
@@ -506,7 +523,9 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
         invoice.stevilka = f"ST-{invoice.datum_izdaje.year}-{zaporedna:04d}"
     invoice.status = Invoice.Status.IZBRAN_ZA_POSILJANJE
     invoice.save(update_fields=[
-        "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv", "stevilka", "status"
+        "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv", "stevilka", "status",
+        "izdajatelj_logotip_slika_pot", "izdajatelj_podpisnik_slika_pot",
+        "pdf_template_version",
     ])
     return invoice
 
