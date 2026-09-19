@@ -38,10 +38,10 @@ Potrjeno:
 - `Invoice.checksum` pomeni SHA-256 finalnih PDF bytes;
 - eSLOG dobi ločen `rendered_eslog_checksum`;
 - eSLOG davčna koda se snapshotira na `InvoiceLine`;
-- eSLOG se **ne generira za prejemnika tipa `FIZICNA_OSEBA`**;
+- eSLOG se generira, validira in arhivira za vsak račun, tudi za prejemnika tipa `FIZICNA_OSEBA`; dostavni kanal `ESLOG` zanj ostaja prepovedan;
 - manjkajoči PDF se sme rekonstruirati samo prek ločene recovery storitve in samo, če rezultat ustreza originalnemu checksumu.
 
-Odprta ostaja samo izbira in verzioniranje uradnega eSLOG 2.0 XSD/mapping paketa.
+Uradni eSLOG 2.0 XSD/mapping paket je pridobljen in verzioniran. Odprta ostaja preslikava fizične osebe brez davčne številke za 2B-2.
 
 ---
 
@@ -215,9 +215,9 @@ Renderer nikoli ne bere trenutne `VatRegime.eslog_koda` za že izdani račun.
 
 Točne dovoljene vrednosti kod se potrdijo po pridobitvi uradne eSLOG 2.0 sheme in šifrantov.
 
-#### 2.3.4 Tip prejemnika za odločitev o eSLOG — POTRJENO kot posledica O6
+#### 2.3.4 Tip prejemnika za eSLOG dostavo — POTRJENO kot posledica O6
 
-Ker je potrjeno, da se eSLOG ne generira za fizične osebe, renderer te odločitve ne sme sprejeti iz živega `Tenant` zapisa.
+eSLOG se generira za vsak račun. Tip prejemnika določa samo dovoljenost dostavnega kanala `ESLOG`; te odločitve ni dovoljeno sprejeti iz živega `Tenant` zapisa.
 
 Faza 2 zato doda na `Invoice` snapshot:
 
@@ -236,10 +236,10 @@ Vrednost se določi ob pripravi/potrditvi dokumenta. Pri ročnih ST dokumentih j
 
 Če je `prejemnik_tip == FIZICNA_OSEBA`:
 
-- eSLOG se ne generira;
-- `rendered_eslog_path` ostane prazen;
-- `rendered_eslog_checksum` ostane prazen;
-- odsotnost eSLOG ni render napaka in ne blokira PDF.
+- eSLOG se generira, validira in arhivira;
+- dostavni kanal `ESLOG` ostane prepovedan;
+- manjkajoča davčna številka ne blokira izdaje računa ali 2B-1;
+- preslikava kupca brez davčne številke ostane `UNRESOLVED` za 2B-2; renderer ne sme izumiti identifikatorja ali placeholderja.
 
 ---
 
@@ -472,7 +472,7 @@ Pri NP mora biti sklic na pogodbo jasno viden v glavi.
 
 Pri ST je pogodba lahko prazna.
 
-**Rok plačila pri PDF — potrjena poslovna odločitev:** Pri `NP` in `ST` je `rok_placila` za finalni PDF obvezen; PDF preflight zavrne manjkajočo vrednost. `STORNO` in `DOBROPIS` ne dobita novega roka plačila in ne kopirata roka izvirnika kot svojega roka. Njuno polje `rok_placila` je lahko `NULL`; PDF preflight ju zaradi tega ne zavrne. Renderer roka za korekcijo ne izračuna in ne kopira. PDF pri obeh jasno prikaže tip dokumenta, referenco na izvirni račun in razlog korekcije. Obravnava roka plačila v eSLOG za korekcije ostane odprta do uradne eSLOG 2.0 sheme in mappinga.
+**Rok plačila pri PDF — potrjena poslovna odločitev:** Pri `NP` in `ST` je `rok_placila` za finalni PDF obvezen; PDF preflight zavrne manjkajočo vrednost. `STORNO` in `DOBROPIS` ne dobita novega roka plačila in ne kopirata roka izvirnika kot svojega roka. Njuno polje `rok_placila` je lahko `NULL`; PDF preflight ju zaradi tega ne zavrne. Renderer roka za korekcijo ne izračuna in ne kopira. PDF pri obeh jasno prikaže tip dokumenta, referenco na izvirni račun in razlog korekcije. Obravnava roka plačila v eSLOG za korekcije ostane odprta za 2B-2.
 
 ### 6.4 Logotip in podpis — MUST
 
@@ -664,29 +664,17 @@ Shranjevanje uporabnikove potrditve, čas potrditve, stale/valid status in UI č
 
 ## 8. eSLOG 2.0
 
-### 8.1 Stanje specifikacije — EXTERNAL BLOCKER
+### 8.1 Stanje specifikacije — 2B-0 ZAKLJUČEN
 
 PRD zahteva eSLOG 2.0 in XSD validacijo. SAD izrecno prestavi **natančno eSLOG shemo in preslikavo polj** v FSD Faze 2.
 
-V priloženih projektnih dokumentih ni:
+Uradni paket eSLOG 2.0, XSD `v200`, namespace definicije, navodila in primer so pridobljeni ter dokumentirani v `rendering/xsd/eslog_2_0/README.md`. O5 in 2B-0 sta zaključena.
 
-- uradne eSLOG 2.0 XSD sheme;
-- namespace definicij;
-- uradnega implementation guide-a;
-- kodnih list;
-- natančnih elementov za STORNO/DOBROPIS;
-- natančnega pravila za pogodbeno referenco;
-- vseh obveznih segmentov.
+Odprta preslikava fizične osebe brez davčne številke ni blocker za 2B-1. Ostane eksplicitna mapping naloga za 2B-2; identifikatorja ali placeholderja ni dovoljeno izumiti.
 
-Zato se teh podatkov v tem DRAFT-u ne izmišlja.
+### 8.2 Pridobljeni artefakti — ZAKLJUČENO v 2B-0
 
-**Implementacija `rendering/eslog.py` je BLOCKED do pridobitve uradnega, verzioniranega eSLOG 2.0 XSD paketa in pripadajoče dokumentacije.**
-
-PDF del Faze 2 zaradi tega ni blokiran.
-
-### 8.2 Artefakti, ki jih je treba pridobiti — MUST pred 2b
-
-V repo je treba dodati oziroma dokumentirano referencirati:
+V repo so dodani oziroma dokumentirano referencirani:
 
 1. uradni XSD paket za točno uporabljeno verzijo eSLOG 2.0;
 2. uradna navodila za preslikavo;
@@ -696,7 +684,7 @@ V repo je treba dodati oziroma dokumentirano referencirati:
 6. najmanj en uradno veljaven primer XML za regresijski test;
 7. uradno definicijo obveznih/neobveznih segmentov ter dovoljenih optional ključev in tipov, potrebnih za konfiguracijo iz PRD §10.3.
 
-Izvor in verzija artefaktov morata biti dokumentirana.
+Izvor in verzija artefaktov sta dokumentirana v `rendering/xsd/eslog_2_0/README.md`.
 
 ### 8.3 Konceptualna preslikava — MUST
 
@@ -712,7 +700,7 @@ Ko so uradni artefakti pridobljeni, se FSD FINAL dopolni s tabelo:
 | izdajatelj | snapshot `Invoice.izdajatelj_*` | TBD |
 | prejemnik | snapshot `Invoice.prejemnik_*` | TBD |
 | IBAN | `Invoice.izdajatelj_trr` | TBD |
-| pogodba | `Invoice.oznaka_pogodbe` | TBD |
+| pogodba | `Invoice.oznaka_pogodbe` | BT-12; `G_SG1/S_RFF/C_C506`, kvalifikator `CT`, vrednost v `D_1154` |
 | opis postavke | `InvoiceLine.opis` | TBD |
 | osnova | `InvoiceLine.osnova` | TBD |
 | DDV stopnja | `InvoiceLine.ddv_stopnja` | TBD |
@@ -720,7 +708,11 @@ Ko so uradni artefakti pridobljeni, se FSD FINAL dopolni s tabelo:
 | DDV kategorija | `InvoiceLine.ddv_eslog_koda` po potrditvi modela | TBD |
 | klavzula | `InvoiceLine.ddv_klavzula` | TBD |
 | totals | `Invoice.osnova_skupaj/ddv_skupaj/skupaj_z_ddv` | TBD |
-| popravek originala | `Invoice.povezan_racun.stevilka` | TBD |
+| popravek originala | `Invoice.povezan_racun.stevilka` | BT-25; `G_SG1/S_RFF/C_C506`, kvalifikator `OI`, vrednost v `D_1154`; datum izvirnika BT-26, kvalifikator `384` |
+
+Za `DOBROPIS` se uporabi uradna koda dokumenta `381`.
+
+Za interni tip `STORNO` se v eSLOG uporabi koda `381` ter ista referenca BT-25/BT-26 na izvirni račun. To je **projektna preslikava**, ne uradna eSLOG koda z nazivom »STORNO«.
 
 Beseda `TBD` je namerna in se pred implementacijo zamenja z dejanskimi uradnimi elementi.
 
@@ -781,19 +773,17 @@ Pravila:
 
 **Scope meja:** podatkovni/service model, potreben za pravilno generiranje XML, sodi v Fazo 2. Uporabniški UI za urejanje teh nastavitev ostane P1/poznejša faza, skladno s PRD.
 
-### 8.7 Fizične osebe — POTRJENO
+### 8.7 Fizične osebe — POTRJENO, mapping brez davčne številke UNRESOLVED
 
 Poslovna odločitev Faze 2:
 
-- eSLOG se generira samo za prejemnike tipa `PRAVNA_OSEBA`;
-- za `FIZICNA_OSEBA` se eSLOG ne generira;
-- `rendered_eslog_path` in `rendered_eslog_checksum` ostaneta prazna;
-- PDF se generira normalno;
+- eSLOG se generira, validira in arhivira za vsak račun;
+- davčna številka za `FIZICNA_OSEBA` ni predpogoj za izdajo;
 - eSLOG kanal za fizično osebo ostaja prepovedan.
 
 Odločitev temelji na snapshotu `Invoice.prejemnik_tip`, ne na živem `Tenant`.
 
-**Uskladitev vira zahtev:** trenutni PRD §10.4 vsebuje splošno poved, da se XML generira in arhivira »ob vsakem računu«. Ta poved je po tej potrjeni poslovni odločitvi zastarela in jo je treba pred označitvijo FSD kot FINAL minimalno popraviti, da izrecno izvzame fizične osebe.
+Uradna dokumentacija potrjuje zapis fizične osebe brez identifikatorja za DDV in brez matične številke, kadar ima davčno številko NBT-013/AHP. Za fizično osebo brez davčne številke uradna preslikava ni določena. Ta primer ostane `UNRESOLVED` za 2B-2; ne blokira 2B-1 in ne dovoljuje izmišljenega identifikatorja ali placeholderja.
 
 ---
 
@@ -926,7 +916,7 @@ Natančna avtomatika zastarelosti potrditve ostaja zunaj Faze 2, vendar renderer
 - test za dve LeaseItem na isti Lease;
 - test za mešan DDV.
 
-### 11.4 eSLOG — MUST po odpravi EXTERNAL BLOCKERJA
+### 11.4 eSLOG — MUST v 2B-2
 
 - minimalni veljavni XML;
 - pravna oseba kot prejemnik;
@@ -945,7 +935,8 @@ Natančna avtomatika zastarelosti potrditve ostaja zunaj Faze 2, vendar renderer
 - varen output path;
 - idempotenten ponovni klic;
 - checksum XML po §4;
-- fizična oseba: XML se ne generira, eSLOG pot/checksum ostaneta prazna in PDF ni blokiran;
+- fizična oseba: XML se generira, validira in arhivira; dostavni kanal `ESLOG` ostane prepovedan;
+- fizična oseba brez davčne številke: mapping ostane eksplicitno `UNRESOLVED`, brez izmišljenega identifikatorja ali placeholderja;
 - obveznega XSD segmenta ni mogoče izklopiti prek konfiguracije;
 - Company default neobveznega segmenta se uporabi, če ni override-a;
 - Tenant/recipient override pravilno povozi samo izrecno podane ključe;
@@ -1038,7 +1029,7 @@ Renderer pa mora imeti API, ki ga te poznejše faze lahko uporabijo brez spremem
 
 ### 2B-0 — pridobitev uradnega eSLOG paketa
 
-Brez tega ne piši produkcijskega XML mapperja.
+**ZAKLJUČENO.** Uradni paket, XSD in provenance/mapping README so verzionirani v `rendering/xsd/eslog_2_0/`.
 
 ### 2B-1 — model snapshot dopolnitve
 
@@ -1052,6 +1043,7 @@ Po uradni shemi potrdi, katera polja/kode manjkajo.
 - validacija;
 - varnost;
 - testi z uradnimi primeri.
+- razrešitev preslikave fizične osebe brez davčne številke brez izmišljenega identifikatorja ali placeholderja.
 
 ### 2B-3 — Phase 2 integration review
 
@@ -1067,18 +1059,13 @@ Celoten `pytest`, Django check, migrations check, Ruff in pregled proti temu FIN
 | O2 | Verzija PDF predloge | `Invoice.pdf_template_version`, določen ob potrditvi/izdaji | **ZAPRTO** |
 | O3 | Checksum PDF + XML | `Invoice.checksum` = PDF SHA-256; `rendered_eslog_checksum` = XML SHA-256 | **ZAPRTO** |
 | O4 | eSLOG koda | `InvoiceLine.ddv_eslog_koda` kot snapshot | **ZAPRTO** |
-| O5 | Uradni eSLOG XSD/mapping | pridobiti in verzionirati uradni paket | **ODPRTO — EXTERNAL BLOCKER za 2b** |
-| O6 | eSLOG za fizične osebe | ne generira se; odločitev temelji na `Invoice.prejemnik_tip` snapshotu | **ZAPRTO** |
+| O5 | Uradni eSLOG XSD/mapping | uradni paket `v200` pridobljen, verzioniran in dokumentiran | **ZAPRTO — 2B-0 zaključeno** |
+| O6 | eSLOG za fizične osebe | generira, validira in arhivira se za vsak račun; dostava `ESLOG` ostaja prepovedana; mapping brez davčne številke ostaja odprt za 2B-2 | **ZAPRTO kot poslovna odločitev** |
 | O7 | Recovery manjkajočega PDF | ločena recovery storitev; nadomestitev dovoljena samo ob istem checksumu | **ZAPRTO** |
 
 ### 14.1 Potrebni minimalni popravki višjih zahtev pred FINAL
 
-Zaradi potrjenih odločitev O3 in O6 sta potrebni dve majhni uskladitvi PRD v1.2, sicer bi FSD ostal v neposrednem konfliktu z višjim virom zahtev:
-
-1. **PRD §10.4:** »XML se generira ... ob vsakem računu« → izrecno izvzeti prejemnike tipa `FIZICNA_OSEBA`.
-2. **PRD §11.2:** namesto enega SHA-256 za PDF in XML določiti ločen kontrolni odtis na posamezen artifact; obstoječi `Invoice.checksum` ostane PDF checksum, XML dobi `rendered_eslog_checksum`.
-
-To sta uskladitvi potrjenih poslovnih/tehničnih odločitev, ne širitev scope-a.
+Zaradi potrjene odločitve O3 je potrebna ena majhna uskladitev PRD v1.2: **PRD §11.2** naj namesto enega SHA-256 za PDF in XML določi ločen kontrolni odtis na posamezen artifact; obstoječi `Invoice.checksum` ostane PDF checksum, XML dobi `rendered_eslog_checksum`.
 
 ---
 
