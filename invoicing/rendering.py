@@ -14,7 +14,7 @@ def nastavi_pdf_artifact(
             and svezi.checksum == checksum
         ):
             return svezi
-        raise ValueError("Ra?un ?e vsebuje PDF artifact.")
+        raise ValueError("Račun že vsebuje PDF artifact.")
 
     svezi.rendered_pdf_path = rendered_pdf_path
     svezi.checksum = checksum

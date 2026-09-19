@@ -169,7 +169,7 @@ def _preveri_obstojeci_artifact(invoice: Invoice) -> PdfRenderRezultat | None:
 def _zapisi_atomsko(pot: Path, pdf_bytes: bytes) -> None:
     pot.parent.mkdir(parents=True, exist_ok=True)
     if pot.exists():
-        raise PdfRenderNapaka("PDF_POT_ZASEDENA", "Ciljna PDF pot ?e obstaja.")
+        raise PdfRenderNapaka("PDF_POT_ZASEDENA", "Ciljna PDF pot že obstaja.")
     zacasna = None
     try:
         with NamedTemporaryFile(dir=pot.parent, prefix=".render-", suffix=".tmp", delete=False) as datoteka:
