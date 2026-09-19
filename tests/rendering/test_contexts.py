@@ -1,3 +1,4 @@
+import base64
 from datetime import date
 from decimal import Decimal
 
@@ -22,12 +23,22 @@ from rendering.contexts import (
     pripravi_vzorcni_pdf_context,
 )
 
+VALID_PNG_LOGO = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
+)
+VALID_PNG_PODPIS = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="
+)
+VALID_PNG_NOV_ASSET = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=="
+)
+
 
 @pytest.fixture
 def izdani_racun(db, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
-    (tmp_path / "logo.png").write_bytes(b"logo-A")
-    (tmp_path / "podpis.png").write_bytes(b"podpis-A")
+    (tmp_path / "logo.png").write_bytes(VALID_PNG_LOGO)
+    (tmp_path / "podpis.png").write_bytes(VALID_PNG_PODPIS)
     company = Company.objects.create(
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
@@ -244,15 +255,15 @@ def _asset_bytes(pot):
 @pytest.mark.parametrize(
     ("polje", "izvorna_pot", "pricakovano"),
     [
-        ("izdajatelj_logotip_slika_pot", "logo.png", b"logo-A"),
-        ("izdajatelj_podpisnik_slika_pot", "podpis.png", b"podpis-A"),
+        ("izdajatelj_logotip_slika_pot", "logo.png", VALID_PNG_LOGO),
+        ("izdajatelj_podpisnik_slika_pot", "podpis.png", VALID_PNG_PODPIS),
     ],
 )
 def test_fizicni_prepis_trenutnega_asseta_ne_spremeni_snapshot_bytes(
     izdani_racun, tmp_path, polje, izvorna_pot, pricakovano
 ):
     snapshot_pot = getattr(Invoice.objects.get(pk=izdani_racun.pk), polje)
-    (tmp_path / izvorna_pot).write_bytes(b"vsebina-B")
+    (tmp_path / izvorna_pot).write_bytes(VALID_PNG_NOV_ASSET)
 
     assert _asset_bytes(snapshot_pot) == pricakovano
 
@@ -264,11 +275,11 @@ def test_nova_logo_in_podpis_datoteka_ne_spremenita_snapshot_bytes(izdani_racun)
     company = invoice.company
     podpisnik = Signatory.objects.get(company=company)
 
-    company.logotip.save("nov-logo.png", ContentFile(b"logo-B"), save=True)
-    podpisnik.podpis_slika.save("nov-podpis.png", ContentFile(b"podpis-B"), save=True)
+    company.logotip.save("nov-logo.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
+    podpisnik.podpis_slika.save("nov-podpis.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
 
-    assert _asset_bytes(logo_pot) == b"logo-A"
-    assert _asset_bytes(podpis_pot) == b"podpis-A"
+    assert _asset_bytes(logo_pot) == VALID_PNG_LOGO
+    assert _asset_bytes(podpis_pot) == VALID_PNG_PODPIS
     invoice.refresh_from_db()
     assert invoice.izdajatelj_logotip_slika_pot == logo_pot
     assert invoice.izdajatelj_podpisnik_slika_pot == podpis_pot
