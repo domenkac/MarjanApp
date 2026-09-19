@@ -80,6 +80,25 @@ def test_sample_pdf_uses_production_template_without_db_side_effects(
     assert context.pdf_template_version == settings.PDF_TEMPLATE_VERSION
 
 
+def test_sample_pdf_se_lahko_varno_ponovno_generira(
+    izdani_racun, settings, tmp_path
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    stanje = (Invoice.objects.count(), InvoiceLine.objects.count())
+    argumenti = {
+        "datum_izdaje": date(2026, 9, 1),
+        "obdobje_od": date(2026, 9, 1),
+        "obdobje_do": date(2026, 9, 30),
+    }
+
+    prvi = render_sample_pdf(izdani_racun.lease, **argumenti)
+    drugi = render_sample_pdf(izdani_racun.lease, **argumenti)
+
+    assert drugi == prvi
+    assert (settings.RENDERING_ROOT / drugi.pot).read_bytes() == drugi.pdf_bytes
+    assert (Invoice.objects.count(), InvoiceLine.objects.count()) == stanje
+
+
 def test_sample_pdf_watermark_is_fixed_for_each_page(izdani_racun):
     context = pripravi_vzorcni_pdf_context(
         izdani_racun.lease,

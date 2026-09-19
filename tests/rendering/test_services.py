@@ -180,6 +180,30 @@ def test_ponovni_render_vrne_isti_artifact(izdani_racun, settings, tmp_path):
     assert drugi == prvi
 
 
+@pytest.mark.parametrize("napaka", ["manjka", "spremenjen"])
+def test_ponovni_render_ob_neveljavnem_artifactu_zavrne_brez_prepisa(
+    izdani_racun, settings, tmp_path, napaka
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prvi = render_pdf(izdani_racun)
+    pot = settings.RENDERING_ROOT / prvi.pot
+    if napaka == "manjka":
+        pot.unlink()
+    else:
+        pot.write_bytes(b"spremenjeno")
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        render_pdf(izdani_racun)
+
+    assert error.value.koda == "PDF_INTEGRITETA"
+    izdani_racun.refresh_from_db()
+    assert izdani_racun.checksum == prvi.checksum
+    if napaka == "manjka":
+        assert not pot.exists()
+    else:
+        assert pot.read_bytes() == b"spremenjeno"
+
+
 def test_neveljaven_network_asset_je_zavrnjen():
     with pytest.raises(PdfRenderNapaka) as error:
         _url_fetcher("https://primer.si/logo.png")

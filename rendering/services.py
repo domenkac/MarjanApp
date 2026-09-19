@@ -172,9 +172,9 @@ def _preveri_obstojeci_artifact(invoice: Invoice) -> PdfRenderRezultat | None:
     return PdfRenderRezultat(invoice.rendered_pdf_path, invoice.checksum, pdf_bytes)
 
 
-def _zapisi_atomsko(pot: Path, pdf_bytes: bytes) -> None:
+def _zapisi_atomsko(pot: Path, pdf_bytes: bytes, *, zamenjaj: bool = False) -> None:
     pot.parent.mkdir(parents=True, exist_ok=True)
-    if pot.exists():
+    if pot.exists() and not zamenjaj:
         raise PdfRenderNapaka("PDF_POT_ZASEDENA", "Ciljna PDF pot že obstaja.")
     zacasna = None
     try:
@@ -226,6 +226,5 @@ def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRend
         raise PdfRenderNapaka("PDF_POT_NEVELJAVNA", "PDF ime ni veljavno.") from napaka
     pdf_bytes = _generiraj_pdf_bytes(context)
     rezultat = PdfRenderRezultat(ime_datoteke, hashlib.sha256(pdf_bytes).hexdigest(), pdf_bytes)
-    _zapisi_atomsko(pot, pdf_bytes)
+    _zapisi_atomsko(pot, pdf_bytes, zamenjaj=True)
     return rezultat
-
