@@ -208,3 +208,66 @@ def test_neaktiven_clen_verige_izkljuci_nov_obracun(pot, polje):
         clen = getattr(clen, ime)
     setattr(clen, polje, not getattr(clen, polje))
     assert izracunaj_postavko(item, date(2026, 1, 1), date(2026, 1, 31)) is None
+@pytest.mark.parametrize(
+    ("obdobje_od", "obdobje_do", "zacetek", "konec", "mesecni_znesek", "osnova"),
+    [
+        (
+            date(2025, 2, 1), date(2025, 2, 28),
+            date(2025, 2, 15), date(2025, 2, 28),
+            "280.00", "140.00",
+        ),
+        (
+            date(2024, 2, 1), date(2024, 2, 29),
+            date(2024, 2, 15), date(2024, 2, 29),
+            "290.00", "150.00",
+        ),
+        (
+            date(2026, 4, 1), date(2026, 4, 30),
+            date(2026, 4, 11), date(2026, 4, 20),
+            "300.00", "100.00",
+        ),
+    ],
+)
+def test_delni_meseci_uporabijo_dejansko_stevilo_dni(
+    obdobje_od, obdobje_do, zacetek, konec, mesecni_znesek, osnova
+):
+    item = postavka(
+        znesek_neto_mesecno=Decimal(mesecni_znesek),
+        datum_zacetka_postavke=zacetek,
+        datum_prenehanja_postavke=konec,
+    )
+    item.lease.datum_zacetka = date(2024, 1, 1)
+
+    rezultat = izracunaj_postavko(item, obdobje_od, obdobje_do)
+
+    assert rezultat.osnova == Decimal(osnova)
+    assert rezultat.je_sorazmerno is True
+
+
+def test_izracun_uposteva_presecisce_pogodbe_in_postavke():
+    item = postavka(
+        znesek_neto_mesecno=Decimal("300.00"),
+        datum_zacetka_postavke=date(2026, 4, 5),
+        datum_prenehanja_postavke=date(2026, 4, 20),
+    )
+    item.lease.datum_zacetka = date(2026, 4, 10)
+    item.lease.datum_konca = date(2026, 4, 25)
+
+    rezultat = izracunaj_postavko(item, date(2026, 4, 1), date(2026, 4, 30))
+
+    assert rezultat.osnova == Decimal("110.00")
+    assert rezultat.je_sorazmerno is True
+
+
+def test_odpovedana_pogodba_uposteva_datum_prenehanja_v_izracunu():
+    item = postavka(znesek_neto_mesecno=Decimal("300.00"))
+    item.lease.status = Lease.Status.ODPOVEDANA
+    item.lease.datum_konca = date(2026, 4, 30)
+    item.lease.datum_prenehanja = date(2026, 4, 12)
+
+    rezultat = izracunaj_postavko(item, date(2026, 4, 1), date(2026, 4, 30))
+
+    assert rezultat.osnova == Decimal("120.00")
+    assert rezultat.ddv_znesek == Decimal("26.40")
+    assert rezultat.skupaj == Decimal("146.40")
+    assert rezultat.je_sorazmerno is True
