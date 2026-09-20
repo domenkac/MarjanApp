@@ -34,6 +34,7 @@ def test_sample_pdf_uses_production_template_without_db_side_effects(
         sifra="NI_TEST",
         naziv="Ni predmet",
         nacin_obracuna=VatRegime.NacinObracuna.NI_PREDMET,
+        eslog_koda="O",
         stopnja=Decimal("0.00"),
         rekapitulacijska_skupina="NI",
         velja_od=date(2026, 1, 1),

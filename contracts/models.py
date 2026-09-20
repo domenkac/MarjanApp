@@ -6,7 +6,11 @@ from django.db import models
 
 from catalogs.models import VatRegime
 from companies.models import Company
-from core.validators import preveri_davcno_stevilko, preveri_maticno_stevilko
+from core.validators import (
+    preveri_davcno_stevilko,
+    preveri_kodo_drzave,
+    preveri_maticno_stevilko,
+)
 
 
 class Property(models.Model):
@@ -45,9 +49,15 @@ class Tenant(models.Model):
 
     tip = models.CharField(max_length=13, choices=Tip)
     naziv = models.CharField()
-    davcna_stevilka = models.CharField(blank=True)
-    maticna_stevilka = models.CharField(max_length=10, blank=True)
+    davcna_stevilka = models.CharField(max_length=70, blank=True)
+    ddv_identifikacijska_stevilka = models.CharField(max_length=70, blank=True)
+    maticna_stevilka = models.CharField(max_length=70, blank=True)
     naslov = models.CharField()
+    drzava_koda = models.CharField(
+        max_length=2,
+        validators=[preveri_kodo_drzave],
+    )
+    identificiran_za_ddv = models.BooleanField()
     ddv_zavezanec_s_polnim_odbitkom = models.BooleanField(default=False)
     email = models.EmailField()
     aktiven = models.BooleanField(default=True)
@@ -56,22 +66,51 @@ class Tenant(models.Model):
         super().clean()
         napake = {}
         davcna_stevilka = (self.davcna_stevilka or "").strip()
+        ddv_identifikacijska_stevilka = (
+            self.ddv_identifikacijska_stevilka or ""
+        ).strip()
         maticna_stevilka = (self.maticna_stevilka or "").strip()
 
+        if self.identificiran_za_ddv and not davcna_stevilka:
+            napake["davcna_stevilka"] = (
+                "Davčna številka je obvezna za osebo, identificirano za DDV."
+            )
+        if (
+            self.identificiran_za_ddv
+            and self.drzava_koda != "SI"
+            and not ddv_identifikacijska_stevilka
+        ):
+            napake["ddv_identifikacijska_stevilka"] = (
+                "Tuja oseba, identificirana za DDV, mora imeti DDV identifikacijsko "
+                "številko."
+            )
+        if self.ddv_zavezanec_s_polnim_odbitkom and self.identificiran_za_ddv is False:
+            napake["ddv_zavezanec_s_polnim_odbitkom"] = (
+                "Polni odbitek DDV zahteva identifikacijo za DDV."
+            )
+        je_slovenski = self.drzava_koda == "SI"
         if self.tip == self.Tip.PRAVNA_OSEBA:
             if not davcna_stevilka:
                 napake["davcna_stevilka"] = (
                     "Za pravno osebo je davčna številka obvezna."
                 )
-            if not maticna_stevilka:
+            if je_slovenski and not maticna_stevilka:
                 napake["maticna_stevilka"] = (
                     "Za pravno osebo je matična številka obvezna."
                 )
-        if davcna_stevilka and not preveri_davcno_stevilko(davcna_stevilka):
+        if (
+            je_slovenski
+            and davcna_stevilka
+            and not preveri_davcno_stevilko(davcna_stevilka)
+        ):
             napake["davcna_stevilka"] = (
                 "Neveljavna davčna številka (napačna kontrolna števka)."
             )
-        if maticna_stevilka and not preveri_maticno_stevilko(maticna_stevilka):
+        if (
+            je_slovenski
+            and maticna_stevilka
+            and not preveri_maticno_stevilko(maticna_stevilka)
+        ):
             napake["maticna_stevilka"] = (
                 "Matična številka mora vsebovati natanko 10 mest."
             )
@@ -128,11 +167,7 @@ class Lease(models.Model):
     )
 
     def _nastavi_privzeti_rok_placila(self):
-        if (
-            self._state.adding
-            and self.rok_placila_dni is None
-            and self.unit_id
-        ):
+        if self._state.adding and self.rok_placila_dni is None and self.unit_id:
             self.rok_placila_dni = (
                 Unit.objects.filter(pk=self.unit_id)
                 .values_list(
@@ -154,9 +189,7 @@ class Lease(models.Model):
             self.tip_trajanja == self.TipTrajanja.DOLOCEN_CAS
             and self.datum_konca is None
         ):
-            napake["datum_konca"] = (
-                "Za pogodbo za določen čas je datum konca obvezen."
-            )
+            napake["datum_konca"] = "Za pogodbo za določen čas je datum konca obvezen."
         elif (
             self.tip_trajanja == self.TipTrajanja.NEDOLOCEN_CAS
             and self.datum_konca is not None
@@ -165,10 +198,7 @@ class Lease(models.Model):
                 "Pogodba za nedoločen čas ne sme imeti datuma konca."
             )
 
-        if (
-            self.samodejno_podaljsanje
-            and self.obdobje_podaljsanja_mesecev is None
-        ):
+        if self.samodejno_podaljsanje and self.obdobje_podaljsanja_mesecev is None:
             napake["obdobje_podaljsanja_mesecev"] = (
                 "Obdobje podaljšanja je obvezno pri samodejnem podaljšanju."
             )
@@ -178,8 +208,7 @@ class Lease(models.Model):
                 "Tip pogoja je obvezen pri indeksacijski klavzuli."
             )
         if (
-            self.tip_pogoja_indeksacije
-            == self.TipPogojaIndeksacije.PRAG_SPREMEMBE
+            self.tip_pogoja_indeksacije == self.TipPogojaIndeksacije.PRAG_SPREMEMBE
             and self.prag_spremembe_odstotek is None
         ):
             napake["prag_spremembe_odstotek"] = (
@@ -274,9 +303,7 @@ class RecipientContact(models.Model):
             and self.lease.tenant.tip == Tenant.Tip.FIZICNA_OSEBA
             and self.kanal in {self.Kanal.ESLOG, self.Kanal.OBOJE}
         ):
-            raise ValidationError(
-                {"kanal": "Za fizično osebo je dovoljen samo PDF."}
-            )
+            raise ValidationError({"kanal": "Za fizično osebo je dovoljen samo PDF."})
 
 
 class IndexationEvent(models.Model):
@@ -321,12 +348,11 @@ class PoracunIndeksacije(models.Model):
 
     def clean(self):
         super().clean()
-        if self.status == self.Status.ZAVRNJEN and not (
-            self.razlog_zavrnitve or ""
-        ).strip():
-            raise ValidationError(
-                {"razlog_zavrnitve": "Razlog zavrnitve je obvezen."}
-            )
+        if (
+            self.status == self.Status.ZAVRNJEN
+            and not (self.razlog_zavrnitve or "").strip()
+        ):
+            raise ValidationError({"razlog_zavrnitve": "Razlog zavrnitve je obvezen."})
 
         if self.indexation_event_id and self.znesek_poracuna is not None:
             pricakovano = (

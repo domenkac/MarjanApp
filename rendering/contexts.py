@@ -33,6 +33,54 @@ class PdfVrstica:
     je_sorazmerno: bool
 
 
+class EslogRenderNapaka(ValueError):
+    def __init__(self, koda: str, sporocilo: str):
+        self.koda = koda
+        self.artifact_tip = "ESLOG"
+        super().__init__(sporocilo)
+
+
+@dataclass(frozen=True, slots=True)
+class EslogVrstica:
+    opis: str
+    osnova: Decimal
+    ddv_stopnja: Decimal
+    ddv_znesek: Decimal
+    skupaj: Decimal
+    ddv_eslog_koda: str
+    ddv_klavzula: str
+
+
+@dataclass(frozen=True, slots=True)
+class EslogContext:
+    document_type: str
+    stevilka: str
+    datum_izdaje: date
+    rok_placila: date | None
+    prejemnik_naziv: str
+    prejemnik_naslov: str
+    prejemnik_drzava_koda: str
+    prejemnik_identificiran_za_ddv: bool
+    prejemnik_davcna_stevilka: str
+    prejemnik_ddv_identifikacijska_stevilka: str
+    prejemnik_maticna_stevilka: str
+    prejemnik_tip: str
+    izdajatelj_naziv: str
+    izdajatelj_naslov: str
+    izdajatelj_drzava_koda: str
+    izdajatelj_identificiran_za_ddv: bool
+    izdajatelj_davcna_stevilka: str
+    izdajatelj_maticna_stevilka: str
+    izdajatelj_trr: str
+    oznaka_pogodbe: str | None
+    povezan_racun_stevilka: str | None
+    povezan_racun_datum: date | None
+    osnova_skupaj: Decimal
+    ddv_skupaj: Decimal
+    skupaj_z_ddv: Decimal
+    vrstice: tuple[EslogVrstica, ...]
+
+
 @dataclass(frozen=True, slots=True)
 class PdfContext:
     document_type: str
@@ -84,14 +132,18 @@ _OBVEZNI_SNAPSHOTI = (
 def _preveri_polja(zapis, polja):
     for polje in polja:
         if not str(getattr(zapis, polje, "") or "").strip():
-            raise PdfRenderNapaka("SNAPSHOT_MANJKA", f"Manjka obvezen podatek: {polje}.")
+            raise PdfRenderNapaka(
+                "SNAPSHOT_MANJKA", f"Manjka obvezen podatek: {polje}."
+            )
 
 
 def _preveri_sliko(pot: str):
     try:
         obstaja = default_storage.exists(pot)
     except (OSError, SuspiciousFileOperation, ValueError) as napaka:
-        raise PdfRenderNapaka("ASSET_NEVELJAVEN", f"Slika ni dovoljena: {pot}.") from napaka
+        raise PdfRenderNapaka(
+            "ASSET_NEVELJAVEN", f"Slika ni dovoljena: {pot}."
+        ) from napaka
     if not obstaja:
         raise PdfRenderNapaka("ASSET_MANJKA", f"Slika ne obstaja: {pot}.")
 
@@ -123,21 +175,23 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
     if svezi.document_type not in Invoice.DocumentType.values:
         raise PdfRenderNapaka("TIP_NEVELJAVEN", "Tip dokumenta ni veljaven.")
     _preveri_polja(svezi, _OBVEZNI_SNAPSHOTI)
-    if svezi.document_type in (Invoice.DocumentType.NP, Invoice.DocumentType.ST) and svezi.rok_placila is None:
+    if (
+        svezi.document_type in (Invoice.DocumentType.NP, Invoice.DocumentType.ST)
+        and svezi.rok_placila is None
+    ):
         raise PdfRenderNapaka("SNAPSHOT_MANJKA", "Manjka rok plačila.")
     if svezi.document_type == Invoice.DocumentType.NP and not svezi.oznaka_pogodbe:
         raise PdfRenderNapaka("SNAPSHOT_MANJKA", "Manjka oznaka pogodbe.")
     if svezi.document_type in (
-        Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS
+        Invoice.DocumentType.STORNO,
+        Invoice.DocumentType.DOBROPIS,
     ):
         if not (svezi.razlog or "").strip() or not svezi.povezan_racun_id:
             raise PdfRenderNapaka(
                 "KOREKCIJA_NEPOPOLNA", "Korekcija nima razloga ali izvirnega računa."
             )
         if not svezi.povezan_racun.stevilka:
-            raise PdfRenderNapaka(
-                "KOREKCIJA_NEPOPOLNA", "Izvirni račun nima številke."
-            )
+            raise PdfRenderNapaka("KOREKCIJA_NEPOPOLNA", "Izvirni račun nima številke.")
     _preveri_sliko(svezi.izdajatelj_logotip_slika_pot)
     _preveri_sliko(svezi.izdajatelj_podpisnik_slika_pot)
 
@@ -148,10 +202,15 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
         _preveri_polja(vrstica, ("opis", "ddv_nacin_obracuna", "ddv_rekap_skupina"))
         if (
             vrstica.ddv_nacin_obracuna
-            in (VatRegime.NacinObracuna.OPROSCENO, VatRegime.NacinObracuna.OBRNJENA_DAVCNA)
+            in (
+                VatRegime.NacinObracuna.OPROSCENO,
+                VatRegime.NacinObracuna.OBRNJENA_DAVCNA,
+            )
             and not vrstica.ddv_klavzula.strip()
         ):
-            raise PdfRenderNapaka("KLAVZULA_MANJKA", "Vrstica nima obvezne DDV klavzule.")
+            raise PdfRenderNapaka(
+                "KLAVZULA_MANJKA", "Vrstica nima obvezne DDV klavzule."
+            )
         if vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
             raise PdfRenderNapaka("VSOTE_NESKLADNE", "Vsota vrstice ni konsistentna.")
     if any(
@@ -165,7 +224,9 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
         or sum((v.skupaj for v in vrstice), Decimal("0.00")) != svezi.skupaj_z_ddv
         or svezi.osnova_skupaj + svezi.ddv_skupaj != svezi.skupaj_z_ddv
     ):
-        raise PdfRenderNapaka("VSOTE_NESKLADNE", "Vsote računa se ne ujemajo z vrsticami.")
+        raise PdfRenderNapaka(
+            "VSOTE_NESKLADNE", "Vsote računa se ne ujemajo z vrsticami."
+        )
     return svezi, vrstice
 
 
@@ -210,12 +271,18 @@ def pripravi_vzorcni_pdf_context(
 ) -> PdfContext:
     if not isinstance(lease, Lease) or lease.pk is None:
         raise PdfRenderNapaka("POGODBA_NE_OBSTAJA", "Pogodba ne obstaja.")
-    lease = Lease.objects.select_related("tenant", "unit__property__company").filter(pk=lease.pk).first()
+    lease = (
+        Lease.objects.select_related("tenant", "unit__property__company")
+        .filter(pk=lease.pk)
+        .first()
+    )
     if lease is None:
         raise PdfRenderNapaka("POGODBA_NE_OBSTAJA", "Pogodba ne obstaja.")
     kandidat = izracunaj_kandidata(lease, obdobje_od, obdobje_do, datum_izdaje)
     if not kandidat.se_izda:
-        raise PdfRenderNapaka("VZOREC_NEVELJAVEN", kandidat.razlog_neizdaje or "Ni obračunljivih vrstic.")
+        raise PdfRenderNapaka(
+            "VZOREC_NEVELJAVEN", kandidat.razlog_neizdaje or "Ni obračunljivih vrstic."
+        )
     company = lease.unit.property.company
     tenant = lease.tenant
     try:

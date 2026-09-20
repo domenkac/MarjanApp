@@ -192,6 +192,37 @@ def test_dobropis_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
 
 
 @pytest.mark.parametrize(
+    ("nacin", "koda"),
+    [("OPROSCENO", "E"), ("OBRNJENA_DAVCNA", "AE")],
+)
+def test_dobropis_brez_ddv_klavzule_ne_porabi_stevilke(pogodba, nacin, koda):
+    original = izdan_np(pogodba)
+    dobropis = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.DOBROPIS, "Popust", date(2026, 9, 2)
+    )
+    dodaj_vrstico(
+        dobropis,
+        opis="Dobropis brez klavzule",
+        osnova=Decimal("-10.00"),
+        ddv_stopnja=Decimal("0.00"),
+        ddv_znesek=Decimal("0.00"),
+        skupaj=Decimal("-10.00"),
+        ddv_nacin_obracuna=nacin,
+        ddv_eslog_koda=koda,
+        ddv_klavzula="",
+        ddv_rekap_skupina=nacin,
+    )
+
+    with pytest.raises(ValueError, match="DDV klavzule"):
+        potrdi_korekcijski_osnutek(dobropis)
+
+    assert dobropis.stevilka is None
+    assert NumberSequence.objects.get(
+        company=original.company, tip=NumberSequence.Tip.NP, leto=0
+    ).zadnja_stevilka == 1
+
+
+@pytest.mark.parametrize(
     "osnova,ddv,skupaj",
     [
         (float(-10), Decimal("-2.20"), Decimal("-12.20")),

@@ -15,6 +15,7 @@ from invoicing.models import Invoice, InvoiceLine
 @pytest.fixture
 def company():
     return Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -66,6 +67,8 @@ def ustvari_pogodbo(company):
         property=property, oznaka="Pisarna 1", tip_enote=Unit.TipEnote.PISARNA
     )
     tenant = Tenant.objects.create(
+        drzava_koda="SI",
+        identificiran_za_ddv=True,
         tip=Tenant.Tip.PRAVNA_OSEBA,
         naziv="Najemnik d.o.o.",
         davcna_stevilka="15012557",
@@ -98,18 +101,48 @@ def test_invoice_polja_izbire_in_privzeti_status(company):
         "POPRAVLJEN",
     }
     assert {field.name for field in Invoice._meta.concrete_fields} == {
-        "id", "company", "document_type", "lease", "stevilka", "datum_izdaje",
-        "obdobje_od", "obdobje_do", "rok_placila", "prejemnik_naziv",
-        "prejemnik_naslov", "prejemnik_davcna_stevilka",
-        "prejemnik_maticna_stevilka", "izdajatelj_naziv", "izdajatelj_naslov",
-        "izdajatelj_davcna_stevilka", "izdajatelj_maticna_stevilka",
-        "izdajatelj_trr", "izdajatelj_logotip_slika_pot",
-        "pdf_template_version", "izdajatelj_podpisnik_ime",
-        "izdajatelj_podpisnik_funkcija", "izdajatelj_podpisnik_slika_pot",
-        "oznaka_pogodbe", "objekt_naziv", "status", "povezan_racun", "razlog",
-        "razlog_arhiviranja", "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv",
-        "rendered_pdf_path", "rendered_eslog_path", "checksum",
-        "prejemnik_tip", "rendered_eslog_checksum",
+        "id",
+        "company",
+        "document_type",
+        "lease",
+        "stevilka",
+        "datum_izdaje",
+        "obdobje_od",
+        "obdobje_do",
+        "rok_placila",
+        "prejemnik_naziv",
+        "prejemnik_naslov",
+        "prejemnik_drzava_koda",
+        "prejemnik_identificiran_za_ddv",
+        "prejemnik_davcna_stevilka",
+        "prejemnik_ddv_identifikacijska_stevilka",
+        "prejemnik_maticna_stevilka",
+        "izdajatelj_naziv",
+        "izdajatelj_naslov",
+        "izdajatelj_drzava_koda",
+        "izdajatelj_identificiran_za_ddv",
+        "izdajatelj_davcna_stevilka",
+        "izdajatelj_maticna_stevilka",
+        "izdajatelj_trr",
+        "izdajatelj_logotip_slika_pot",
+        "pdf_template_version",
+        "izdajatelj_podpisnik_ime",
+        "izdajatelj_podpisnik_funkcija",
+        "izdajatelj_podpisnik_slika_pot",
+        "oznaka_pogodbe",
+        "objekt_naziv",
+        "status",
+        "povezan_racun",
+        "razlog",
+        "razlog_arhiviranja",
+        "osnova_skupaj",
+        "ddv_skupaj",
+        "skupaj_z_ddv",
+        "rendered_pdf_path",
+        "rendered_eslog_path",
+        "checksum",
+        "prejemnik_tip",
+        "rendered_eslog_checksum",
     }
     invoice = Invoice(**podatki_racuna(company))
     invoice.full_clean()
@@ -148,7 +181,9 @@ def test_invoice_neveljavne_izbire(company):
     "document_type", [Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS]
 )
 def test_storno_in_dobropis_zahtevata_razlog(company, document_type):
-    invoice = Invoice(**podatki_racuna(company, document_type=document_type, razlog="  "))
+    invoice = Invoice(
+        **podatki_racuna(company, document_type=document_type, razlog="  ")
+    )
     with pytest.raises(ValidationError) as error:
         invoice.full_clean()
     assert "razlog" in error.value.message_dict
@@ -182,6 +217,7 @@ def test_vec_osnutkov_brez_stevilke_je_dovoljenih(company):
 @pytest.mark.django_db
 def test_ista_stevilka_pri_dveh_podjetjih_je_dovoljena(company):
     drugo = Company.objects.create(
+        drzava_koda="SI",
         naziv="Beta d.o.o.",
         davcna_stevilka=company.davcna_stevilka,
         maticna_stevilka=company.maticna_stevilka,
@@ -229,9 +265,20 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
         **podatki_racuna(company, document_type=Invoice.DocumentType.ST)
     )
     assert {field.name for field in InvoiceLine._meta.concrete_fields} == {
-        "id", "invoice", "lease", "lease_item", "opis", "osnova",
-        "ddv_stopnja", "ddv_znesek", "skupaj", "ddv_nacin_obracuna",
-        "ddv_klavzula", "ddv_rekap_skupina", "ddv_eslog_koda", "je_sorazmerno",
+        "id",
+        "invoice",
+        "lease",
+        "lease_item",
+        "opis",
+        "osnova",
+        "ddv_stopnja",
+        "ddv_znesek",
+        "skupaj",
+        "ddv_nacin_obracuna",
+        "ddv_klavzula",
+        "ddv_rekap_skupina",
+        "ddv_eslog_koda",
+        "je_sorazmerno",
         "razlog_rocnega_popravka",
         "izvirno_izracunana_vrednost",
     }

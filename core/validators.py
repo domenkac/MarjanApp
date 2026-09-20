@@ -18,6 +18,16 @@ SK24 SM27 ST25 SV28 TL23 TN24 TR26 UA29 VA22 VG24 XK20
 IBAN_LENGTHS = {item[:2]: int(item[2:]) for item in _IBAN_SPECS}
 
 
+_ISO_3166_1_ALPHA_2 = frozenset(
+    ["AD", "AE", "AF", "AG", "AI", "AL", "AM", "AO", "AQ", "AR", "AS", "AT", "AU", "AW", "AX", "AZ", "BA", "BB", "BD", "BE", "BF", "BG", "BH", "BI", "BJ", "BL", "BM", "BN", "BO", "BQ", "BR", "BS", "BT", "BV", "BW", "BY", "BZ", "CA", "CC", "CD", "CF", "CG", "CH", "CI", "CK", "CL", "CM", "CN", "CO", "CR", "CU", "CV", "CW", "CX", "CY", "CZ", "DE", "DJ", "DK", "DM", "DO", "DZ", "EC", "EE", "EG", "EH", "ER", "ES", "ET", "FI", "FJ", "FK", "FM", "FO", "FR", "GA", "GB", "GD", "GE", "GF", "GG", "GH", "GI", "GL", "GM", "GN", "GP", "GQ", "GR", "GS", "GT", "GU", "GW", "GY", "HK", "HM", "HN", "HR", "HT", "HU", "ID", "IE", "IL", "IM", "IN", "IO", "IQ", "IR", "IS", "IT", "JE", "JM", "JO", "JP", "KE", "KG", "KH", "KI", "KM", "KN", "KP", "KR", "KW", "KY", "KZ", "LA", "LB", "LC", "LI", "LK", "LR", "LS", "LT", "LU", "LV", "LY", "MA", "MC", "MD", "ME", "MF", "MG", "MH", "MK", "ML", "MM", "MN", "MO", "MP", "MQ", "MR", "MS", "MT", "MU", "MV", "MW", "MX", "MY", "MZ", "NA", "NC", "NE", "NF", "NG", "NI", "NL", "NO", "NP", "NR", "NU", "NZ", "OM", "PA", "PE", "PF", "PG", "PH", "PK", "PL", "PM", "PN", "PR", "PS", "PT", "PW", "PY", "QA", "RE", "RO", "RS", "RU", "RW", "SA", "SB", "SC", "SD", "SE", "SG", "SH", "SI", "SJ", "SK", "SL", "SM", "SN", "SO", "SR", "SS", "ST", "SV", "SX", "SY", "SZ", "TC", "TD", "TF", "TG", "TH", "TJ", "TK", "TL", "TM", "TN", "TO", "TR", "TT", "TV", "TW", "TZ", "UA", "UG", "UM", "US", "UY", "UZ", "VA", "VC", "VE", "VG", "VI", "VN", "VU", "WF", "WS", "YE", "YT", "ZA", "ZM", "ZW"]
+)
+
+
+def preveri_kodo_drzave(vrednost: str) -> None:
+    if vrednost not in _ISO_3166_1_ALPHA_2:
+        raise ValidationError("Koda države mora biti veljavna ISO 3166-1 alpha-2.")
+
+
 def preveri_davcno_stevilko(stevilka: str) -> bool:
     if not isinstance(stevilka, str) or not re.fullmatch(r"[0-9]{8}", stevilka):
         return False
@@ -34,7 +44,9 @@ def preveri_davcno_stevilko(stevilka: str) -> bool:
 
 
 def preveri_maticno_stevilko(stevilka: str) -> bool:
-    return isinstance(stevilka, str) and re.fullmatch(r"[0-9]{10}", stevilka) is not None
+    return (
+        isinstance(stevilka, str) and re.fullmatch(r"[0-9]{10}", stevilka) is not None
+    )
 
 
 def normaliziraj_iban(iban: str) -> str:
@@ -42,13 +54,18 @@ def normaliziraj_iban(iban: str) -> str:
 
 
 def preveri_iban(iban: str) -> bool:
-    if not isinstance(iban, str) or not re.fullmatch(r"[A-Z]{2}[0-9]{2}[A-Z0-9]+", iban):
+    if not isinstance(iban, str) or not re.fullmatch(
+        r"[A-Z]{2}[0-9]{2}[A-Z0-9]+", iban
+    ):
         return False
     if len(iban) != IBAN_LENGTHS.get(iban[:2]):
         return False
     prestavljeno = iban[4:] + iban[:4]
-    stevilsko = "".join(znak if znak.isdigit() else str(ord(znak) - 55) for znak in prestavljeno)
+    stevilsko = "".join(
+        znak if znak.isdigit() else str(ord(znak) - 55) for znak in prestavljeno
+    )
     return int(stevilsko) % 97 == 1
+
 
 NAJVECJA_SLIKA = 5 * 1024 * 1024
 NAJVEC_PIK = 20_000_000

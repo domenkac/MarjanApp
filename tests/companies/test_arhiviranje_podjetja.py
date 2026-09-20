@@ -37,16 +37,23 @@ def test_arhiviranje_podjetja_ohrani_zgodovino_in_izkljuci_novi_np(pogodba):
     assert InvoiceLine.objects.get(pk=line.pk).lease_item_id == item.pk
     invoice.refresh_from_db()
     assert (invoice.company_id, invoice.stevilka, invoice.skupaj_z_ddv) == (
-        company.pk, "NP-00001", Decimal("122.00")
+        company.pk,
+        "NP-00001",
+        Decimal("122.00"),
     )
-    assert pripravi_osnutek_np(
-        pogodba, date(2026, 9, 1), date(2026, 9, 30), date(2026, 10, 1)
-    ).invoice is None
+    assert (
+        pripravi_osnutek_np(
+            pogodba, date(2026, 9, 1), date(2026, 9, 30), date(2026, 10, 1)
+        ).invoice
+        is None
+    )
     audit = AuditLogEntry.objects.get(
         content_type=ContentType.objects.get_for_model(Company), object_id=company.pk
     )
     assert (audit.dejanje, audit.polje, audit.nova_vrednost) == (
-        AuditLogEntry.Dejanje.SPREMEMBA, "aktivno", "False"
+        AuditLogEntry.Dejanje.SPREMEMBA,
+        "aktivno",
+        "False",
     )
 
 
@@ -65,7 +72,8 @@ def test_veljavna_ponovna_aktivacija_podjetja(pogodba, settings, tmp_path):
         content_type=ContentType.objects.get_for_model(Company), object_id=company.pk
     ).order_by("pk")
     assert list(revizije.values_list("stara_vrednost", "nova_vrednost")) == [
-        ("True", "False"), ("False", "True")
+        ("True", "False"),
+        ("False", "True"),
     ]
 
 
@@ -75,6 +83,7 @@ def test_company_konflikt_davcne_blokira_reaktivacijo(pogodba, settings, tmp_pat
     company.logotip.save("logo.png", ContentFile(slika_bytes()), save=True)
     assert arhiviraj_poslovni_zapis(company).uspesno is True
     Company.objects.create(
+        drzava_koda="SI",
         naziv="Drugo podjetje",
         davcna_stevilka=company.davcna_stevilka,
         maticna_stevilka="1234567000",
@@ -92,7 +101,10 @@ def test_company_konflikt_davcne_blokira_reaktivacijo(pogodba, settings, tmp_pat
     assert [razlog.koda for razlog in rezultat.razlogi] == ["KONFLIKT_DAVCNE_STEVILKE"]
     company.refresh_from_db()
     assert company.aktivno is False
-    assert AuditLogEntry.objects.filter(
-        content_type=ContentType.objects.get_for_model(Company),
-        object_id=company.pk,
-    ).count() == 1
+    assert (
+        AuditLogEntry.objects.filter(
+            content_type=ContentType.objects.get_for_model(Company),
+            object_id=company.pk,
+        ).count()
+        == 1
+    )

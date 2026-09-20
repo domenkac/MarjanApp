@@ -241,6 +241,17 @@ Vrednost se določi ob pripravi/potrditvi dokumenta. Pri ročnih ST dokumentih j
 - manjkajoča davčna številka ne blokira izdaje računa ali 2B-1;
 - preslikava kupca brez davčne številke ostane `UNRESOLVED` za 2B-2; renderer ne sme izumiti identifikatorja ali placeholderja.
 
+#### 2.3.5 eSLOG status DDV in država partnerja — POTRJENO
+
+`Company.ddv_zavezanec` je avtoritativen vir statusa izdajatelja. `Tenant.identificiran_za_ddv` je ločen avtoritativen vir statusa prejemnika; `ddv_zavezanec_s_polnim_odbitkom` ni nadomestek. Pri pripravi NP osnutka se na `Invoice` skupaj z drugimi podatki partnerjev zapišejo nespremenljivi snapshoti `izdajatelj_identificiran_za_ddv` in `prejemnik_identificiran_za_ddv`. Potrditev jih ne osveži iz živih partnerjev.
+
+`Company.drzava_koda` in `Tenant.drzava_koda` sta obvezni kodi ISO 3166-1 alpha-2. Pri pripravi NP osnutka se zapišeta v `Invoice.izdajatelj_drzava_koda` in `Invoice.prejemnik_drzava_koda`; potrditev ju ne osveži. Obstoječi zapisi se migrirajo na `SI`; novi partnerji nimajo privzete države. Obstoječi partnerji in računi se migrirajo na status identificiran za DDV.
+
+Za partnerje s kodo države `SI` ostaneta obvezni stroga slovenska validacija davčne številke in, pri pravnih osebah, slovenski format matične številke. Tuja pravna oseba mora imeti neprazno davčno številko. Če je identificirana za DDV, mora imeti tudi izrecni polni VAT ID. Zanjo se slovenska kontrolna številka in slovenski format matične številke ne preverjata; tuji registracijski identifikator je lahko prazen ali dolg največ 70 znakov. Zunanje preverjanje VIES ni del v1.
+
+`Tenant.ddv_identifikacijska_stevilka` hrani izrecni polni VAT ID tujega prejemnika in se pri pripravi osnutka kopira v `Invoice.prejemnik_ddv_identifikacijska_stevilka`. Za slovenskega prejemnika se `VA` deterministično sestavi kot `SI` + slovenska davčna številka. Za tujega DDV-identificiranega prejemnika se v `VA` zapiše nespremenjeni polni snapshot VAT ID; koda države se ne dodaja. `AHP` vedno vsebuje davčno registracijsko številko. Renderer zavrne DDV-identificiranega tujega prejemnika brez polnega VAT ID.
+
+Podpora skupinam za DDV je zunaj obsega v1. Polj ali preslikav skupine se ne dodaja.
 ---
 
 ### 2.4 Modelne dopolnitve Faze 2 — povzetek
@@ -472,7 +483,7 @@ Pri NP mora biti sklic na pogodbo jasno viden v glavi.
 
 Pri ST je pogodba lahko prazna.
 
-**Rok plačila pri PDF — potrjena poslovna odločitev:** Pri `NP` in `ST` je `rok_placila` za finalni PDF obvezen; PDF preflight zavrne manjkajočo vrednost. `STORNO` in `DOBROPIS` ne dobita novega roka plačila in ne kopirata roka izvirnika kot svojega roka. Njuno polje `rok_placila` je lahko `NULL`; PDF preflight ju zaradi tega ne zavrne. Renderer roka za korekcijo ne izračuna in ne kopira. PDF pri obeh jasno prikaže tip dokumenta, referenco na izvirni račun in razlog korekcije. Obravnava roka plačila v eSLOG za korekcije ostane odprta za 2B-2.
+**Rok plačila pri PDF — potrjena poslovna odločitev:** Pri `NP` in `ST` je `rok_placila` za finalni PDF obvezen; PDF preflight zavrne manjkajočo vrednost. `STORNO` in `DOBROPIS` ne dobita novega roka plačila in ne kopirata roka izvirnika kot svojega roka. Njuno polje `rok_placila` je lahko `NULL`; PDF preflight ju zaradi tega ne zavrne. Renderer roka za korekcijo ne izračuna in ne kopira. PDF pri obeh jasno prikaže tip dokumenta, referenco na izvirni račun in razlog korekcije. BT-9 ima v uradnem eSLOG 2.0 modelu kardinalnost `0..1`, `G_SG8` pa je v XSD neobvezen. Korekcije `381` brez potrjenega roka plačila zato izpustijo `G_SG8`/BT-9; rok se ne kopira in ne izmišlja.
 
 ### 6.4 Logotip in podpis — MUST
 
@@ -706,7 +717,7 @@ Ko so uradni artefakti pridobljeni, se FSD FINAL dopolni s tabelo:
 | DDV stopnja | `InvoiceLine.ddv_stopnja` | TBD |
 | DDV znesek | `InvoiceLine.ddv_znesek` | TBD |
 | DDV kategorija | `InvoiceLine.ddv_eslog_koda` po potrditvi modela | TBD |
-| klavzula | `InvoiceLine.ddv_klavzula` | TBD |
+| klavzula | `InvoiceLine.ddv_klavzula` | BT-120; `S_FTX[D_4451='AGM']/C_C108/D_4440` |
 | totals | `Invoice.osnova_skupaj/ddv_skupaj/skupaj_z_ddv` | TBD |
 | popravek originala | `Invoice.povezan_racun.stevilka` | BT-25; `G_SG1/S_RFF/C_C506`, kvalifikator `OI`, vrednost v `D_1154`; datum izvirnika BT-26, kvalifikator `384` |
 
@@ -716,6 +727,15 @@ Za interni tip `STORNO` se v eSLOG uporabi koda `381` ter ista referenca BT-25/B
 
 Beseda `TBD` je namerna in se pred implementacijo zamenja z dejanskimi uradnimi elementi.
 
+### 8.3.1 Potrjene projektne preslikave 2B-2A
+
+Partnerja uporabljata kvalifikatorja `SE` in `BY`. Država se zapiše iz snapshot polja v `S_NAD/D_3207`; enovrstični `naslov` ostane v `C_C059/D_3042`. Matična številka se zapiše iz snapshota z `G_SG3/S_RFF/C_C506/D_1153 = 0199`.
+
+Identificiran partner se zapiše z `VA` in `AHP`; neidentificiran partner samo z `AHP`. Če račun vsebuje kategorijo `O`, se davčna identifikatorja partnerjev zapišeta samo z `AHP`. Renderer bere samo `Invoice` in `InvoiceLine` snapshote. Skupine za DDV niso podprte v v1.
+
+Za v1 ena `InvoiceLine` predstavlja eno agregirano obračunano storitev: BT-129 količina je `1`, BT-130 enota je `C62`, BT-146 neto cena enote pa je `InvoiceLine.osnova`. Dodatna modelna polja za količino, enoto ali ceno se ne dodajo.
+
+Kategorija `O` se ne sme združiti z obdavčenimi postavkami kategorije `S` na istem eSLOG računu. Potrditev to preveri pred dodelitvijo številke. Pravilo se ne razširi na kombinacije `O` z `E` ali `AE`. Vir: EPOS, pojasnilo z dne 24. 6. 2022: https://www.epos.si/novice/dopolnitev-pojasnila-o-uporabi-dav%C4%8Dnih-kod-v-e-ra%C4%8Dunih-e-slog-2-0
 ### 8.4 XSD validacija — MUST
 
 XML ni uspešno renderiran, dokler:

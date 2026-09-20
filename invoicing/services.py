@@ -47,6 +47,24 @@ def _preveri_eslog_kodo(nacin: str, koda: str, vir: str) -> str:
         )
     return koda
 
+
+def _preveri_mesanje_eslog_o(vrstice) -> None:
+    kode = {vrstica.ddv_eslog_koda for vrstica in vrstice}
+    if "O" in kode and "S" in kode:
+        raise ValueError(
+            "eSLOG račun ne sme združevati kategorije O in obdavčenih postavk."
+        )
+
+
+def _preveri_ddv_klavzule(vrstice) -> None:
+    if any(
+        vrstica.ddv_eslog_koda in {"E", "AE"}
+        and not (vrstica.ddv_klavzula or "").strip()
+        for vrstica in vrstice
+    ):
+        raise ValueError("Vrstica kategorije E ali AE nima obvezne DDV klavzule.")
+
+
 MIGRACIJSKI_RAZLOG = "Migracijski zapis – uvoz stanja pred prehodom na aplikacijo"
 
 
@@ -59,9 +77,11 @@ def uvozi_migracijsko_stanje(
     if zadnje_zaracunano_obdobje_od > zadnje_zaracunano_obdobje_do:
         raise ValueError("Začetek obdobja mora biti pred koncem obdobja.")
 
-    lease = Lease.objects.select_for_update().select_related(
-        "unit__property__company"
-    ).get(pk=lease.pk)
+    lease = (
+        Lease.objects.select_for_update()
+        .select_related("unit__property__company")
+        .get(pk=lease.pk)
+    )
     if Invoice.objects.filter(
         lease=lease,
         document_type=Invoice.DocumentType.NP,
@@ -137,15 +157,17 @@ class RacunKandidat:
     razlog_neizdaje: str | None = None
 
 
-def preveri_predpogoje_podjetja(
-    company: Company, datum_izdaje: date
-) -> list[Blokada]:
+def preveri_predpogoje_podjetja(company: Company, datum_izdaje: date) -> list[Blokada]:
     blokade = []
     if not company.ddv_razporeditev_potrjena:
         blokade.append(
-            Blokada("DDV_NEPOTRJEN", "DDV razporeditev enot še ni potrjena — Nastavitve")
+            Blokada(
+                "DDV_NEPOTRJEN", "DDV razporeditev enot še ni potrjena — Nastavitve"
+            )
         )
-    podpisniki = list(veljavni_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2])
+    podpisniki = list(
+        veljavni_podpisniki_na_dan(company, datum_izdaje).order_by("pk")[:2]
+    )
     if not podpisniki:
         blokade.append(
             Blokada(
@@ -176,6 +198,7 @@ POSLOVNA_POLJA_RACUNA = {
     "prejemnik_tip",
     "prejemnik_naslov",
     "prejemnik_davcna_stevilka",
+    "prejemnik_ddv_identifikacijska_stevilka",
     "prejemnik_maticna_stevilka",
     "izdajatelj_naziv",
     "izdajatelj_naslov",
@@ -194,9 +217,10 @@ POSLOVNA_POLJA_RACUNA = {
     "ddv_skupaj",
     "skupaj_z_ddv",
 }
-POSLOVNA_POLJA_VRSTICE = {
-    field.name for field in InvoiceLine._meta.concrete_fields
-} - {"id", "invoice"}
+POSLOVNA_POLJA_VRSTICE = {field.name for field in InvoiceLine._meta.concrete_fields} - {
+    "id",
+    "invoice",
+}
 
 
 def preveri_uredljiv_osnutek(invoice: Invoice) -> Invoice:
@@ -213,18 +237,16 @@ def spremeni_podatke_racuna(invoice: Invoice, **spremembe) -> Invoice:
     if not spremembe or not spremembe.keys() <= POSLOVNA_POLJA_RACUNA:
         raise ValueError("Dovoljena so samo poslovna in posnetna polja računa.")
     if svezi.document_type in (
-        Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS
+        Invoice.DocumentType.STORNO,
+        Invoice.DocumentType.DOBROPIS,
     ) and not spremembe.keys() <= {"datum_izdaje", "razlog"}:
         raise ValueError("Korekcijski osnutek dovoljuje samo datum izdaje in razlog.")
     for polje, vrednost in spremembe.items():
         setattr(svezi, polje, vrednost)
     svezi.full_clean()
-    if (
-        "document_type" in spremembe
-        and svezi.document_type in (
-            Invoice.DocumentType.STORNO,
-            Invoice.DocumentType.DOBROPIS,
-        )
+    if "document_type" in spremembe and svezi.document_type in (
+        Invoice.DocumentType.STORNO,
+        Invoice.DocumentType.DOBROPIS,
     ):
         raise ValueError("Korekcijski osnutek se ustvari z namensko storitvijo.")
     svezi.save(update_fields=spremembe)
@@ -303,11 +325,19 @@ def pripravi_osnutek_np(
         obdobje_do=obdobje_do,
         status=Invoice.Status.OSNUTEK,
         prejemnik_naziv=tenant.naziv,
+        prejemnik_tip=tenant.tip,
         prejemnik_naslov=tenant.naslov,
+        prejemnik_drzava_koda=tenant.drzava_koda,
+        prejemnik_identificiran_za_ddv=tenant.identificiran_za_ddv,
         prejemnik_davcna_stevilka=tenant.davcna_stevilka,
+        prejemnik_ddv_identifikacijska_stevilka=(
+            tenant.ddv_identifikacijska_stevilka
+        ),
         prejemnik_maticna_stevilka=tenant.maticna_stevilka,
         izdajatelj_naziv=company.naziv,
         izdajatelj_naslov=company.naslov,
+        izdajatelj_drzava_koda=company.drzava_koda,
+        izdajatelj_identificiran_za_ddv=company.ddv_zavezanec,
         izdajatelj_davcna_stevilka=company.davcna_stevilka,
         izdajatelj_maticna_stevilka=company.maticna_stevilka,
         izdajatelj_trr=company.trr,
@@ -334,11 +364,7 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     if invoice.company_id != invoice.lease.unit.property.company_id:
         raise ValueError("NP podjetje se ne ujema s pogodbo.")
 
-    vrstice = list(
-        InvoiceLine.objects.filter(invoice=invoice).select_related(
-            "lease_item__vat_regime"
-        )
-    )
+    vrstice = list(InvoiceLine.objects.filter(invoice=invoice))
     if not vrstice:
         raise ValueError("NP osnutek nima vrstic.")
     for vrstica in vrstice:
@@ -351,15 +377,14 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         if vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
             raise ValueError("NP vrstica: vsota osnove in DDV se ne ujema s skupaj.")
 
-    invoice.prejemnik_tip = invoice.lease.tenant.tip
     for vrstica in vrstice:
-        rezim = vrstica.lease_item.vat_regime
-        vrstica.ddv_eslog_koda = _preveri_eslog_kodo(
-            rezim.nacin_obracuna,
-            rezim.eslog_koda,
-            f"DDV režim {rezim.sifra}",
+        _preveri_eslog_kodo(
+            vrstica.ddv_nacin_obracuna,
+            vrstica.ddv_eslog_koda,
+            "Snapshot vrstice",
         )
-    InvoiceLine.objects.bulk_update(vrstice, ["ddv_eslog_koda"])
+    _preveri_ddv_klavzule(vrstice)
+    _preveri_mesanje_eslog_o(vrstice)
 
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
@@ -382,7 +407,6 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.save(
         update_fields=[
             "stevilka",
-            "prejemnik_tip",
             "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot",
             "pdf_template_version",
@@ -397,14 +421,26 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
 
 
 _SNAPSHOT_POLJA_KOREKCIJE = (
-    "prejemnik_naziv", "prejemnik_naslov",
-    "prejemnik_davcna_stevilka", "prejemnik_maticna_stevilka",
+    "prejemnik_naziv",
+    "prejemnik_naslov",
+    "prejemnik_davcna_stevilka",
+    "prejemnik_ddv_identifikacijska_stevilka",
+    "prejemnik_maticna_stevilka",
     "prejemnik_tip",
-    "izdajatelj_naziv", "izdajatelj_naslov",
-    "izdajatelj_davcna_stevilka", "izdajatelj_maticna_stevilka",
-    "izdajatelj_trr", "izdajatelj_podpisnik_ime",
-    "izdajatelj_podpisnik_funkcija", "izdajatelj_podpisnik_slika_pot",
-    "oznaka_pogodbe", "objekt_naziv",
+    "prejemnik_drzava_koda",
+    "prejemnik_identificiran_za_ddv",
+    "izdajatelj_naziv",
+    "izdajatelj_naslov",
+    "izdajatelj_davcna_stevilka",
+    "izdajatelj_maticna_stevilka",
+    "izdajatelj_drzava_koda",
+    "izdajatelj_identificiran_za_ddv",
+    "izdajatelj_trr",
+    "izdajatelj_podpisnik_ime",
+    "izdajatelj_podpisnik_funkcija",
+    "izdajatelj_podpisnik_slika_pot",
+    "oznaka_pogodbe",
+    "objekt_naziv",
 )
 
 
@@ -426,7 +462,9 @@ def _preveri_rocno_vrstico_dobropisa(vrstica: InvoiceLine) -> None:
             or not vrednost.is_finite()
             or vrednost.as_tuple().exponent < -2
         ):
-            napake[polje] = "Zahtevana je končna Decimal vrednost z največ dvema decimalkama."
+            napake[polje] = (
+                "Zahtevana je končna Decimal vrednost z največ dvema decimalkama."
+            )
     if not napake and vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
         napake["skupaj"] = "Skupaj mora biti vsota osnove in DDV."
     if napake:
@@ -459,11 +497,20 @@ def _storno_vrstica(originalna: InvoiceLine, storno: Invoice) -> InvoiceLine:
 
 def _kljuc_storno_vrstice(vrstica: InvoiceLine) -> tuple:
     return (
-        vrstica.lease_id, vrstica.lease_item_id, vrstica.opis,
-        vrstica.osnova, vrstica.ddv_stopnja, vrstica.ddv_znesek,
-        vrstica.skupaj, vrstica.ddv_nacin_obracuna, vrstica.ddv_klavzula,
-        vrstica.ddv_rekap_skupina, vrstica.ddv_eslog_koda, vrstica.je_sorazmerno,
-        vrstica.razlog_rocnega_popravka, vrstica.izvirno_izracunana_vrednost,
+        vrstica.lease_id,
+        vrstica.lease_item_id,
+        vrstica.opis,
+        vrstica.osnova,
+        vrstica.ddv_stopnja,
+        vrstica.ddv_znesek,
+        vrstica.skupaj,
+        vrstica.ddv_nacin_obracuna,
+        vrstica.ddv_klavzula,
+        vrstica.ddv_rekap_skupina,
+        vrstica.ddv_eslog_koda,
+        vrstica.je_sorazmerno,
+        vrstica.razlog_rocnega_popravka,
+        vrstica.izvirno_izracunana_vrednost,
     )
 
 
@@ -505,10 +552,14 @@ def pripravi_korekcijski_osnutek(
 @transaction.atomic
 def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
-    if invoice.document_type not in (
-        Invoice.DocumentType.STORNO,
-        Invoice.DocumentType.DOBROPIS,
-    ) or invoice.povezan_racun_id is None:
+    if (
+        invoice.document_type
+        not in (
+            Invoice.DocumentType.STORNO,
+            Invoice.DocumentType.DOBROPIS,
+        )
+        or invoice.povezan_racun_id is None
+    ):
         raise ValueError("Račun ni korekcijski osnutek.")
     original = _preveri_izvirnik_korekcije(invoice.povezan_racun)
     if (
@@ -543,8 +594,13 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
         _preveri_eslog_kodo(
             vrstica.ddv_nacin_obracuna,
             vrstica.ddv_eslog_koda,
-            "Vrstica dobropisa" if invoice.document_type == Invoice.DocumentType.DOBROPIS else "Izvirna vrstica storna",
+            "Vrstica dobropisa"
+            if invoice.document_type == Invoice.DocumentType.DOBROPIS
+            else "Izvirna vrstica storna",
         )
+
+    _preveri_ddv_klavzule(vrstice)
+    _preveri_mesanje_eslog_o(vrstice)
 
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
@@ -563,11 +619,18 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     else:
         invoice.stevilka = f"ST-{invoice.datum_izdaje.year}-{zaporedna:04d}"
     invoice.status = Invoice.Status.IZBRAN_ZA_POSILJANJE
-    invoice.save(update_fields=[
-        "osnova_skupaj", "ddv_skupaj", "skupaj_z_ddv", "stevilka", "status",
-        "izdajatelj_logotip_slika_pot", "izdajatelj_podpisnik_slika_pot",
-        "pdf_template_version",
-    ])
+    invoice.save(
+        update_fields=[
+            "osnova_skupaj",
+            "ddv_skupaj",
+            "skupaj_z_ddv",
+            "stevilka",
+            "status",
+            "izdajatelj_logotip_slika_pot",
+            "izdajatelj_podpisnik_slika_pot",
+            "pdf_template_version",
+        ]
+    )
     return invoice
 
 
@@ -597,10 +660,14 @@ def _razlozi_delta_postavke(
     prejsnji: Invoice,
     osnutek: Invoice,
 ) -> DeltaRazlaga:
-    neznano = DeltaRazlaga(lease_item_id, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
+    neznano = DeltaRazlaga(
+        lease_item_id, "VZROK_NEZNAN", "vzrok neznan – preveri ročno"
+    )
     if lease_item_id is None:
         return neznano
-    postavka = LeaseItem.objects.filter(pk=lease_item_id, lease_id=osnutek.lease_id).first()
+    postavka = LeaseItem.objects.filter(
+        pk=lease_item_id, lease_id=osnutek.lease_id
+    ).first()
     if postavka is None:
         return neznano
 
@@ -608,14 +675,16 @@ def _razlozi_delta_postavke(
         zacetek = postavka.datum_zacetka_postavke
         if zacetek and prejsnji.obdobje_do < zacetek <= osnutek.obdobje_do:
             return DeltaRazlaga(
-                lease_item_id, "NOVA_POSTAVKA",
+                lease_item_id,
+                "NOVA_POSTAVKA",
                 f"Nova postavka na pogodbi (dodana {zacetek})",
             )
     if stare and not nove:
         konec = postavka.datum_prenehanja_postavke
         if konec and prejsnji.obdobje_od <= konec < osnutek.obdobje_od:
             return DeltaRazlaga(
-                lease_item_id, "PRENEHANJE_POSTAVKE",
+                lease_item_id,
+                "PRENEHANJE_POSTAVKE",
                 f"Postavka preneha veljati {konec}",
             )
 
@@ -646,12 +715,14 @@ def _razlozi_delta_postavke(
             )
         ):
             return DeltaRazlaga(
-                lease_item_id, "INDEKSACIJA",
+                lease_item_id,
+                "INDEKSACIJA",
                 f"Indeksacija postavke z dne {dogodki[-1].datum_uskladitve}",
             )
         if stara.osnova == nova.osnova and not isti_ddv:
             return DeltaRazlaga(
-                lease_item_id, "SPREMEMBA_DDV",
+                lease_item_id,
+                "SPREMEMBA_DDV",
                 f"Sprememba DDV: {stara.ddv_nacin_obracuna} {stara.ddv_stopnja}% → {nova.ddv_nacin_obracuna} {nova.ddv_stopnja}%",
             )
 
@@ -672,7 +743,8 @@ def _razlozi_delta_postavke(
                 continue
             if ujema_se and isti_ddv:
                 return DeltaRazlaga(
-                    lease_item_id, "ROCNI_POPRAVEK",
+                    lease_item_id,
+                    "ROCNI_POPRAVEK",
                     f"Ročni popravek zneska: {revizija.razlog}",
                 )
     return neznano
@@ -725,8 +797,7 @@ def _primerjaj_delta_np(
         )
 
     opozorila = (
-        (DeltaRazlaga(None, "PREJSNJI_MESEC_NI_IZDAN",
-                      "Prejšnji mesec ni bil izdan"),)
+        (DeltaRazlaga(None, "PREJSNJI_MESEC_NI_IZDAN", "Prejšnji mesec ni bil izdan"),)
         if prejsnji.obdobje_do + timedelta(days=1) < osnutek.obdobje_od
         else ()
     )
@@ -739,9 +810,10 @@ def _primerjaj_delta_np(
     novi_znesek = sum((v.skupaj for v in nove_vrstice), Decimal("0.00"))
     if stari_znesek == novi_znesek:
         return DeltaPrimerjava(
-            prejsnji.pk, False, None,
-            (DeltaRazlaga(None, "BREZ_RAZLIKE", "Znesek je nespremenjen"),)
-            + opozorila,
+            prejsnji.pk,
+            False,
+            None,
+            (DeltaRazlaga(None, "BREZ_RAZLIKE", "Znesek je nespremenjen"),) + opozorila,
         )
 
     stare_po_postavki = {}
@@ -778,11 +850,11 @@ def _primerjaj_delta_np(
             DeltaRazlaga(None, "VZROK_NEZNAN", "vzrok neznan – preveri ročno")
         )
     return DeltaPrimerjava(
-        prejsnji.pk, True,
+        prejsnji.pk,
+        True,
         all(razlaga.koda != "VZROK_NEZNAN" for razlaga in razlage),
         tuple(razlage) + opozorila,
     )
-
 
 
 def _izracunaj_vrstice_np(
@@ -809,6 +881,11 @@ def _izracunaj_vrstice_np(
                     f"{obdobje_od:%d.%m.%Y} – {obdobje_do:%d.%m.%Y}\n"
                     f"{unit.oznaka}, {property.naziv} · "
                     f"Pogodba št. {pogodba.oznaka_pogodbe}"
+                ),
+                ddv_eslog_koda=_preveri_eslog_kodo(
+                    izracun.ddv_nacin_obracuna,
+                    postavka.vat_regime.eslog_koda,
+                    f"DDV režim {postavka.vat_regime.sifra}",
                 ),
                 **vars(izracun),
             )
@@ -838,14 +915,17 @@ def izracunaj_kandidata(
     blokade = preveri_predpogoje_podjetja(company, datum_izdaje)
     if blokade:
         return RacunKandidat(
-            vrstice, skupaj, False,
+            vrstice,
+            skupaj,
+            False,
             tuple(DeltaRazlaga(None, b.koda, b.sporocilo) for b in blokade),
             blokade[0].sporocilo,
         )
 
     izjeme = [
         DeltaRazlaga(v.lease_item_id, "SORAZMERNO", "Sorazmerni obračun postavke")
-        for v in vrstice if v.je_sorazmerno
+        for v in vrstice
+        if v.je_sorazmerno
     ]
     osnutek = Invoice(
         company=company,

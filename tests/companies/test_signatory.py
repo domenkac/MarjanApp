@@ -11,6 +11,7 @@ from tests.image_data import slika_bytes
 
 def ustvari_podjetje(naziv="Alfa d.o.o.", davcna_stevilka="15012557"):
     return Company.objects.create(
+        drzava_koda="SI",
         naziv=naziv,
         davcna_stevilka=davcna_stevilka,
         maticna_stevilka="1234567000",
@@ -44,9 +45,7 @@ def test_en_trenutni_podpisnik_je_dovoljen():
 def test_vec_zgodovinskih_podpisnikov_je_dovoljenih():
     company = ustvari_podjetje()
 
-    Signatory.objects.create(
-        **podatki_podpisnika(company, velja_do=date(2024, 12, 31))
-    )
+    Signatory.objects.create(**podatki_podpisnika(company, velja_do=date(2024, 12, 31)))
     Signatory.objects.create(
         **podatki_podpisnika(
             company,

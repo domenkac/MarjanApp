@@ -27,6 +27,7 @@ DANES = date(LETO, 3, 15)
 @pytest.fixture
 def postavka(db):
     company = Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -44,6 +45,8 @@ def postavka(db):
         property=property, oznaka="Pisarna", tip_enote=Unit.TipEnote.PISARNA
     )
     tenant = Tenant.objects.create(
+        drzava_koda="SI",
+        identificiran_za_ddv=True,
         tip=Tenant.Tip.PRAVNA_OSEBA,
         naziv="Najemnik d.o.o.",
         davcna_stevilka="15012557",
@@ -164,7 +167,8 @@ def test_potrditev_shrani_zgodovino_in_spremeni_postavko(postavka):
     assert event.datum_uskladitve == date(LETO, 2, 1)
     assert event.indeks_vrednost == Decimal("110.000")
     assert (event.stara_vrednost, event.nova_vrednost) == (
-        Decimal("100.05"), Decimal("110.06")
+        Decimal("100.05"),
+        Decimal("110.06"),
     )
     assert postavka.znesek_neto_mesecno == Decimal("110.06")
 
@@ -172,7 +176,9 @@ def test_potrditev_shrani_zgodovino_in_spremeni_postavko(postavka):
 def test_neizpolnjen_pogoj_ne_ustvari_dogodka(postavka):
     postavka.lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
     postavka.lease.prag_spremembe_odstotek = Decimal("2.00")
-    postavka.lease.save(update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"])
+    postavka.lease.save(
+        update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"]
+    )
 
     with pytest.raises(ValueError):
         services.potrdi_indeksacijo(postavka, Decimal("101.000"), DANES)
@@ -215,7 +221,8 @@ def test_zamujen_poracun_samo_za_pravo_postavko(postavka, status):
     poracun.full_clean()
     assert poracun.original_invoice == original
     assert (poracun.prizadeto_obdobje_od, poracun.prizadeto_obdobje_do) == (
-        original.obdobje_od, original.obdobje_do
+        original.obdobje_od,
+        original.obdobje_do,
     )
     assert poracun.znesek_poracuna == Decimal("10.01")
     assert poracun.status == PoracunIndeksacije.Status.PREDLAGAN
@@ -223,28 +230,28 @@ def test_zamujen_poracun_samo_za_pravo_postavko(postavka, status):
     assert services.zaznaj_zamujen_poracun(event) == []
 
 
-def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(
-    postavka, tmp_path, settings
-):
+def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
-    (tmp_path / 'logo.png').write_bytes(b'logo')
-    (tmp_path / 'podpis.png').write_bytes(b'podpis')
+    (tmp_path / "logo.png").write_bytes(b"logo")
+    (tmp_path / "podpis.png").write_bytes(b"podpis")
     original = racun_s_postavkami(postavka)
-    original.izdajatelj_podpisnik_slika_pot = 'podpis.png'
-    original.save(update_fields=['izdajatelj_podpisnik_slika_pot'])
+    original.izdajatelj_podpisnik_slika_pot = "podpis.png"
+    original.save(update_fields=["izdajatelj_podpisnik_slika_pot"])
     NumberSequence.objects.create(
-        company=original.company, tip=NumberSequence.Tip.NP, leto=0,
+        company=original.company,
+        tip=NumberSequence.Tip.NP,
+        leto=0,
         zadnja_stevilka=1,
     )
     storno = pripravi_korekcijski_osnutek(
-        original, Invoice.DocumentType.STORNO, "Napaka",
+        original,
+        Invoice.DocumentType.STORNO,
+        "Napaka",
         date(LETO, 4, 1),
     )
     potrdi_korekcijski_osnutek(storno)
 
-    event = services.potrdi_indeksacijo(
-        postavka, Decimal("110.000"), date(LETO, 4, 15)
-    )
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), date(LETO, 4, 15))
     poracuni = list(PoracunIndeksacije.objects.filter(indexation_event=event))
     assert len(poracuni) == 1
     assert poracuni[0].original_invoice_id == original.pk
@@ -253,9 +260,7 @@ def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(
 def test_zamuda_vec_mesecev_ustvari_locena_poracuna(postavka):
     februar = racun_s_postavkami(postavka, mesec=2)
     marec = racun_s_postavkami(postavka, mesec=3)
-    event = services.potrdi_indeksacijo(
-        postavka, Decimal("110.000"), date(LETO, 4, 15)
-    )
+    event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), date(LETO, 4, 15))
 
     assert set(
         PoracunIndeksacije.objects.filter(indexation_event=event).values_list(
@@ -328,7 +333,8 @@ def test_izpuscen_letnik_samodejno_dohiti(postavka):
     assert IndexationEvent.objects.count() == 1
     assert event.indeks_vrednost == Decimal("102.500")
     assert (event.stara_vrednost, event.nova_vrednost) == (
-        Decimal("100.05"), Decimal("102.55")
+        Decimal("100.05"),
+        Decimal("102.55"),
     )
     assert postavka.znesek_neto_mesecno == Decimal("102.55")
 

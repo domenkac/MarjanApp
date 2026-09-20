@@ -20,6 +20,7 @@ from contracts.models import (
 
 def ustvari_podjetje():
     return Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -36,6 +37,8 @@ def podatki_najemnika(**spremembe):
     podatki = {
         "tip": Tenant.Tip.PRAVNA_OSEBA,
         "naziv": "Najemnik d.o.o.",
+        "drzava_koda": "SI",
+        "identificiran_za_ddv": True,
         "davcna_stevilka": "15012557",
         "maticna_stevilka": "1234567000",
         "naslov": "Trg 1",
@@ -109,9 +112,7 @@ def test_poslovni_fk_preprecijo_kaskadni_izbris():
 
 @pytest.mark.django_db
 def test_pravna_oseba_zahteva_davcno_in_maticno_stevilko():
-    najemnik = Tenant(
-        **podatki_najemnika(davcna_stevilka="", maticna_stevilka="")
-    )
+    najemnik = Tenant(**podatki_najemnika(davcna_stevilka="", maticna_stevilka=""))
 
     with pytest.raises(ValidationError) as napaka:
         najemnik.full_clean()
@@ -128,6 +129,7 @@ def test_fizicna_oseba_ne_zahteva_davcne_in_maticne_stevilke():
         **podatki_najemnika(
             tip=Tenant.Tip.FIZICNA_OSEBA,
             naziv="Ana Novak",
+            identificiran_za_ddv=False,
             davcna_stevilka="",
             maticna_stevilka="",
         )
@@ -162,6 +164,63 @@ def test_veljavna_davcna_pravne_osebe_je_sprejeta():
 
 
 @pytest.mark.django_db
+def test_tuja_pravna_oseba_ne_uporabi_slovenskih_formatov():
+    Tenant(
+        **podatki_najemnika(
+            drzava_koda="AT",
+            davcna_stevilka="U12345678",
+            ddv_identifikacijska_stevilka="ATU12345678",
+            maticna_stevilka="FN-123",
+        )
+    ).full_clean()
+
+
+@pytest.mark.django_db
+def test_tuja_pravna_oseba_dovoljuje_daljso_registracijsko_stevilko():
+    Tenant(
+        **podatki_najemnika(
+            drzava_koda="AT",
+            davcna_stevilka="U12345678",
+            ddv_identifikacijska_stevilka="ATU12345678",
+            maticna_stevilka="FN-123456789012345",
+        )
+    ).full_clean()
+
+
+@pytest.mark.django_db
+def test_tuja_pravna_oseba_se_vedno_zahteva_davcni_ali_ddv_identifikator():
+    najemnik = Tenant(
+        **podatki_najemnika(
+            drzava_koda="AT",
+            davcna_stevilka="",
+            maticna_stevilka="",
+        )
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        najemnik.full_clean()
+
+    assert "davcna_stevilka" in napaka.value.message_dict
+    assert "maticna_stevilka" not in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_tuj_ddv_zavezanec_zahteva_polno_ddv_identifikacijsko_stevilko():
+    najemnik = Tenant(
+        **podatki_najemnika(
+            drzava_koda="AT",
+            davcna_stevilka="123456789",
+            ddv_identifikacijska_stevilka="",
+        )
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        najemnik.full_clean()
+
+    assert "ddv_identifikacijska_stevilka" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
 def test_tenant_tip_je_zaprt_textchoices_nabor_in_email_je_veljaven():
     assert set(Tenant.Tip.values) == {"PRAVNA_OSEBA", "FIZICNA_OSEBA"}
     najemnik = Tenant(**podatki_najemnika(tip="NEVELJAVNO", email="ni-email"))
@@ -170,7 +229,6 @@ def test_tenant_tip_je_zaprt_textchoices_nabor_in_email_je_veljaven():
         najemnik.full_clean()
 
     assert {"tip", "email"} <= set(napaka.value.message_dict)
-
 
 
 def ustvari_pogodbeni_stranki(rok_placila_dni=15):
@@ -232,9 +290,7 @@ def test_rok_placila_ob_ustvarjanju_privzame_podjetje_in_ostane_nastavljiv():
         "datum_zacetka": date(2026, 1, 1),
     }
     pogodba = Lease.objects.create(oznaka_pogodbe="P-1", **skupni)
-    rocna = Lease.objects.create(
-        oznaka_pogodbe="P-2", rok_placila_dni=30, **skupni
-    )
+    rocna = Lease.objects.create(oznaka_pogodbe="P-2", rok_placila_dni=30, **skupni)
 
     assert pogodba.rok_placila_dni == 22
     assert rocna.rok_placila_dni == 30
@@ -277,9 +333,7 @@ def test_indeksacijska_klavzula_zahteva_tip_in_prag_kadar_ustreza():
         brez_tipa.full_clean()
     assert "tip_pogoja_indeksacije" in napaka.value.message_dict
 
-    brez_tipa.tip_pogoja_indeksacije = (
-        Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
-    )
+    brez_tipa.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
     with pytest.raises(ValidationError) as napaka:
         brez_tipa.full_clean()
     assert "prag_spremembe_odstotek" in napaka.value.message_dict
@@ -304,7 +358,6 @@ def test_datum_prenehanja_status_arhiviranje_in_poslovna_fk():
         pogodba.unit.delete()
     with pytest.raises(ProtectedError):
         pogodba.tenant.delete()
-
 
 
 def ustvari_rezim(zahteva_referenco=False):
@@ -363,9 +416,7 @@ def test_referenca_listine_in_datum_sta_obvezna_le_ce_ju_zahteva_rezim():
 
     with pytest.raises(ValidationError) as napaka:
         postavka.full_clean()
-    assert {"referenca_listine", "datum_reference"} <= set(
-        napaka.value.message_dict
-    )
+    assert {"referenca_listine", "datum_reference"} <= set(napaka.value.message_dict)
 
     postavka.referenca_listine = "Pogodba P-1"
     with pytest.raises(ValidationError) as napaka:
@@ -418,9 +469,7 @@ def test_lease_item_datumi_in_arhiv_so_loceni_in_fk_sciteni():
 @pytest.mark.django_db
 @pytest.mark.parametrize("vloga", RecipientContact.Vloga.values)
 @pytest.mark.parametrize("kanal", RecipientContact.Kanal.values)
-def test_recipient_contact_pravna_oseba_dovoljuje_vse_vloge_in_kanale(
-    vloga, kanal
-):
+def test_recipient_contact_pravna_oseba_dovoljuje_vse_vloge_in_kanale(vloga, kanal):
     pogodba = nova_pogodba()
     pogodba.save()
     kontakt = RecipientContact(
@@ -662,3 +711,28 @@ def test_deaktivacija_uposteva_efektivno_veljavnost(polje, odmik, status, blokir
             rezim.full_clean()
     else:
         rezim.full_clean()
+
+
+@pytest.mark.django_db
+def test_identificiran_za_ddv_zahteva_davcno_stevilko():
+    najemnik = Tenant(**podatki_najemnika(davcna_stevilka=""))
+
+    with pytest.raises(ValidationError) as napaka:
+        najemnik.full_clean()
+
+    assert "davcna_stevilka" in napaka.value.message_dict
+
+
+@pytest.mark.django_db
+def test_polni_odbitek_ni_dovoljen_brez_identifikacije_za_ddv():
+    najemnik = Tenant(
+        **podatki_najemnika(
+            identificiran_za_ddv=False,
+            ddv_zavezanec_s_polnim_odbitkom=True,
+        )
+    )
+
+    with pytest.raises(ValidationError) as napaka:
+        najemnik.full_clean()
+
+    assert "ddv_zavezanec_s_polnim_odbitkom" in napaka.value.message_dict

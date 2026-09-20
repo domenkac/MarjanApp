@@ -40,6 +40,7 @@ def izdani_racun(db, tmp_path, settings):
     (tmp_path / "logo.png").write_bytes(VALID_PNG_LOGO)
     (tmp_path / "podpis.png").write_bytes(VALID_PNG_PODPIS)
     company = Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -58,9 +59,15 @@ def izdani_racun(db, tmp_path, settings):
         podpis_slika="podpis.png",
         velja_od=date(2026, 1, 1),
     )
-    property = Property.objects.create(company=company, naziv="Stavba A", naslov="Glavna 1")
-    unit = Unit.objects.create(property=property, oznaka="Pisarna 1", tip_enote=Unit.TipEnote.PISARNA)
+    property = Property.objects.create(
+        company=company, naziv="Stavba A", naslov="Glavna 1"
+    )
+    unit = Unit.objects.create(
+        property=property, oznaka="Pisarna 1", tip_enote=Unit.TipEnote.PISARNA
+    )
     tenant = Tenant.objects.create(
+        drzava_koda="SI",
+        identificiran_za_ddv=True,
         tip=Tenant.Tip.PRAVNA_OSEBA,
         naziv="Najemnik d.o.o.",
         davcna_stevilka="15012557",
@@ -86,8 +93,10 @@ def izdani_racun(db, tmp_path, settings):
         velja_od=date(2026, 1, 1),
     )
     LeaseItem.objects.create(
-        lease=lease, naziv_postavke="Najemnina",
-        znesek_neto_mesecno=Decimal("100.00"), vat_regime=regime,
+        lease=lease,
+        naziv_postavke="Najemnina",
+        znesek_neto_mesecno=Decimal("100.00"),
+        vat_regime=regime,
     )
     invoice = pripravi_osnutek_np(
         lease, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
@@ -148,7 +157,9 @@ def test_racun_brez_vrstic_je_zavrnjen(izdani_racun):
     assert error.value.koda == "VRSTICE_MANJKAJO"
 
 
-@pytest.mark.parametrize("polje", ["prejemnik_naziv", "izdajatelj_logotip_slika_pot", "pdf_template_version"])
+@pytest.mark.parametrize(
+    "polje", ["prejemnik_naziv", "izdajatelj_logotip_slika_pot", "pdf_template_version"]
+)
 def test_manjkajoci_snapshot_je_zavrnjen(izdani_racun, polje):
     Invoice.objects.filter(pk=izdani_racun.pk).update(**{polje: ""})
     with pytest.raises(PdfRenderNapaka) as error:
@@ -183,6 +194,7 @@ def test_vzorcni_context_ne_ustvari_racuna_in_ne_porabi_stevilke(izdani_racun):
     zaporedje.refresh_from_db()
     assert zaporedje.zadnja_stevilka == stevilka
 
+
 def test_neobstojec_racun_je_zavrnjen(db):
     with pytest.raises(PdfRenderNapaka) as error:
         pripravi_pdf_context(None)
@@ -203,14 +215,20 @@ def test_korekcija_ob_izdaji_shrani_render_snapshota(izdani_racun):
     )
     popravek = potrdi_korekcijski_osnutek(osnutek)
     popravek.refresh_from_db()
-    assert popravek.izdajatelj_logotip_slika_pot == izdani_racun.izdajatelj_logotip_slika_pot
+    assert (
+        popravek.izdajatelj_logotip_slika_pot
+        == izdani_racun.izdajatelj_logotip_slika_pot
+    )
     assert popravek.pdf_template_version == "1"
+
 
 @pytest.mark.parametrize("tip", [Invoice.DocumentType.NP, Invoice.DocumentType.ST])
 def test_np_in_st_brez_roka_placila_sta_zavrnjena(izdani_racun, tip):
     Invoice.objects.filter(pk=izdani_racun.pk).update(
         document_type=tip,
-        stevilka="ST-2026-0001" if tip == Invoice.DocumentType.ST else izdani_racun.stevilka,
+        stevilka="ST-2026-0001"
+        if tip == Invoice.DocumentType.ST
+        else izdani_racun.stevilka,
         rok_placila=None,
     )
 
@@ -249,6 +267,7 @@ def test_korekcija_brez_roka_placila_ohrani_referenco_in_razlog(izdani_racun, ti
     assert context.povezan_racun_stevilka == izdani_racun.stevilka
     assert context.razlog == "Popravek zneska"
 
+
 def _asset_bytes(pot):
     with default_storage.open(pot, "rb") as datoteka:
         return datoteka.read()
@@ -278,7 +297,9 @@ def test_nova_logo_in_podpis_datoteka_ne_spremenita_snapshot_bytes(izdani_racun)
     podpisnik = Signatory.objects.get(company=company)
 
     company.logotip.save("nov-logo.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
-    podpisnik.podpis_slika.save("nov-podpis.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
+    podpisnik.podpis_slika.save(
+        "nov-podpis.png", ContentFile(VALID_PNG_NOV_ASSET), save=True
+    )
 
     assert _asset_bytes(logo_pot) == VALID_PNG_LOGO
     assert _asset_bytes(podpis_pot) == VALID_PNG_PODPIS
@@ -288,9 +309,7 @@ def test_nova_logo_in_podpis_datoteka_ne_spremenita_snapshot_bytes(izdani_racun)
 
 
 @pytest.mark.parametrize("dvoumno", [False, True])
-def test_vzorec_vrne_pdf_napako_za_neveljavnega_podpisnika(
-    izdani_racun, dvoumno
-):
+def test_vzorec_vrne_pdf_napako_za_neveljavnega_podpisnika(izdani_racun, dvoumno):
     Signatory.objects.filter(company=izdani_racun.company).delete()
     if dvoumno:
         Signatory.objects.create(

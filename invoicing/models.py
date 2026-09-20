@@ -33,7 +33,12 @@ class Invoice(models.Model):
 
     prejemnik_naziv = models.CharField(blank=True)
     prejemnik_naslov = models.CharField(blank=True)
+    prejemnik_drzava_koda = models.CharField(max_length=2, null=True, editable=False)
+    prejemnik_identificiran_za_ddv = models.BooleanField(null=True, editable=False)
     prejemnik_davcna_stevilka = models.CharField(blank=True)
+    prejemnik_ddv_identifikacijska_stevilka = models.CharField(
+        max_length=70, blank=True, editable=False
+    )
     prejemnik_maticna_stevilka = models.CharField(blank=True)
     prejemnik_tip = models.CharField(
         max_length=13,
@@ -46,6 +51,8 @@ class Invoice(models.Model):
     )
     izdajatelj_naziv = models.CharField(blank=True)
     izdajatelj_naslov = models.CharField(blank=True)
+    izdajatelj_drzava_koda = models.CharField(max_length=2, null=True, editable=False)
+    izdajatelj_identificiran_za_ddv = models.BooleanField(null=True, editable=False)
     izdajatelj_davcna_stevilka = models.CharField(blank=True)
     izdajatelj_maticna_stevilka = models.CharField(blank=True)
     izdajatelj_trr = models.CharField(blank=True)
@@ -57,9 +64,7 @@ class Invoice(models.Model):
     oznaka_pogodbe = models.CharField(null=True, blank=True)
     objekt_naziv = models.CharField(null=True, blank=True)
 
-    status = models.CharField(
-        max_length=21, choices=Status, default=Status.OSNUTEK
-    )
+    status = models.CharField(max_length=21, choices=Status, default=Status.OSNUTEK)
     povezan_racun = models.ForeignKey(
         "self", on_delete=models.PROTECT, null=True, blank=True
     )
@@ -89,10 +94,14 @@ class Invoice(models.Model):
 
     def clean(self):
         super().clean()
-        if self.document_type in (
-            self.DocumentType.STORNO,
-            self.DocumentType.DOBROPIS,
-        ) and not (self.razlog or "").strip():
+        if (
+            self.document_type
+            in (
+                self.DocumentType.STORNO,
+                self.DocumentType.DOBROPIS,
+            )
+            and not (self.razlog or "").strip()
+        ):
             raise ValidationError(
                 {"razlog": "Razlog je obvezen za storno ali dobropis."}
             )

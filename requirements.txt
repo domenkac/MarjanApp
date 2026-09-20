@@ -4,3 +4,4 @@ pytest-django
 ruff
 Pillow
 WeasyPrint
+lxml>=5.3,<7

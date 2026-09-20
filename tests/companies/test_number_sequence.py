@@ -11,6 +11,7 @@ from companies.services import dodeli_naslednjo_stevilko
 
 def ustvari_podjetje():
     return Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -51,7 +52,9 @@ def test_np_uporablja_leto_nic_in_je_enolicen():
     NumberSequence.objects.create(company=company, tip=NumberSequence.Tip.NP, leto=0)
 
     with pytest.raises(IntegrityError), transaction.atomic():
-        NumberSequence.objects.create(company=company, tip=NumberSequence.Tip.NP, leto=0)
+        NumberSequence.objects.create(
+            company=company, tip=NumberSequence.Tip.NP, leto=0
+        )
 
 
 @pytest.mark.django_db
@@ -74,9 +77,9 @@ def test_neuspesna_transakcija_ne_zazge_stevilke():
         dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1))
         raise RuntimeError
 
-    assert dodeli_naslednjo_stevilko(
-        company, NumberSequence.Tip.NP, date(2026, 1, 1)
-    ) == 1
+    assert (
+        dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1)) == 1
+    )
 
 
 @pytest.mark.django_db(transaction=True)
@@ -104,4 +107,3 @@ def test_atomarno_dodeljevanje_socasno():
     assert sorted(stevilka for stevilka, _ in rezultata) == [1, 2]
     assert len({povezava for _, povezava in rezultata}) == 2
     assert NumberSequence.objects.get().zadnja_stevilka == 2
-

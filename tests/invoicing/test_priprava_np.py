@@ -32,6 +32,7 @@ def pogodba(db, tmp_path, settings):
     (tmp_path / "logo.png").write_bytes(b"logo")
     (tmp_path / "podpis.png").write_bytes(b"podpis")
     company = Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -57,6 +58,8 @@ def pogodba(db, tmp_path, settings):
         property=property, oznaka="Pisarna 1", tip_enote=Unit.TipEnote.PISARNA
     )
     tenant = Tenant.objects.create(
+        drzava_koda="SI",
+        identificiran_za_ddv=True,
         tip=Tenant.Tip.PRAVNA_OSEBA,
         naziv="Najemnik d.o.o.",
         davcna_stevilka="15012557",
@@ -74,7 +77,9 @@ def pogodba(db, tmp_path, settings):
     )
 
 
-def dodaj_postavko(pogodba, *, naziv="Najemnina", znesek="100.00", nacin="OBDAVCENO", **spremembe):
+def dodaj_postavko(
+    pogodba, *, naziv="Najemnina", znesek="100.00", nacin="OBDAVCENO", **spremembe
+):
     eslog_kode = {
         "OBDAVCENO": "S",
         "OPROSCENO": "E",
@@ -113,20 +118,26 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
     assert invoice.lease == pogodba
     assert invoice.document_type == Invoice.DocumentType.NP
     assert (invoice.datum_izdaje, invoice.obdobje_od, invoice.obdobje_do) == (
-        DATUM_IZDAJE, OBDOBJE_OD, OBDOBJE_DO
+        DATUM_IZDAJE,
+        OBDOBJE_OD,
+        OBDOBJE_DO,
     )
     assert invoice.status == Invoice.Status.OSNUTEK
     assert (invoice.stevilka, invoice.rok_placila) == (None, None)
     assert (invoice.osnova_skupaj, invoice.ddv_skupaj, invoice.skupaj_z_ddv) == (
-        None, None, None
+        None,
+        None,
+        None,
     )
     assert (invoice.prejemnik_naziv, invoice.prejemnik_naslov) == (
-        "Najemnik d.o.o.", "Trg 1"
+        "Najemnik d.o.o.",
+        "Trg 1",
     )
     assert invoice.prejemnik_davcna_stevilka == "15012557"
     assert invoice.prejemnik_maticna_stevilka == "1234567000"
     assert (invoice.izdajatelj_naziv, invoice.izdajatelj_naslov) == (
-        "Alfa d.o.o.", "Glavna ulica 1"
+        "Alfa d.o.o.",
+        "Glavna ulica 1",
     )
     assert invoice.izdajatelj_davcna_stevilka == "15012557"
     assert invoice.izdajatelj_maticna_stevilka == "1234567000"
@@ -137,7 +148,8 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
         invoice.izdajatelj_podpisnik_slika_pot,
     ) == ("Ana Podpisnica", "Direktorica", "podpis.png")
     assert (invoice.oznaka_pogodbe, invoice.objekt_naziv) == (
-        "12/2024", "Poslovna stavba A"
+        "12/2024",
+        "Poslovna stavba A",
     )
 
     line = InvoiceLine.objects.get(invoice=invoice)
@@ -147,7 +159,10 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
         "Pisarna 1, Poslovna stavba A · Pogodba št. 12/2024"
     )
     assert (line.osnova, line.ddv_stopnja, line.ddv_znesek, line.skupaj) == (
-        Decimal("100.00"), Decimal("22.00"), Decimal("22.00"), Decimal("122.00")
+        Decimal("100.00"),
+        Decimal("22.00"),
+        Decimal("22.00"),
+        Decimal("122.00"),
     )
     assert line.ddv_nacin_obracuna == "OBDAVCENO"
     assert line.ddv_rekap_skupina == "OBDAVCENO"
@@ -179,7 +194,9 @@ def test_vec_postavk_z_mesanim_ddv_in_sledljivostjo(pogodba):
         pogodba, naziv="Parkirišče", znesek="30.00", nacin="OPROSCENO"
     )
     invoice = pripravi(pogodba).invoice
-    lines = {line.lease_item_id: line for line in InvoiceLine.objects.filter(invoice=invoice)}
+    lines = {
+        line.lease_item_id: line for line in InvoiceLine.objects.filter(invoice=invoice)
+    }
     assert set(lines) == {najemnina.pk, parkirisce.pk}
     assert all(line.lease_id == pogodba.pk for line in lines.values())
     assert lines[najemnina.pk].ddv_znesek == Decimal("22.00")
@@ -225,12 +242,13 @@ def test_zunaj_obdobja_pogodbe_ne_ustvari_racuna(pogodba):
 def test_napaka_pri_vrsticah_povrne_cel_osnutek(pogodba):
     dodaj_postavko(pogodba)
     with (
-        patch.object(InvoiceLine.objects, "bulk_create", side_effect=RuntimeError("napaka")),
+        patch.object(
+            InvoiceLine.objects, "bulk_create", side_effect=RuntimeError("napaka")
+        ),
         pytest.raises(RuntimeError, match="napaka"),
     ):
         pripravi(pogodba)
     assert not Invoice.objects.exists()
-
 
 
 @pytest.mark.parametrize("razlog", ["brez_podpisnika", "prekrivanje", "ddv_ni_potrjen"])
@@ -270,22 +288,58 @@ def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
     assert potrjen.stevilka == "NP-00001"
     assert potrjen.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
     assert (potrjen.osnova_skupaj, potrjen.ddv_skupaj, potrjen.skupaj_z_ddv) == (
-        Decimal("100.00"), Decimal("22.00"), Decimal("122.00")
+        Decimal("100.00"),
+        Decimal("22.00"),
+        Decimal("122.00"),
     )
     assert potrjen.rok_placila == date(2026, 9, 16)
     assert potrjen.prejemnik_naziv == prvotni_naziv
     assert InvoiceLine.objects.get(pk=prvotna_vrstica.pk).opis == prvotna_vrstica.opis
 
 
+def test_potrditev_ne_prebere_drzave_in_ddv_statusa_iz_zivih_partnerjev(pogodba):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    assert (
+        invoice.prejemnik_drzava_koda,
+        invoice.prejemnik_identificiran_za_ddv,
+        invoice.izdajatelj_drzava_koda,
+        invoice.izdajatelj_identificiran_za_ddv,
+    ) == ("SI", True, "SI", True)
+
+    tenant = pogodba.tenant
+    tenant.drzava_koda = "AT"
+    tenant.identificiran_za_ddv = False
+    tenant.save(update_fields=["drzava_koda", "identificiran_za_ddv"])
+    company = pogodba.unit.property.company
+    company.drzava_koda = "AT"
+    company.ddv_zavezanec = False
+    company.save(update_fields=["drzava_koda", "ddv_zavezanec"])
+
+    potrjen = potrdi_osnutek_np(invoice)
+
+    assert (
+        potrjen.prejemnik_drzava_koda,
+        potrjen.prejemnik_identificiran_za_ddv,
+        potrjen.izdajatelj_drzava_koda,
+        potrjen.izdajatelj_identificiran_za_ddv,
+    ) == ("SI", True, "SI", True)
+
+
 @pytest.mark.parametrize(
     ("nacin", "koda"),
-    [("OBDAVCENO", "S"), ("OPROSCENO", "E"), ("OBRNJENA_DAVCNA", "AE"), ("NI_PREDMET", "O")],
+    [
+        ("OBDAVCENO", "S"),
+        ("OPROSCENO", "E"),
+        ("OBRNJENA_DAVCNA", "AE"),
+        ("NI_PREDMET", "O"),
+    ],
 )
 def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
     postavka = dodaj_postavko(pogodba, nacin=nacin)
     invoice = pripravi(pogodba).invoice
-    assert invoice.prejemnik_tip == ""
-    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == ""
+    assert invoice.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
 
     potrjen = potrdi_osnutek_np(invoice)
 
@@ -301,19 +355,49 @@ def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
     assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
 
 
+def test_potrditev_ne_prebere_tipa_in_ddv_rezima_iz_zivih_modelov(pogodba):
+    postavka = dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    vrstica = InvoiceLine.objects.get(invoice=invoice)
+    prvotni_ddv = (
+        vrstica.ddv_nacin_obracuna,
+        vrstica.ddv_eslog_koda,
+        vrstica.ddv_klavzula,
+    )
+
+    pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
+    pogodba.tenant.save(update_fields=["tip"])
+    postavka.vat_regime.nacin_obracuna = VatRegime.NacinObracuna.OPROSCENO
+    postavka.vat_regime.eslog_koda = "E"
+    postavka.vat_regime.klavzula = "Spremenjena klavzula"
+    postavka.vat_regime.save(
+        update_fields=["nacin_obracuna", "eslog_koda", "klavzula"]
+    )
+
+    potrjen = potrdi_osnutek_np(invoice)
+    vrstica.refresh_from_db()
+
+    assert potrjen.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
+    assert (
+        vrstica.ddv_nacin_obracuna,
+        vrstica.ddv_eslog_koda,
+        vrstica.ddv_klavzula,
+    ) == prvotni_ddv
+
+
 @pytest.mark.parametrize("koda", ["", "E"])
 def test_potrditev_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
-    postavka = dodaj_postavko(pogodba)
-    postavka.vat_regime.eslog_koda = koda
-    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    InvoiceLine.objects.filter(invoice=invoice).update(ddv_eslog_koda=koda)
 
     with pytest.raises(ValueError, match="eSLOG kod"):
         potrdi_osnutek_np(invoice)
 
     invoice.refresh_from_db()
     assert invoice.stevilka is None
-    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == ""
+    assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
+
 
 def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
@@ -336,15 +420,17 @@ def test_eslog_artifact_se_nastavi_samo_z_namensko_storitvijo(pogodba):
         invoice, rendered_eslog_path="racun.xml", checksum="abc123"
     )
     assert (shranjen.rendered_eslog_path, shranjen.rendered_eslog_checksum) == (
-        "racun.xml", "abc123"
+        "racun.xml",
+        "abc123",
     )
-    assert nastavi_eslog_artifact(
-        invoice, rendered_eslog_path="racun.xml", checksum="abc123"
-    ).pk == invoice.pk
-    with pytest.raises(ValueError, match="že vsebuje eSLOG"):
+    assert (
         nastavi_eslog_artifact(
-            invoice, rendered_eslog_path="drug.xml", checksum="drug"
-        )
+            invoice, rendered_eslog_path="racun.xml", checksum="abc123"
+        ).pk
+        == invoice.pk
+    )
+    with pytest.raises(ValueError, match="že vsebuje eSLOG"):
+        nastavi_eslog_artifact(invoice, rendered_eslog_path="drug.xml", checksum="drug")
 
 
 def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):
@@ -357,7 +443,9 @@ def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):
     potrjen = potrdi_osnutek_np(invoice)
 
     assert (potrjen.osnova_skupaj, potrjen.ddv_skupaj, potrjen.skupaj_z_ddv) == (
-        Decimal("130.00"), Decimal("22.00"), Decimal("152.00")
+        Decimal("130.00"),
+        Decimal("22.00"),
+        Decimal("152.00"),
     )
     assert potrjen.rok_placila == date(2026, 9, 24)
 
@@ -373,7 +461,9 @@ def test_potrditvi_porabita_zaporedni_np_stevilki_brez_letnega_reseta(pogodba):
     assert potrdi_osnutek_np(drugi).stevilka == "NP-00002"
     zaporedje = NumberSequence.objects.get(company=prvi.company)
     assert (zaporedje.tip, zaporedje.leto, zaporedje.zadnja_stevilka) == (
-        NumberSequence.Tip.NP, 0, 2
+        NumberSequence.Tip.NP,
+        0,
+        2,
     )
 
 
@@ -400,6 +490,7 @@ def test_neostevilcen_racun_z_drugim_statusom_je_zavrnjen(pogodba):
         potrdi_osnutek_np(invoice)
 
     assert not NumberSequence.objects.exists()
+
 
 def test_ostevilcen_osnutek_se_ne_popravlja_tiho(pogodba):
     dodaj_postavko(pogodba)
@@ -440,7 +531,9 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
     NumberSequence.objects.create(
-        company=invoice.company, tip=NumberSequence.Tip.NP, leto=0,
+        company=invoice.company,
+        tip=NumberSequence.Tip.NP,
+        leto=0,
         zadnja_stevilka=41,
     )
 
@@ -452,10 +545,14 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
 
     invoice.refresh_from_db()
     assert (invoice.stevilka, invoice.status, invoice.rok_placila) == (
-        None, Invoice.Status.OSNUTEK, None
+        None,
+        Invoice.Status.OSNUTEK,
+        None,
     )
     assert (invoice.osnova_skupaj, invoice.ddv_skupaj, invoice.skupaj_z_ddv) == (
-        None, None, None
+        None,
+        None,
+        None,
     )
     assert NumberSequence.objects.get().zadnja_stevilka == 41
 
@@ -490,6 +587,7 @@ def test_np_potrditev_zavrne_podjetje_drugo_od_pogodbe(pogodba):
     invoice = pripravi(pogodba).invoice
     izvirno = invoice.company
     drugo = Company.objects.create(
+        drzava_koda="SI",
         naziv="Druga d.o.o.",
         davcna_stevilka=izvirno.davcna_stevilka,
         maticna_stevilka=izvirno.maticna_stevilka,
@@ -638,3 +736,22 @@ def test_priprava_zavrne_postavko_brez_obvezne_reference(pogodba):
 
     assert {"referenca_listine", "datum_reference"} <= set(error.value.message_dict)
     assert not Invoice.objects.exists()
+
+
+def test_potrditev_zavrne_mesanje_o_in_obdavcene_pred_stevilcenjem(pogodba):
+    dodaj_postavko(pogodba, nacin="OBDAVCENO")
+    dodaj_postavko(pogodba, nacin="NI_PREDMET")
+    invoice = pripravi(pogodba).invoice
+
+    with pytest.raises(ValueError, match="kategorije O in obdavčenih"):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert invoice.stevilka is None
+    assert not NumberSequence.objects.exists()
+
+
+@pytest.mark.parametrize("nacin", ["NI_PREDMET", "OBDAVCENO"])
+def test_homogeni_o_in_navaden_s_se_lahko_potrdita(pogodba, nacin):
+    dodaj_postavko(pogodba, nacin=nacin)
+    assert potrdi_osnutek_np(pripravi(pogodba).invoice).stevilka == "NP-00001"

@@ -11,6 +11,7 @@ from tests.image_data import slika_bytes
 def podatki_podjetja(**spremembe):
     podatki = {
         "naziv": "Alfa d.o.o.",
+        "drzava_koda": "SI",
         "davcna_stevilka": "15012557",
         "maticna_stevilka": "1234567000",
         "naslov": "Glavna ulica 1",

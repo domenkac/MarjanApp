@@ -22,6 +22,7 @@ from invoicing.models import Invoice
 @pytest.fixture
 def poracun_podatki():
     company = Company.objects.create(
+        drzava_koda="SI",
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
         maticna_stevilka="1234567000",
@@ -39,6 +40,8 @@ def poracun_podatki():
         property=property, oznaka="Pisarna 1", tip_enote=Unit.TipEnote.PISARNA
     )
     tenant = Tenant.objects.create(
+        drzava_koda="SI",
+        identificiran_za_ddv=True,
         tip=Tenant.Tip.PRAVNA_OSEBA,
         naziv="Najemnik d.o.o.",
         davcna_stevilka="15012557",
@@ -105,9 +108,7 @@ def test_polja_privzeti_status_in_nullable_racun(poracun_podatki):
         "razlog_zavrnitve",
         "vkljucen_v_racun",
     }
-    assert set(PoracunIndeksacije.Status.values) == {
-        "PREDLAGAN", "POTRJEN", "ZAVRNJEN"
-    }
+    assert set(PoracunIndeksacije.Status.values) == {"PREDLAGAN", "POTRJEN", "ZAVRNJEN"}
     poracun = PoracunIndeksacije(**poracun_podatki)
     poracun.full_clean()
     poracun.save()
