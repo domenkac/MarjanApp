@@ -30,6 +30,7 @@ def test_np_pdf_zapise_bytes_checksum_in_metapodatke(izdani_racun, settings, tmp
 
     rezultat = render_pdf(izdani_racun)
 
+    assert rezultat.pot == f"company-{izdani_racun.company_id}/NP-00001.pdf"
     assert rezultat.pdf_bytes.startswith(b"%PDF-")
     assert (settings.RENDERING_ROOT / rezultat.pot).read_bytes() == rezultat.pdf_bytes
     assert rezultat.checksum == sha256(rezultat.pdf_bytes).hexdigest()
@@ -169,7 +170,11 @@ def test_neuspel_zapis_ne_nastavi_metapodatkov_ali_finalne_datoteke(
     izdani_racun.refresh_from_db()
     assert not izdani_racun.rendered_pdf_path
     assert not izdani_racun.checksum
-    assert not (settings.RENDERING_ROOT / "NP-00001.pdf").exists()
+    assert not (
+        settings.RENDERING_ROOT
+        / f"company-{izdani_racun.company_id}"
+        / "NP-00001.pdf"
+    ).exists()
 
 
 def test_ponovni_render_vrne_isti_artifact(izdani_racun, settings, tmp_path):
