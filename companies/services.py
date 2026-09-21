@@ -44,15 +44,29 @@ def shrani_nespremenljiv_asset(pot: str) -> str:
 
     digest = sha256(vsebina).hexdigest()
     cilj = f"nespremenljivi-asseti/{digest}"
+
+    def preveri_cilj() -> None:
+        try:
+            with default_storage.open(cilj, "rb") as datoteka:
+                pravilen = sha256(datoteka.read()).hexdigest() == digest
+        except (OSError, ValueError) as napaka:
+            raise ValueError(f"Nespremenljiv asset ni dostopen: {cilj}.") from napaka
+        if not pravilen:
+            raise ValueError(f"Nespremenljiv asset je poškodovan: {cilj}.")
+
     if default_storage.exists(cilj):
-        with default_storage.open(cilj, "rb") as datoteka:
-            if sha256(datoteka.read()).hexdigest() != digest:
-                raise ValueError(f"Nespremenljiv asset je poškodovan: {cilj}.")
+        preveri_cilj()
         return cilj
 
     shranjena_pot = default_storage.save(cilj, ContentFile(vsebina))
-    if shranjena_pot != cilj:
-        raise ValueError("Nespremenljivega asseta ni bilo mogoče varno shraniti.")
+    if shranjena_pot == cilj:
+        preveri_cilj()
+        return cilj
+
+    try:
+        preveri_cilj()
+    finally:
+        default_storage.delete(shranjena_pot)
     return cilj
 
 

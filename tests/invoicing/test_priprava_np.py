@@ -4,10 +4,12 @@ from unittest.mock import patch
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.db import transaction
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from invoicing import services as invoicing_services
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.rendering import nastavi_eslog_artifact
 from invoicing.services import (
@@ -555,6 +557,79 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
         None,
     )
     assert NumberSequence.objects.get().zadnja_stevilka == 41
+
+
+def test_np_nespremenljive_assete_pripravi_zunaj_transakcije(
+    pogodba, monkeypatch
+):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    shrani = invoicing_services.shrani_nespremenljiv_asset
+    globina = len(transaction.get_connection().atomic_blocks)
+
+    def preveri(pot):
+        assert len(transaction.get_connection().atomic_blocks) == globina
+        return shrani(pot)
+
+    monkeypatch.setattr(invoicing_services, "shrani_nespremenljiv_asset", preveri)
+
+    assert potrdi_osnutek_np(invoice).stevilka == "NP-00001"
+
+
+def test_np_ob_potrditvi_uporabi_podpisnika_za_koncni_datum(
+    pogodba, tmp_path
+):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    podpisnik_a = Signatory.objects.get(company=invoice.company)
+    podpisnik_a.velja_do = date(2026, 9, 1)
+    podpisnik_a.save(update_fields=["velja_do"])
+    (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+    Signatory.objects.create(
+        company=invoice.company,
+        ime_priimek="Boris Podpisnik",
+        funkcija="Direktor",
+        podpis_slika="podpis-b.png",
+        velja_od=date(2026, 9, 2),
+    )
+    spremeni_podatke_racuna(invoice, datum_izdaje=date(2026, 9, 2))
+
+    potrjen = potrdi_osnutek_np(invoice)
+
+    assert potrjen.izdajatelj_podpisnik_ime == "Boris Podpisnik"
+    assert potrjen.izdajatelj_podpisnik_funkcija == "Direktor"
+    assert potrjen.izdajatelj_podpisnik_slika_pot.startswith(
+        "nespremenljivi-asseti/"
+    )
+
+
+@pytest.mark.parametrize("napaka", ["manjka", "dvoumno"])
+def test_np_neveljaven_koncni_podpisnik_ne_porabi_stevilke(
+    pogodba, tmp_path, napaka
+):
+    dodaj_postavko(pogodba)
+    invoice = pripravi(pogodba).invoice
+    podpisnik = Signatory.objects.get(company=invoice.company)
+    if napaka == "manjka":
+        podpisnik.velja_do = date(2026, 8, 31)
+        podpisnik.save(update_fields=["velja_do"])
+    else:
+        (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+        Signatory.objects.create(
+            company=invoice.company,
+            ime_priimek="Boris Podpisnik",
+            funkcija="Direktor",
+            podpis_slika="podpis-b.png",
+            velja_od=date(2026, 9, 1),
+            velja_do=date(2026, 9, 30),
+        )
+
+    with pytest.raises(ValueError, match="veljavnega podpisnika|veljavnih podpisnikov"):
+        potrdi_osnutek_np(invoice)
+
+    invoice.refresh_from_db()
+    assert invoice.stevilka is None
+    assert not NumberSequence.objects.exists()
 
 
 def test_np_potrditev_zavrne_neskladno_vsoto_vrstice(pogodba):

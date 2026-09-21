@@ -77,11 +77,7 @@ def uvozi_migracijsko_stanje(
     if zadnje_zaracunano_obdobje_od > zadnje_zaracunano_obdobje_do:
         raise ValueError("Začetek obdobja mora biti pred koncem obdobja.")
 
-    lease = (
-        Lease.objects.select_for_update()
-        .select_related("unit__property__company")
-        .get(pk=lease.pk)
-    )
+    lease = Lease.objects.select_related("unit__property__company").get(pk=lease.pk)
     if Invoice.objects.filter(
         lease=lease,
         document_type=Invoice.DocumentType.NP,
@@ -355,7 +351,15 @@ def pripravi_osnutek_np(
 
 
 @transaction.atomic
-def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
+def _potrdi_osnutek_np(
+    osnutek: Invoice,
+    *,
+    podpisnik_id: int,
+    logo_vir: str,
+    logo_pot: str,
+    podpis_vir: str,
+    podpis_pot: str,
+) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
     if invoice.document_type != Invoice.DocumentType.NP:
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
@@ -363,6 +367,11 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         raise ValueError("NP osnutek nima pogodbe.")
     if invoice.company_id != invoice.lease.unit.property.company_id:
         raise ValueError("NP podjetje se ne ujema s pogodbo.")
+    podpisnik = izberi_veljavnega_podpisnika(
+        invoice.company, invoice.datum_izdaje
+    )
+    if podpisnik.pk != podpisnik_id or podpisnik.podpis_slika.name != podpis_vir:
+        raise ValueError("Podpisnik se je med potrditvijo spremenil.")
 
     vrstice = list(InvoiceLine.objects.filter(invoice=invoice))
     if not vrstice:
@@ -392,12 +401,12 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.rok_placila = invoice.datum_izdaje + timedelta(
         days=invoice.lease.rok_placila_dni
     )
-    invoice.izdajatelj_logotip_slika_pot = shrani_nespremenljiv_asset(
-        invoice.company.logotip.name
-    )
-    invoice.izdajatelj_podpisnik_slika_pot = shrani_nespremenljiv_asset(
-        invoice.izdajatelj_podpisnik_slika_pot
-    )
+    if invoice.company.logotip.name != logo_vir:
+        raise ValueError("Logotip podjetja se je med potrditvijo spremenil.")
+    invoice.izdajatelj_podpisnik_ime = podpisnik.ime_priimek
+    invoice.izdajatelj_podpisnik_funkcija = podpisnik.funkcija
+    invoice.izdajatelj_logotip_slika_pot = logo_pot
+    invoice.izdajatelj_podpisnik_slika_pot = podpis_pot
     invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(
         invoice.company, NumberSequence.Tip.NP, invoice.datum_izdaje
@@ -407,6 +416,8 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     invoice.save(
         update_fields=[
             "stevilka",
+            "izdajatelj_podpisnik_ime",
+            "izdajatelj_podpisnik_funkcija",
             "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot",
             "pdf_template_version",
@@ -418,6 +429,30 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         ]
     )
     return invoice
+
+
+def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
+    invoice = preveri_uredljiv_osnutek(osnutek)
+    if (
+        invoice.lease_id is None
+        or invoice.company_id != invoice.lease.unit.property.company_id
+    ):
+        raise ValueError("NP podjetje se ne ujema s pogodbo.")
+    podpisnik = izberi_veljavnega_podpisnika(
+        invoice.company, invoice.datum_izdaje
+    )
+    logo_vir = invoice.company.logotip.name
+    podpis_vir = podpisnik.podpis_slika.name
+    logo_pot = shrani_nespremenljiv_asset(logo_vir)
+    podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
+    return _potrdi_osnutek_np(
+        osnutek,
+        podpisnik_id=podpisnik.pk,
+        logo_vir=logo_vir,
+        logo_pot=logo_pot,
+        podpis_vir=podpis_vir,
+        podpis_pot=podpis_pot,
+    )
 
 
 _SNAPSHOT_POLJA_KOREKCIJE = (
@@ -436,9 +471,6 @@ _SNAPSHOT_POLJA_KOREKCIJE = (
     "izdajatelj_drzava_koda",
     "izdajatelj_identificiran_za_ddv",
     "izdajatelj_trr",
-    "izdajatelj_podpisnik_ime",
-    "izdajatelj_podpisnik_funkcija",
-    "izdajatelj_podpisnik_slika_pot",
     "oznaka_pogodbe",
     "objekt_naziv",
 )
@@ -524,6 +556,7 @@ def pripravi_korekcijski_osnutek(
     ):
         raise ValueError("Dovoljen je samo storno ali dobropis.")
     original = _preveri_izvirnik_korekcije(original)
+    podpisnik = izberi_veljavnega_podpisnika(original.company, datum_izdaje)
     invoice = Invoice(
         company_id=original.company_id,
         lease_id=original.lease_id,
@@ -534,6 +567,9 @@ def pripravi_korekcijski_osnutek(
         obdobje_od=original.obdobje_od,
         obdobje_do=original.obdobje_do,
         status=Invoice.Status.OSNUTEK,
+        izdajatelj_podpisnik_ime=podpisnik.ime_priimek,
+        izdajatelj_podpisnik_funkcija=podpisnik.funkcija,
+        izdajatelj_podpisnik_slika_pot=podpisnik.podpis_slika.name,
         **{polje: getattr(original, polje) for polje in _SNAPSHOT_POLJA_KOREKCIJE},
     )
     invoice.full_clean()
@@ -550,7 +586,15 @@ def pripravi_korekcijski_osnutek(
 
 
 @transaction.atomic
-def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
+def _potrdi_korekcijski_osnutek(
+    osnutek: Invoice,
+    *,
+    podpisnik_id: int,
+    logo_vir: str,
+    logo_pot: str,
+    podpis_vir: str,
+    podpis_pot: str,
+) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
     if (
         invoice.document_type
@@ -562,6 +606,13 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     ):
         raise ValueError("Račun ni korekcijski osnutek.")
     original = _preveri_izvirnik_korekcije(invoice.povezan_racun)
+    podpisnik = izberi_veljavnega_podpisnika(
+        invoice.company, invoice.datum_izdaje
+    )
+    if podpisnik.pk != podpisnik_id or podpisnik.podpis_slika.name != podpis_vir:
+        raise ValueError("Podpisnik se je med potrditvijo spremenil.")
+    if invoice.company.logotip.name != logo_vir:
+        raise ValueError("Logotip podjetja se je med potrditvijo spremenil.")
     if (
         invoice.company_id != original.company_id
         or invoice.lease_id != original.lease_id
@@ -606,12 +657,10 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
     invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
     tip = original.document_type
-    invoice.izdajatelj_logotip_slika_pot = shrani_nespremenljiv_asset(
-        invoice.company.logotip.name
-    )
-    invoice.izdajatelj_podpisnik_slika_pot = shrani_nespremenljiv_asset(
-        invoice.izdajatelj_podpisnik_slika_pot
-    )
+    invoice.izdajatelj_podpisnik_ime = podpisnik.ime_priimek
+    invoice.izdajatelj_podpisnik_funkcija = podpisnik.funkcija
+    invoice.izdajatelj_logotip_slika_pot = logo_pot
+    invoice.izdajatelj_podpisnik_slika_pot = podpis_pot
     invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(invoice.company, tip, invoice.datum_izdaje)
     if tip == Invoice.DocumentType.NP:
@@ -626,12 +675,33 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
             "skupaj_z_ddv",
             "stevilka",
             "status",
+            "izdajatelj_podpisnik_ime",
+            "izdajatelj_podpisnik_funkcija",
             "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot",
             "pdf_template_version",
         ]
     )
     return invoice
+
+
+def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
+    invoice = preveri_uredljiv_osnutek(osnutek)
+    podpisnik = izberi_veljavnega_podpisnika(
+        invoice.company, invoice.datum_izdaje
+    )
+    logo_vir = invoice.company.logotip.name
+    podpis_vir = podpisnik.podpis_slika.name
+    logo_pot = shrani_nespremenljiv_asset(logo_vir)
+    podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
+    return _potrdi_korekcijski_osnutek(
+        osnutek,
+        podpisnik_id=podpisnik.pk,
+        logo_vir=logo_vir,
+        logo_pot=logo_pot,
+        podpis_vir=podpis_vir,
+        podpis_pot=podpis_pot,
+    )
 
 
 @dataclass(frozen=True)

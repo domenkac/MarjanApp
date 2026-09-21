@@ -4,8 +4,10 @@ from unittest.mock import patch
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.db import transaction
 
-from companies.models import NumberSequence
+from companies.models import NumberSequence, Signatory
+from invoicing import services as invoicing_services
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     dodaj_vrstico,
@@ -135,6 +137,107 @@ def test_storno_ohrani_eslog_snapshote_po_spremembi_zivih_podatkov(pogodba):
         .order_by("pk")
         .values_list("ddv_eslog_koda", flat=True)
     ) == pricakovane_kode
+
+
+@pytest.mark.parametrize(
+    "tip", [Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS]
+)
+def test_korekcija_uporabi_podpisnika_veljavnega_na_svoj_datum(
+    pogodba, tmp_path, tip
+):
+    original = izdan_np(pogodba)
+    podpisnik_a = Signatory.objects.get(company=original.company)
+    podpisnik_a.velja_do = date(2026, 9, 1)
+    podpisnik_a.save(update_fields=["velja_do"])
+    (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+    Signatory.objects.create(
+        company=original.company,
+        ime_priimek="Boris Podpisnik",
+        funkcija="Direktor",
+        podpis_slika="podpis-b.png",
+        velja_od=date(2026, 9, 2),
+    )
+    popravek = pripravi_korekcijski_osnutek(
+        original, tip, "Napaka", date(2026, 9, 2)
+    )
+    if tip == Invoice.DocumentType.DOBROPIS:
+        dodaj_vrstico(
+            popravek,
+            opis="Dobropis",
+            osnova=Decimal("-10.00"),
+            ddv_stopnja=Decimal("0.00"),
+            ddv_znesek=Decimal("0.00"),
+            skupaj=Decimal("-10.00"),
+            ddv_nacin_obracuna="NI_PREDMET",
+            ddv_eslog_koda="O",
+            ddv_rekap_skupina="NI_PREDMET",
+        )
+
+    potrjen = potrdi_korekcijski_osnutek(popravek)
+    original.refresh_from_db()
+
+    assert potrjen.izdajatelj_podpisnik_ime == "Boris Podpisnik"
+    assert potrjen.izdajatelj_podpisnik_funkcija == "Direktor"
+    assert potrjen.izdajatelj_podpisnik_slika_pot.startswith(
+        "nespremenljivi-asseti/"
+    )
+    assert original.izdajatelj_podpisnik_ime == "Ana Podpisnica"
+    assert original.izdajatelj_podpisnik_funkcija == "Direktorica"
+    assert original.izdajatelj_podpisnik_slika_pot != (
+        potrjen.izdajatelj_podpisnik_slika_pot
+    )
+
+
+@pytest.mark.parametrize("napaka", ["manjka", "dvoumno"])
+def test_neveljaven_podpisnik_korekcije_ne_porabi_stevilke(
+    pogodba, tmp_path, napaka
+):
+    original = izdan_np(pogodba)
+    storno = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.STORNO, "Napaka", date(2026, 9, 2)
+    )
+    podpisnik = Signatory.objects.get(company=original.company)
+    if napaka == "manjka":
+        podpisnik.velja_do = date(2026, 9, 1)
+        podpisnik.save(update_fields=["velja_do"])
+    else:
+        (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+        Signatory.objects.create(
+            company=original.company,
+            ime_priimek="Boris Podpisnik",
+            funkcija="Direktor",
+            podpis_slika="podpis-b.png",
+            velja_od=date(2026, 9, 2),
+            velja_do=date(2026, 9, 30),
+        )
+
+    with pytest.raises(ValueError, match="veljavnega podpisnika|veljavnih podpisnikov"):
+        potrdi_korekcijski_osnutek(storno)
+
+    storno.refresh_from_db()
+    assert storno.stevilka is None
+    assert NumberSequence.objects.get(
+        company=original.company, tip=NumberSequence.Tip.NP, leto=0
+    ).zadnja_stevilka == 1
+
+
+def test_korekcija_nespremenljive_assete_pripravi_zunaj_transakcije(
+    pogodba, monkeypatch
+):
+    original = izdan_np(pogodba)
+    storno = pripravi_korekcijski_osnutek(
+        original, Invoice.DocumentType.STORNO, "Napaka", date(2026, 9, 2)
+    )
+    shrani = invoicing_services.shrani_nespremenljiv_asset
+    globina = len(transaction.get_connection().atomic_blocks)
+
+    def preveri(pot):
+        assert len(transaction.get_connection().atomic_blocks) == globina
+        return shrani(pot)
+
+    monkeypatch.setattr(invoicing_services, "shrani_nespremenljiv_asset", preveri)
+
+    assert potrdi_korekcijski_osnutek(storno).stevilka == "NP-00002"
 
 
 def test_dobropis_uporabi_rocno_vrstico_brez_izracuna_iz_pogodbe(pogodba):

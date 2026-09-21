@@ -270,7 +270,7 @@ def zaznaj_zamujen_poracun(
 def potrdi_indeksacijo(
     lease_item: LeaseItem, nov_indeks: Decimal, danes: date
 ) -> IndexationEvent:
-    postavka = LeaseItem.objects.select_for_update().get(pk=lease_item.pk)
+    postavka = LeaseItem.objects.get(pk=lease_item.pk)
     predlog = izracunaj_indeksacijo(postavka, nov_indeks, danes)
     if not predlog.pogoj_izpolnjen:
         raise ValueError(predlog.razlog)
@@ -296,7 +296,7 @@ def potrdi_indeksacijo(
 
 @transaction.atomic
 def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent:
-    dogodek = IndexationEvent.objects.select_for_update().get(pk=indexation_event.pk)
+    dogodek = IndexationEvent.objects.get(pk=indexation_event.pk)
     if dogodek.izkljucen:
         raise ValueError("Indeksacija je že razveljavljena.")
 
@@ -307,7 +307,7 @@ def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent
     ).exists():
         raise ValueError("Po uskladitvi je bil izdan račun za to postavko.")
 
-    postavka = LeaseItem.objects.select_for_update().get(pk=dogodek.lease_item_id)
+    postavka = LeaseItem.objects.get(pk=dogodek.lease_item_id)
     prejsnja_vrednost = postavka.znesek_neto_mesecno
     postavka.znesek_neto_mesecno = dogodek.stara_vrednost
     postavka.full_clean()

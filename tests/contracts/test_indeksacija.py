@@ -5,7 +5,7 @@ import pytest
 from django.contrib.contenttypes.models import ContentType
 
 from catalogs.models import VatRegime
-from companies.models import Company, NumberSequence
+from companies.models import Company, NumberSequence, Signatory
 from contracts import services
 from contracts.models import (
     IndexationEvent,
@@ -235,6 +235,13 @@ def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka, tmp_path, se
     (tmp_path / "logo.png").write_bytes(b"logo")
     (tmp_path / "podpis.png").write_bytes(b"podpis")
     original = racun_s_postavkami(postavka)
+    Signatory.objects.create(
+        company=original.company,
+        ime_priimek="Ana Podpisnica",
+        funkcija="Direktorica",
+        podpis_slika="podpis.png",
+        velja_od=date(LETO, 1, 1),
+    )
     original.izdajatelj_podpisnik_slika_pot = "podpis.png"
     original.save(update_fields=["izdajatelj_podpisnik_slika_pot"])
     NumberSequence.objects.create(
