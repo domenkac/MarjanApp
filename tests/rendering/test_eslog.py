@@ -29,6 +29,19 @@ def _vrednosti(xml_bytes, pot):
     return root.xpath(pot, namespaces={"e": NS})
 
 
+def _nastavi_eslog_snapshot(invoice, *, elektronski=False, kontakt=False, fields=None):
+    Invoice.objects.filter(pk=invoice.pk).update(
+        eslog_konfiguracija_snapshot={
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": elektronski,
+                "kontaktni_podatki_kupca_vkljuceni": kontakt,
+            },
+            "fields": fields or {},
+        }
+    )
+
+
 def test_minimalni_np_je_xsd_veljaven(izdani_racun):
     xml_bytes = render_eslog(izdani_racun)
 
@@ -37,6 +50,108 @@ def test_minimalni_np_je_xsd_veljaven(izdani_racun):
         xml_bytes, "//e:S_DTM/e:C_C507[e:D_2005='137']/e:D_2380/text()"
     ) == ["2026-09-01"]
     assert nalozi_eslog_shemo() is not None
+    assert not _vrednosti(xml_bytes, "//e:G_SG2[e:S_NAD/e:D_3035='BY']/e:G_SG5")
+
+
+def test_bt49_je_samo_v_kupcevi_ic_skupini_in_xsd_veljaven(izdani_racun):
+    _nastavi_eslog_snapshot(
+        izdani_racun,
+        elektronski=True,
+        fields={"elektronski_naslov_kupca": "e-racuni@example.com"},
+    )
+
+    xml_bytes = render_eslog(izdani_racun)
+
+    assert _vrednosti(
+        xml_bytes,
+        "//e:G_SG2[e:S_NAD/e:D_3035='BY']/e:G_SG5/e:S_CTA/e:D_3139/text()",
+    ) == ["IC"]
+    assert _vrednosti(xml_bytes, "//e:G_SG5/e:S_COM/e:C_C076/*/text()") == [
+        "e-racuni@example.com",
+        "EM",
+    ]
+    assert not _vrednosti(
+        xml_bytes, "//e:G_SG2[e:S_NAD/e:D_3035='SE']/e:G_SG5"
+    )
+    validiraj_eslog(xml_bytes)
+
+
+@pytest.mark.parametrize(
+    ("fields", "cta", "com"),
+    [
+        ({"kontaktna_tocka_kupca": "Nabava"}, ["Nabava"], []),
+        ({"kontaktni_telefon_kupca": "+386 1 234 56 78"}, [], ["TE"]),
+        ({"kontaktni_email_kupca": "nabava@example.com"}, [], ["EM"]),
+        (
+            {
+                "kontaktna_tocka_kupca": "Nabava",
+                "kontaktni_telefon_kupca": "+386 1 234 56 78",
+                "kontaktni_email_kupca": "nabava@example.com",
+            },
+            ["Nabava"],
+            ["TE", "EM"],
+        ),
+    ],
+)
+def test_bg9_variacije_so_ena_pd_skupina_in_xsd_veljavne(
+    izdani_racun, fields, cta, com
+):
+    _nastavi_eslog_snapshot(izdani_racun, kontakt=True, fields=fields)
+
+    xml_bytes = render_eslog(izdani_racun)
+    osnova = "//e:G_SG2[e:S_NAD/e:D_3035='BY']/e:G_SG5"
+
+    assert _vrednosti(xml_bytes, osnova + "/e:S_CTA/e:D_3139/text()") == ["PD"]
+    assert _vrednosti(xml_bytes, osnova + "/e:S_CTA/e:C_C056/e:D_3412/text()") == cta
+    assert _vrednosti(xml_bytes, osnova + "/e:S_COM/e:C_C076/e:D_3155/text()") == com
+    assert len(_vrednosti(xml_bytes, osnova)) == 1
+    assert not _vrednosti(xml_bytes, osnova + "//*[not(text()) and not(*)]")
+    validiraj_eslog(xml_bytes)
+
+
+def test_ic_pred_pd_in_bytes_so_deterministicni(izdani_racun):
+    _nastavi_eslog_snapshot(
+        izdani_racun,
+        elektronski=True,
+        kontakt=True,
+        fields={
+            "elektronski_naslov_kupca": "e-racuni@example.com",
+            "kontaktni_email_kupca": "nabava@example.com",
+        },
+    )
+
+    prvi = render_eslog(izdani_racun)
+    drugi = render_eslog(izdani_racun)
+
+    assert prvi == drugi
+    assert _vrednosti(
+        prvi,
+        "//e:G_SG2[e:S_NAD/e:D_3035='BY']/e:G_SG5/e:S_CTA/e:D_3139/text()",
+    ) == ["IC", "PD"]
+
+
+def test_sprememba_zive_company_in_tenant_konfiguracije_ne_spremeni_xml(
+    izdani_racun,
+):
+    prvi = render_eslog(izdani_racun)
+    company = izdani_racun.company
+    tenant = izdani_racun.lease.tenant
+    company.eslog_privzeti_neobvezni_segmenti = {
+        "elektronski_naslov_kupca_vkljucen": True,
+        "kontaktni_podatki_kupca_vkljuceni": True,
+    }
+    company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
+    tenant.eslog_neobvezni_segmenti_override = {
+        "elektronski_naslov_kupca_vkljucen": True,
+        "kontaktni_podatki_kupca_vkljuceni": True,
+    }
+    tenant.eslog_neobvezna_polja = {
+        "elektronski_naslov_kupca": "nov@example.com",
+        "kontaktna_tocka_kupca": "Nova nabava",
+    }
+    tenant.save()
+
+    assert render_eslog(izdani_racun) == prvi
 
 
 def test_context_je_nespremenljiv_in_uporablja_samo_snapshote(izdani_racun):
@@ -53,10 +168,70 @@ def test_context_je_nespremenljiv_in_uporablja_samo_snapshote(izdani_racun):
     regime.save(update_fields=["eslog_koda"])
     item.naziv_postavke = "Spremenjena postavka"
     item.save(update_fields=["naziv_postavke"])
+    company.eslog_privzeti_neobvezni_segmenti = {
+        "elektronski_naslov_kupca_vkljucen": True,
+        "kontaktni_podatki_kupca_vkljuceni": False,
+    }
+    company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
+    tenant.eslog_neobvezni_segmenti_override = {
+        "kontaktni_podatki_kupca_vkljuceni": True
+    }
+    tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Nova nabava"}
+    tenant.save(
+        update_fields=[
+            "eslog_neobvezni_segmenti_override",
+            "eslog_neobvezna_polja",
+        ]
+    )
 
     assert pripravi_eslog_context(izdani_racun) == context
+    assert not context.eslog_konfiguracija.elektronski_naslov_kupca_vkljucen
+    assert not context.eslog_konfiguracija.kontaktni_podatki_kupca_vkljuceni
     with pytest.raises(FrozenInstanceError):
         context.stevilka = "druga"
+    with pytest.raises(FrozenInstanceError):
+        context.eslog_konfiguracija.kontaktna_tocka_kupca = "Druga"
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        {
+            "version": "prihodnja",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {"elektronski_naslov_kupca_vkljucen": False},
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": True,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
+    ],
+)
+def test_render_neveljavnega_snapshota_odpove_s_stabilno_kodo(
+    izdani_racun, snapshot
+):
+    Invoice.objects.filter(pk=izdani_racun.pk).update(
+        eslog_konfiguracija_snapshot=snapshot
+    )
+
+    with pytest.raises(EslogRenderNapaka) as error:
+        render_eslog(izdani_racun)
+
+    assert error.value.koda == "ESLOG_KONFIGURACIJA_SNAPSHOT_NEVELJAVEN"
+    assert error.value.__cause__ is not None
 
 
 @pytest.mark.parametrize("koda", ["S", "E", "AE", "O"])
@@ -128,6 +303,30 @@ def test_korekcija_381_in_bt25_bt26(izdani_racun, tip):
         "//e:G_SG1[e:S_RFF/e:C_C506/e:D_1153='OI']/e:S_DTM/e:C_C507[e:D_2005='384']/e:D_2380/text()",
     ) == ["2026-09-01"]
     assert not _vrednosti(xml_bytes, "//e:G_SG8")
+
+
+def test_korekcija_uporabi_svoj_konfiguracijski_snapshot(izdani_racun):
+    _nastavi_eslog_snapshot(
+        izdani_racun,
+        elektronski=True,
+        fields={"elektronski_naslov_kupca": "izvirnik@example.com"},
+    )
+    tenant = izdani_racun.lease.tenant
+    tenant.eslog_neobvezni_segmenti_override = {
+        "kontaktni_podatki_kupca_vkljuceni": True
+    }
+    tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Korekcije"}
+    tenant.save()
+    osnutek = pripravi_korekcijski_osnutek(
+        izdani_racun, Invoice.DocumentType.STORNO, "Popravek", izdani_racun.datum_izdaje
+    )
+    popravek = potrdi_korekcijski_osnutek(osnutek)
+
+    original_xml = render_eslog(izdani_racun)
+    popravek_xml = render_eslog(popravek)
+
+    assert _vrednosti(original_xml, "//e:G_SG5/e:S_CTA/e:D_3139/text()") == ["IC"]
+    assert _vrednosti(popravek_xml, "//e:G_SG5/e:S_CTA/e:D_3139/text()") == ["PD"]
 
 
 def test_xsd_zavrne_neveljaven_xml():

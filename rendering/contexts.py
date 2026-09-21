@@ -52,6 +52,16 @@ class EslogVrstica:
 
 
 @dataclass(frozen=True, slots=True)
+class EslogKonfiguracijaContext:
+    elektronski_naslov_kupca_vkljucen: bool
+    kontaktni_podatki_kupca_vkljuceni: bool
+    elektronski_naslov_kupca: str | None
+    kontaktna_tocka_kupca: str | None
+    kontaktni_telefon_kupca: str | None
+    kontaktni_email_kupca: str | None
+
+
+@dataclass(frozen=True, slots=True)
 class EslogContext:
     document_type: str
     stevilka: str
@@ -79,6 +89,7 @@ class EslogContext:
     ddv_skupaj: Decimal
     skupaj_z_ddv: Decimal
     vrstice: tuple[EslogVrstica, ...]
+    eslog_konfiguracija: EslogKonfiguracijaContext
 
 
 @dataclass(frozen=True, slots=True)

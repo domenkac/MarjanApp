@@ -227,6 +227,23 @@ def validiraj_ucinkovito_konfiguracijo(
     }
 
 
+def validiraj_eslog_konfiguracija_snapshot(snapshot: Any) -> dict[str, Any]:
+    snapshot = _preveri_preslikavo(snapshot)
+    if set(snapshot) != {"version", "segments", "fields"}:
+        raise EslogKonfiguracijaNapaka(
+            "ESLOG_SNAPSHOT_STRUKTURA_NEVELJAVNA",
+            "eSLOG konfiguracijski snapshot mora vsebovati samo version, segments in fields.",
+        )
+    if snapshot["version"] != ESLOG_KONFIGURACIJA_VERZIJA:
+        raise EslogKonfiguracijaNapaka(
+            "ESLOG_SNAPSHOT_VERZIJA_NEVELJAVNA",
+            "Različica eSLOG konfiguracijskega snapshota ni podprta.",
+        )
+    return validiraj_ucinkovito_konfiguracijo(
+        snapshot["segments"], snapshot["fields"]
+    )
+
+
 def razresi_eslog_konfiguracijo(
     company_defaults: Mapping[str, Any],
     tenant_overrides: Mapping[str, Any],

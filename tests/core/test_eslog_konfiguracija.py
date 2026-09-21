@@ -10,6 +10,7 @@ from core.eslog_konfiguracija import (
     normaliziraj_segmentne_nastavitve,
     razresi_eslog_konfiguracijo,
     razresi_segmentne_nastavitve,
+    validiraj_eslog_konfiguracija_snapshot,
     validiraj_ucinkovito_konfiguracijo,
     zgodovinski_baseline_v1,
 )
@@ -246,3 +247,85 @@ def test_razresitev_sestavi_kanonicni_snapshot_in_uposteva_override():
         "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: True},
         "fields": {"kontaktna_tocka_kupca": "Nabava"},
     }
+
+
+def test_snapshot_v1_je_validiran_in_vrnjen_kanonicno():
+    snapshot = {
+        "fields": {"kontaktna_tocka_kupca": "  Nabava  "},
+        "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: True},
+        "version": ESLOG_KONFIGURACIJA_VERZIJA,
+    }
+
+    assert validiraj_eslog_konfiguracija_snapshot(snapshot) == {
+        "version": ESLOG_KONFIGURACIJA_VERZIJA,
+        "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: True},
+        "fields": {"kontaktna_tocka_kupca": "Nabava"},
+    }
+
+
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        [],
+        {"version": ESLOG_KONFIGURACIJA_VERZIJA, "fields": {}},
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: False},
+            "fields": {},
+            "extra": True,
+        },
+        {
+            "version": "prihodnja-verzija",
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: False},
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False},
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {
+                ELEKTRONSKI_NASLOV: False,
+                KONTAKTNI_PODATKI: False,
+                "neznan": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: 0, KONTAKTNI_PODATKI: False},
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: True, KONTAKTNI_PODATKI: False},
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: False},
+            "fields": {"elektronski_naslov_kupca": "kupec@example.com"},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: True},
+            "fields": {},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: False},
+            "fields": {"kontaktna_tocka_kupca": "Nabava"},
+        },
+        {
+            "version": ESLOG_KONFIGURACIJA_VERZIJA,
+            "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: False},
+            "fields": {"neznano": "vrednost"},
+        },
+    ],
+)
+def test_snapshot_zavrne_nekanonicno_ali_neveljavno_stanje(snapshot):
+    with pytest.raises(EslogKonfiguracijaNapaka):
+        validiraj_eslog_konfiguracija_snapshot(snapshot)

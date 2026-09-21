@@ -3,9 +3,24 @@ from pathlib import Path
 
 from lxml import etree
 
+from core.eslog_konfiguracija import (
+    ELEKTRONSKI_NASLOV_KUPCA,
+    ELEKTRONSKI_NASLOV_KUPCA_VKLJUCEN,
+    KONTAKTNA_TOCKA_KUPCA,
+    KONTAKTNI_EMAIL_KUPCA,
+    KONTAKTNI_PODATKI_KUPCA_VKLJUCENI,
+    KONTAKTNI_TELEFON_KUPCA,
+    EslogKonfiguracijaNapaka,
+    validiraj_eslog_konfiguracija_snapshot,
+)
 from invoicing.models import Invoice, InvoiceLine
 
-from .contexts import EslogContext, EslogRenderNapaka, EslogVrstica
+from .contexts import (
+    EslogContext,
+    EslogKonfiguracijaContext,
+    EslogRenderNapaka,
+    EslogVrstica,
+)
 
 NS = "urn:eslog:2.00"
 _XSD_DIR = Path(__file__).parent / "xsd" / "eslog_2_0"
@@ -160,6 +175,32 @@ def _party(
     return sg2
 
 
+def _com(stars, vrednost: str, kvalifikator: str) -> None:
+    com = _dodaj(stars, "S_COM")
+    c076 = _dodaj(com, "C_C076")
+    _dodaj(c076, "D_3148", vrednost)
+    _dodaj(c076, "D_3155", kvalifikator)
+
+
+def _buyer_optional(sg2, konfiguracija: EslogKonfiguracijaContext) -> None:
+    if konfiguracija.elektronski_naslov_kupca_vkljucen:
+        sg5 = _dodaj(sg2, "G_SG5")
+        cta = _dodaj(sg5, "S_CTA")
+        _dodaj(cta, "D_3139", "IC")
+        _com(sg5, konfiguracija.elektronski_naslov_kupca, "EM")
+    if konfiguracija.kontaktni_podatki_kupca_vkljuceni:
+        sg5 = _dodaj(sg2, "G_SG5")
+        cta = _dodaj(sg5, "S_CTA")
+        _dodaj(cta, "D_3139", "PD")
+        if konfiguracija.kontaktna_tocka_kupca:
+            c056 = _dodaj(cta, "C_C056")
+            _dodaj(c056, "D_3412", konfiguracija.kontaktna_tocka_kupca)
+        if konfiguracija.kontaktni_telefon_kupca:
+            _com(sg5, konfiguracija.kontaktni_telefon_kupca, "TE")
+        if konfiguracija.kontaktni_email_kupca:
+            _com(sg5, konfiguracija.kontaktni_email_kupca, "EM")
+
+
 def _tax(stars, koda: str, stopnja) -> None:
     tax = _dodaj(stars, "S_TAX")
     _dodaj(tax, "D_5283", "7")
@@ -186,6 +227,17 @@ def pripravi_eslog_context(invoice: Invoice) -> EslogContext:
         raise EslogRenderNapaka("RACUN_NE_OBSTAJA", "Račun ne obstaja.")
     if not svezi.stevilka:
         raise EslogRenderNapaka("STEVILKA_MANJKA", "Račun nima številke.")
+    try:
+        snapshot = validiraj_eslog_konfiguracija_snapshot(
+            svezi.eslog_konfiguracija_snapshot
+        )
+    except EslogKonfiguracijaNapaka as napaka:
+        raise EslogRenderNapaka(
+            "ESLOG_KONFIGURACIJA_SNAPSHOT_NEVELJAVEN",
+            "eSLOG konfiguracijski snapshot ni veljaven.",
+        ) from napaka
+    segmenti = snapshot["segments"]
+    polja = snapshot["fields"]
     obvezna = (
         "prejemnik_naziv",
         "prejemnik_naslov",
@@ -293,6 +345,18 @@ def pripravi_eslog_context(invoice: Invoice) -> EslogContext:
             )
             for v in vrstice
         ),
+        eslog_konfiguracija=EslogKonfiguracijaContext(
+            elektronski_naslov_kupca_vkljucen=segmenti[
+                ELEKTRONSKI_NASLOV_KUPCA_VKLJUCEN
+            ],
+            kontaktni_podatki_kupca_vkljuceni=segmenti[
+                KONTAKTNI_PODATKI_KUPCA_VKLJUCENI
+            ],
+            elektronski_naslov_kupca=polja.get(ELEKTRONSKI_NASLOV_KUPCA),
+            kontaktna_tocka_kupca=polja.get(KONTAKTNA_TOCKA_KUPCA),
+            kontaktni_telefon_kupca=polja.get(KONTAKTNI_TELEFON_KUPCA),
+            kontaktni_email_kupca=polja.get(KONTAKTNI_EMAIL_KUPCA),
+        ),
     )
 
 
@@ -340,7 +404,7 @@ def sestavi_eslog(context: EslogContext) -> bytes:
             context.povezan_racun_datum,
         )
     samo_ahp = any(vrstica.ddv_eslog_koda == "O" for vrstica in context.vrstice)
-    _party(
+    buyer = _party(
         dokument,
         tip="BY",
         naziv=context.prejemnik_naziv,
@@ -352,6 +416,7 @@ def sestavi_eslog(context: EslogContext) -> bytes:
         identificiran_za_ddv=context.prejemnik_identificiran_za_ddv,
         samo_ahp=samo_ahp,
     )
+    _buyer_optional(buyer, context.eslog_konfiguracija)
     _party(
         dokument,
         tip="SE",

@@ -132,6 +132,110 @@ def test_neuspela_eslog_validacija_ne_nastavi_metapodatkov(
     assert not settings.RENDERING_ROOT.exists()
 
 
+@pytest.mark.parametrize(
+    "snapshot",
+    [
+        None,
+        {"version": "eslog-2.0-v200-config-v1", "fields": {}},
+        {
+            "version": "prihodnja",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {"elektronski_naslov_kupca_vkljucen": False},
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+                "neznan": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": 0,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": True,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {"elektronski_naslov_kupca": "kupec@example.com"},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": True,
+            },
+            "fields": {},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {"kontaktni_email_kupca": "kontakt@example.com"},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {"neznano": "vrednost"},
+        },
+        {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+            "extra": True,
+        },
+    ],
+)
+def test_neveljaven_snapshot_ne_objavi_artifacta(
+    izdani_racun, settings, tmp_path, snapshot
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    Invoice.objects.filter(pk=izdani_racun.pk).update(
+        eslog_konfiguracija_snapshot=snapshot
+    )
+
+    with pytest.raises(EslogRenderNapaka) as error:
+        render_eslog(izdani_racun)
+
+    assert error.value.koda == "ESLOG_KONFIGURACIJA_SNAPSHOT_NEVELJAVEN"
+    izdani_racun.refresh_from_db()
+    assert not izdani_racun.rendered_eslog_path
+    assert not izdani_racun.rendered_eslog_checksum
+    assert not settings.RENDERING_ROOT.exists()
+
+
 def test_neuspeli_eslog_metapodatki_odstranijo_artifact_in_dovolijo_ponovitev(
     izdani_racun, settings, tmp_path, monkeypatch
 ):
