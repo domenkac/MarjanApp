@@ -771,15 +771,30 @@ FINAL PRD določa:
 - prejemnik/najemnik jo lahko povozi;
 - neobvezna polja se modelirajo kot preslikava `ključ → vrednost`, ne kot množica fiksnih stolpcev.
 
-Faza 2 mora zato za eSLOG 2b definirati **generičen konfiguracijski model oziroma enakovredno strukturo**, ki omogoča:
+Faza 2 zato ločeno modelira stanje neobveznih segmentov in njihove vrednosti:
 
 ```text
-Company default optional segments/values
-        ↓ override
-Tenant/recipient optional segments/values
-        ↓ resolve
-effective eSLOG configuration
+Company privzeto stanje neobveznih segmentov
+        ↓ povozijo samo izrecni Tenant override-i
+učinkovito stanje neobveznih segmentov
+
+Tenant neobvezne vrednosti polj (ključ → vrednost)
 ```
+
+Company ne hrani privzetih vrednosti neobveznih polj. Tretji implicitni oziroma sistemski sloj privzetih vrednosti ne obstaja.
+
+Konfiguracijska verzija `eslog-2.0-v200-config-v1` podpira samo:
+
+| Vrsta | Interni ključ | Uradni termin | Preslikava |
+|---|---|---|---|
+| segment | `elektronski_naslov_kupca_vkljucen` | BT-49/BT-49-1 | kupec `G_SG2[BY]`, `G_SG5`, CTA `IC`, COM `EM` |
+| segment | `kontaktni_podatki_kupca_vkljuceni` | BG-9 | kupec `G_SG2[BY]`, `G_SG5`, CTA `PD` |
+| Tenant polje | `elektronski_naslov_kupca` | BT-49 | `D_3148`, največ 512 znakov, veljaven e-naslov; shema `EM` |
+| Tenant polje | `kontaktna_tocka_kupca` | BT-56 | `D_3412`, največ 256 znakov |
+| Tenant polje | `kontaktni_telefon_kupca` | BT-57 | `D_3148`, največ 512 znakov; kvalifikator `TE` |
+| Tenant polje | `kontaktni_email_kupca` | BT-58 | `D_3148`, največ 512 znakov, veljaven e-naslov; kvalifikator `EM` |
+
+Oba Company segmentna defaulta sta izrecno `False`; s tem konfiguracija v1 ohrani današnji XML. `Tenant.email` ni nadomestni vir za BT-49. BT-10 in BT-19 nista podprta v v1, ker ni odločeno, ali sta last Tenant, Lease ali posameznega Invoice.
 
 Pravila:
 
@@ -790,6 +805,23 @@ Pravila:
 5. Renderer ne sme iz inventiranih ključev sklepati XML elementov.
 6. Natančni dovoljeni ključi, tipi in preslikave se v FINAL FSD dopolnijo šele iz uradnega, verzioniranega eSLOG 2.0 artefakta.
 7. Če konfiguracija povzroči XSD-neveljaven dokument, render eSLOG ni uspešen.
+8. Omogočen BT-49 segment zahteva izrecno vrednost BT-49; izklopljen segment z vrednostjo je napaka.
+9. Omogočen BG-9 zahteva najmanj enega izmed BT-56, BT-57 ali BT-58; izklopljen segment s katerokoli od teh vrednosti je napaka.
+10. Vrednosti se ne ignorirajo in konfiguracija odpove zaprto.
+11. Izdani snapshot vsebuje vse segmentne boolean vrednosti brez stanja `inherit` in že normalizirana polja.
+12. Verzija snapshota v celoti zamrzne semantiko; stare verzije nikoli ne podedujejo novih ključev ali prihodnjih defaultov.
+
+Zgodovinski baseline v1 je:
+
+```yaml
+version: eslog-2.0-v200-config-v1
+segments:
+  elektronski_naslov_kupca_vkljucen: false
+  kontaktni_podatki_kupca_vkljuceni: false
+fields: {}
+```
+
+Vir konfiguracije za `STORNO` in `DOBROPIS` ostaja `UNRESOLVED`: poznejša odločitev mora izbrati kopiranje konfiguracije izvirnika ali razrešitev trenutne Company/Tenant konfiguracije.
 
 **Scope meja:** podatkovni/service model, potreben za pravilno generiranje XML, sodi v Fazo 2. Uporabniški UI za urejanje teh nastavitev ostane P1/poznejša faza, skladno s PRD.
 
@@ -962,6 +994,14 @@ Natančna avtomatika zastarelosti potrditve ostaja zunaj Faze 2, vendar renderer
 - Tenant/recipient override pravilno povozi samo izrecno podane ključe;
 - neznan optional ključ je zavrnjen in se ne pretvori v poljuben XML element;
 - konfiguracija, ki povzroči XSD-neveljaven XML, je zavrnjena.
+- oba Company defaulta v1 sta izrecno `False`;
+- `None` ni stanje dedovanja; manjkajoč Tenant ključ pomeni dedovanje Company vrednosti;
+- vključen BT-49 segment zahteva veljaven izrecni BT-49, izključen pa njegovo prisotnost zavrne;
+- vključen BG-9 zahteva najmanj BT-56, BT-57 ali BT-58, izključen pa njihovo prisotnost zavrne;
+- BT-49 ne uporablja `Tenant.email` kot nadomestnega vira;
+- BT-10 in BT-19 sta v v1 zavrnjena;
+- snapshot v1 vsebuje obe razrešeni boolean stanji in normalizirana polja;
+- stari snapshot ne podeduje novih ključev ali prihodnjih defaultov.
 
 ### 11.5 Integracijski test — MUST
 
