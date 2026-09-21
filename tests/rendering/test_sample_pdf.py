@@ -1,3 +1,4 @@
+from copy import copy
 from dataclasses import replace
 from datetime import date
 from decimal import Decimal
@@ -6,7 +7,8 @@ import pytest
 from PIL import Image, ImageDraw
 
 from catalogs.models import VatRegime
-from contracts.models import LeaseItem
+from companies.models import Signatory
+from contracts.models import Lease, LeaseItem, Property, Unit
 from invoicing.models import Invoice, InvoiceLine
 from rendering.contexts import pripravi_vzorcni_pdf_context
 from rendering.services import (
@@ -69,7 +71,9 @@ def test_sample_pdf_uses_production_template_without_db_side_effects(
     html = pripravi_html(context)
 
     assert rezultat.pdf_bytes.startswith(b"%PDF-")
-    assert rezultat.pot == "VZOREC-Alfa-doo.pdf"
+    assert rezultat.pot == (
+        f"company-{izdani_racun.company_id}/VZOREC-Alfa-doo.pdf"
+    )
     assert (settings.RENDERING_ROOT / rezultat.pot).is_file()
     assert context.stevilka is None
     assert "VZOREC \u2013 NI RA\u010cUN" in html
@@ -98,6 +102,63 @@ def test_sample_pdf_se_lahko_varno_ponovno_generira(
     assert drugi == prvi
     assert (settings.RENDERING_ROOT / drugi.pot).read_bytes() == drugi.pdf_bytes
     assert (Invoice.objects.count(), InvoiceLine.objects.count()) == stanje
+
+
+def test_vzorca_podjetij_z_enakim_slugom_se_ne_prepiseta(
+    izdani_racun, settings, tmp_path
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prva_pogodba = izdani_racun.lease
+    podjetje = copy(izdani_racun.company)
+    podjetje.pk = None
+    podjetje.davcna_stevilka = "99999999"
+    podjetje.aktivno = True
+    podjetje.save()
+    podpisnik = copy(Signatory.objects.get(company=izdani_racun.company))
+    podpisnik.pk = None
+    podpisnik.company = podjetje
+    podpisnik.save()
+    nepremicnina = Property.objects.create(
+        company=podjetje,
+        naziv=prva_pogodba.unit.property.naziv,
+        naslov=prva_pogodba.unit.property.naslov,
+    )
+    enota = Unit.objects.create(
+        property=nepremicnina,
+        oznaka=prva_pogodba.unit.oznaka,
+        tip_enote=prva_pogodba.unit.tip_enote,
+    )
+    druga_pogodba = Lease.objects.create(
+        unit=enota,
+        tenant=prva_pogodba.tenant,
+        oznaka_pogodbe=prva_pogodba.oznaka_pogodbe,
+        tip_trajanja=prva_pogodba.tip_trajanja,
+        datum_zacetka=prva_pogodba.datum_zacetka,
+        rok_placila_dni=prva_pogodba.rok_placila_dni,
+    )
+    for izvorna in LeaseItem.objects.filter(lease=prva_pogodba):
+        podatki = {
+            polje.attname: getattr(izvorna, polje.attname)
+            for polje in LeaseItem._meta.concrete_fields
+            if polje.name not in {"id", "lease"}
+        }
+        LeaseItem.objects.create(lease=druga_pogodba, **podatki)
+    argumenti = {
+        "datum_izdaje": date(2026, 9, 1),
+        "obdobje_od": date(2026, 9, 1),
+        "obdobje_do": date(2026, 9, 30),
+    }
+
+    prvi = render_sample_pdf(prva_pogodba, **argumenti)
+    drugi = render_sample_pdf(druga_pogodba, **argumenti)
+
+    assert prvi.pot == (
+        f"company-{izdani_racun.company_id}/VZOREC-Alfa-doo.pdf"
+    )
+    assert drugi.pot == f"company-{podjetje.pk}/VZOREC-Alfa-doo.pdf"
+    assert prvi.pot != drugi.pot
+    assert (settings.RENDERING_ROOT / prvi.pot).is_file()
+    assert (settings.RENDERING_ROOT / drugi.pot).is_file()
 
 
 def test_sample_pdf_watermark_is_fixed_for_each_page(izdani_racun):

@@ -7,7 +7,7 @@ from .models import Invoice
 def nastavi_pdf_artifact(
     invoice: Invoice, *, rendered_pdf_path: str, checksum: str
 ) -> Invoice:
-    svezi = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    svezi = Invoice.objects.get(pk=invoice.pk)
     if svezi.rendered_pdf_path or svezi.checksum:
         if (
             svezi.rendered_pdf_path == rendered_pdf_path
@@ -26,7 +26,7 @@ def nastavi_pdf_artifact(
 def nastavi_eslog_artifact(
     invoice: Invoice, *, rendered_eslog_path: str, checksum: str
 ) -> Invoice:
-    svezi = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    svezi = Invoice.objects.get(pk=invoice.pk)
     if svezi.rendered_eslog_path or svezi.rendered_eslog_checksum:
         if (
             svezi.rendered_eslog_path == rendered_eslog_path

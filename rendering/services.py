@@ -2,6 +2,7 @@ import base64
 import hashlib
 import mimetypes
 import os
+from contextlib import contextmanager
 from dataclasses import dataclass
 from decimal import Decimal
 from io import BytesIO
@@ -15,12 +16,12 @@ if os.name == "nt":
         os.add_dll_directory(str(_msys_bin))
 
 from django.core.files.storage import default_storage
-from django.db import transaction
 from django.template import Context, Engine
 from weasyprint import HTML
 from weasyprint.urls import URLFetcherResponse
 
 from catalogs.models import VatRegime
+from contracts.models import Lease
 from core.pravila import slugify_naziv
 from invoicing.models import Invoice
 from invoicing.rendering import nastavi_eslog_artifact, nastavi_pdf_artifact
@@ -33,7 +34,7 @@ from .contexts import (
     pripravi_vzorcni_pdf_context,
 )
 from .eslog import render_eslog as generiraj_eslog
-from .paths import NeveljavnaRenderPot, varna_render_pot, varna_render_pot_podjetja
+from .paths import NeveljavnaRenderPot, varna_render_pot_podjetja
 
 
 @dataclass(frozen=True, slots=True)
@@ -186,23 +187,66 @@ def _preveri_obstojeci_artifact(invoice: Invoice) -> PdfRenderRezultat | None:
     return PdfRenderRezultat(invoice.rendered_pdf_path, invoice.checksum, pdf_bytes)
 
 
-def _zapisi_atomsko(pot: Path, pdf_bytes: bytes, *, zamenjaj: bool = False) -> None:
+@contextmanager
+def _zakleni_artifact(pot: Path):
     pot.parent.mkdir(parents=True, exist_ok=True)
-    if pot.exists() and not zamenjaj:
-        raise PdfRenderNapaka("PDF_POT_ZASEDENA", "Ciljna PDF pot že obstaja.")
+    zaklepna_pot = pot.parent / f".{pot.name}.lock"
+    with zaklepna_pot.open("a+b") as zaklep:
+        if zaklep.seek(0, os.SEEK_END) == 0:
+            zaklep.write(b"\0")
+            zaklep.flush()
+        zaklep.seek(0)
+        if os.name == "nt":
+            import msvcrt
+
+            msvcrt.locking(zaklep.fileno(), msvcrt.LK_LOCK, 1)
+        else:
+            import fcntl
+
+            fcntl.flock(zaklep.fileno(), fcntl.LOCK_EX)
+        try:
+            yield
+        finally:
+            zaklep.seek(0)
+            if os.name == "nt":
+                msvcrt.locking(zaklep.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                fcntl.flock(zaklep.fileno(), fcntl.LOCK_UN)
+
+
+def _objavi_atomsko(pot: Path, vsebina: bytes, *, tip: str, napaka_razred) -> bool:
+    pot.parent.mkdir(parents=True, exist_ok=True)
     zacasna = None
     try:
         with NamedTemporaryFile(dir=pot.parent, prefix=".render-", suffix=".tmp", delete=False) as datoteka:
             zacasna = Path(datoteka.name)
-            datoteka.write(pdf_bytes)
+            datoteka.write(vsebina)
             datoteka.flush()
             os.fsync(datoteka.fileno())
-        os.replace(zacasna, pot)
+        try:
+            os.link(zacasna, pot)
+            return True
+        except FileExistsError:
+            if pot.read_bytes() == vsebina:
+                return False
+            raise napaka_razred(
+                f"{tip}_POT_ZASEDENA", f"Ciljna {tip} pot že vsebuje drug artifact."
+            )
+    except (PdfRenderNapaka, EslogRenderNapaka):
+        raise
     except OSError as napaka:
-        raise PdfRenderNapaka("PDF_ZAPIS_NI_USPEL", "Zapis PDF ni uspel.") from napaka
+        raise napaka_razred(
+            f"{tip}_ZAPIS_NI_USPEL", f"Zapis {tip} ni uspel."
+        ) from napaka
     finally:
         if zacasna and zacasna.exists():
-            zacasna.unlink()
+            try:
+                zacasna.unlink()
+            except OSError as napaka:
+                raise napaka_razred(
+                    f"{tip}_CISCENJE_NI_USPELO",
+                    f"Čiščenje začasne {tip} datoteke ni uspelo.",
+                ) from napaka
 
 
 def _preveri_obstojeci_eslog_artifact(
@@ -236,7 +280,7 @@ def _preveri_obstojeci_eslog_artifact(
     )
 
 
-def _zapisi_eslog_atomsko(pot: Path, xml_bytes: bytes) -> None:
+def _zamenjaj_atomsko(pot: Path, vsebina: bytes) -> None:
     pot.parent.mkdir(parents=True, exist_ok=True)
     zacasna = None
     try:
@@ -244,30 +288,61 @@ def _zapisi_eslog_atomsko(pot: Path, xml_bytes: bytes) -> None:
             dir=pot.parent, prefix=".render-", suffix=".tmp", delete=False
         ) as datoteka:
             zacasna = Path(datoteka.name)
-            datoteka.write(xml_bytes)
+            datoteka.write(vsebina)
             datoteka.flush()
             os.fsync(datoteka.fileno())
-        os.link(zacasna, pot)
-    except FileExistsError as napaka:
-        raise EslogRenderNapaka(
-            "ESLOG_POT_ZASEDENA", "Ciljna eSLOG pot že obstaja."
-        ) from napaka
+        os.replace(zacasna, pot)
     except OSError as napaka:
-        raise EslogRenderNapaka(
-            "ESLOG_ZAPIS_NI_USPEL", "Zapis eSLOG ni uspel."
-        ) from napaka
+        raise PdfRenderNapaka("PDF_ZAPIS_NI_USPEL", "Zapis PDF ni uspel.") from napaka
     finally:
         if zacasna and zacasna.exists():
             zacasna.unlink()
 
 
-def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
-    context = pripravi_pdf_context(invoice)
+def _stanje_pdf_metapodatkov(invoice: Invoice, pot: str, checksum: str) -> str:
     svezi = Invoice.objects.get(pk=invoice.pk)
+    if svezi.rendered_pdf_path == pot and svezi.checksum == checksum:
+        return "ISTI"
+    if not svezi.rendered_pdf_path and not svezi.checksum:
+        return "PRAZNI"
+    return "DRUGI"
+
+
+def _stanje_eslog_metapodatkov(invoice: Invoice, pot: str, checksum: str) -> str:
+    svezi = Invoice.objects.get(pk=invoice.pk)
+    if (
+        svezi.rendered_eslog_path == pot
+        and svezi.rendered_eslog_checksum == checksum
+    ):
+        return "ISTI"
+    if not svezi.rendered_eslog_path and not svezi.rendered_eslog_checksum:
+        return "PRAZNI"
+    return "DRUGI"
+
+
+def _odstrani_ustvarjen_artifact(
+    pot: Path, vsebina: bytes, *, tip: str, napaka_razred
+) -> None:
+    try:
+        if not pot.is_file() or pot.read_bytes() != vsebina:
+            raise OSError("Artifact se je med čiščenjem spremenil.")
+        pot.unlink()
+    except OSError as napaka:
+        raise napaka_razred(
+            f"{tip}_CISCENJE_NI_USPELO",
+            f"Čiščenje neuspelega {tip} artifacta ni uspelo.",
+        ) from napaka
+
+
+def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
+    svezi = Invoice.objects.filter(pk=getattr(invoice, "pk", None)).first()
+    if svezi is None:
+        pripravi_pdf_context(invoice)
     obstojeci = _preveri_obstojeci_artifact(svezi)
     if obstojeci is not None:
         return obstojeci
 
+    context = pripravi_pdf_context(svezi)
     ime_datoteke = f"{context.stevilka}.pdf"
     try:
         relativna_pot, pot = varna_render_pot_podjetja(
@@ -276,20 +351,45 @@ def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
     except NeveljavnaRenderPot as napaka:
         raise PdfRenderNapaka("PDF_POT_NEVELJAVNA", "PDF ime ni veljavno.") from napaka
     pdf_bytes = _generiraj_pdf_bytes(context)
-    checksum = hashlib.sha256(pdf_bytes).hexdigest()
-    _zapisi_atomsko(pot, pdf_bytes)
-    try:
-        nastavi_pdf_artifact(
-            invoice, rendered_pdf_path=relativna_pot, checksum=checksum
+    with _zakleni_artifact(pot):
+        svezi = Invoice.objects.get(pk=invoice.pk)
+        obstojeci = _preveri_obstojeci_artifact(svezi)
+        if obstojeci is not None:
+            if obstojeci.pdf_bytes != pdf_bytes:
+                raise PdfRenderNapaka(
+                "PDF_SOCASNI_RENDER_NESKLADEN",
+                    "Sočasni PDF render je ustvaril drugačne bytes.",
+                )
+            return obstojeci
+        ustvarjen = _objavi_atomsko(
+            pot, pdf_bytes, tip="PDF", napaka_razred=PdfRenderNapaka
         )
-    except Exception as napaka:
-        raise PdfRenderNapaka("PDF_METAPODATKI_NISO_SHRANJENI", "PDF metapodatki niso shranjeni.") from napaka
-    return PdfRenderRezultat(relativna_pot, checksum, pdf_bytes)
+        koncni_bytes = pot.read_bytes()
+        checksum = hashlib.sha256(koncni_bytes).hexdigest()
+        try:
+            nastavi_pdf_artifact(
+                invoice, rendered_pdf_path=relativna_pot, checksum=checksum
+            )
+        except Exception as napaka:
+            stanje = _stanje_pdf_metapodatkov(invoice, relativna_pot, checksum)
+            if stanje == "ISTI":
+                return PdfRenderRezultat(relativna_pot, checksum, koncni_bytes)
+            if stanje == "PRAZNI" and ustvarjen:
+                _odstrani_ustvarjen_artifact(
+                    pot,
+                    koncni_bytes,
+                    tip="PDF",
+                    napaka_razred=PdfRenderNapaka,
+                )
+            raise PdfRenderNapaka(
+                "PDF_METAPODATKI_NISO_SHRANJENI",
+                "PDF metapodatki niso shranjeni.",
+            ) from napaka
+        return PdfRenderRezultat(relativna_pot, checksum, koncni_bytes)
 
 
-@transaction.atomic
 def render_eslog(invoice: Invoice) -> EslogRenderRezultat:
-    svezi = Invoice.objects.select_for_update().get(pk=invoice.pk)
+    svezi = Invoice.objects.get(pk=invoice.pk)
     obstojeci = _preveri_obstojeci_eslog_artifact(svezi)
     if obstojeci is not None:
         return obstojeci
@@ -304,26 +404,41 @@ def render_eslog(invoice: Invoice) -> EslogRenderRezultat:
         raise EslogRenderNapaka(
             "ESLOG_POT_NEVELJAVNA", "eSLOG ime ni veljavno."
         ) from napaka
-    checksum = hashlib.sha256(xml_bytes).hexdigest()
-    _zapisi_eslog_atomsko(pot, xml_bytes)
-    try:
-        nastavi_eslog_artifact(
-            invoice, rendered_eslog_path=relativna_pot, checksum=checksum
+    with _zakleni_artifact(pot):
+        svezi = Invoice.objects.get(pk=invoice.pk)
+        obstojeci = _preveri_obstojeci_eslog_artifact(svezi)
+        if obstojeci is not None:
+            if obstojeci.xml_bytes != xml_bytes:
+                raise EslogRenderNapaka(
+                "ESLOG_SOCASNI_RENDER_NESKLADEN",
+                    "Sočasni eSLOG render je ustvaril drugačne bytes.",
+                )
+            return obstojeci
+        ustvarjen = _objavi_atomsko(
+            pot, xml_bytes, tip="ESLOG", napaka_razred=EslogRenderNapaka
         )
-    except Exception as napaka:
+        koncni_bytes = pot.read_bytes()
+        checksum = hashlib.sha256(koncni_bytes).hexdigest()
         try:
-            if (
-                pot.is_file()
-                and hashlib.sha256(pot.read_bytes()).hexdigest() == checksum
-            ):
-                pot.unlink()
-        except OSError:
-            pass
-        raise EslogRenderNapaka(
-            "ESLOG_METAPODATKI_NISO_SHRANJENI",
-            "eSLOG metapodatki niso shranjeni.",
-        ) from napaka
-    return EslogRenderRezultat(relativna_pot, checksum, xml_bytes)
+            nastavi_eslog_artifact(
+                invoice, rendered_eslog_path=relativna_pot, checksum=checksum
+            )
+        except Exception as napaka:
+            stanje = _stanje_eslog_metapodatkov(invoice, relativna_pot, checksum)
+            if stanje == "ISTI":
+                return EslogRenderRezultat(relativna_pot, checksum, koncni_bytes)
+            if stanje == "PRAZNI" and ustvarjen:
+                _odstrani_ustvarjen_artifact(
+                    pot,
+                    koncni_bytes,
+                    tip="ESLOG",
+                    napaka_razred=EslogRenderNapaka,
+                )
+            raise EslogRenderNapaka(
+                "ESLOG_METAPODATKI_NISO_SHRANJENI",
+                "eSLOG metapodatki niso shranjeni.",
+            ) from napaka
+        return EslogRenderRezultat(relativna_pot, checksum, koncni_bytes)
 
 def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRenderRezultat:
     context = pripravi_vzorcni_pdf_context(
@@ -334,10 +449,16 @@ def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRend
     )
     ime_datoteke = f"VZOREC-{slugify_naziv(context.izdajatelj_naziv)}.pdf"
     try:
-        pot = varna_render_pot(ime_datoteke)
+        company_id = Lease.objects.values_list(
+            "unit__property__company_id", flat=True
+        ).get(pk=lease.pk)
+        relativna_pot, pot = varna_render_pot_podjetja(company_id, ime_datoteke)
     except NeveljavnaRenderPot as napaka:
         raise PdfRenderNapaka("PDF_POT_NEVELJAVNA", "PDF ime ni veljavno.") from napaka
     pdf_bytes = _generiraj_pdf_bytes(context)
-    rezultat = PdfRenderRezultat(ime_datoteke, hashlib.sha256(pdf_bytes).hexdigest(), pdf_bytes)
-    _zapisi_atomsko(pot, pdf_bytes, zamenjaj=True)
+    rezultat = PdfRenderRezultat(
+        relativna_pot, hashlib.sha256(pdf_bytes).hexdigest(), pdf_bytes
+    )
+    with _zakleni_artifact(pot):
+        _zamenjaj_atomsko(pot, pdf_bytes)
     return rezultat

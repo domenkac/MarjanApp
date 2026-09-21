@@ -1,4 +1,5 @@
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -34,6 +35,20 @@ def test_ponovni_eslog_render_vrne_isti_artifact(izdani_racun, settings, tmp_pat
     drugi = render_eslog(izdani_racun)
 
     assert drugi == prvi
+
+
+def test_ponovni_eslog_render_ne_generira_xml(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prvi = render_eslog(izdani_racun)
+
+    def napaka(*args, **kwargs):
+        raise AssertionError("XML se ne sme ponovno generirati.")
+
+    monkeypatch.setattr("rendering.services.generiraj_eslog", napaka)
+
+    assert render_eslog(izdani_racun) == prvi
 
 
 def test_neskladni_eslog_metapodatki_so_zavrnjeni(izdani_racun, settings, tmp_path):
@@ -198,3 +213,54 @@ def test_eslog_uporabi_varno_izhodno_pot(izdani_racun, settings, tmp_path):
     assert not izdani_racun.rendered_eslog_path
     assert not izdani_racun.rendered_eslog_checksum
     assert not (tmp_path / "racun.xml").exists()
+
+
+def test_eslog_cleanup_failure_je_izrecna(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    cilj = (
+        settings.RENDERING_ROOT
+        / f"company-{izdani_racun.company_id}"
+        / "NP-00001.xml"
+    ).resolve()
+    pravi_unlink = Path.unlink
+
+    def unlink(pot, *args, **kwargs):
+        if pot.resolve() == cilj:
+            raise OSError("cleanup napaka")
+        return pravi_unlink(pot, *args, **kwargs)
+
+    monkeypatch.setattr(
+        "rendering.services.nastavi_eslog_artifact",
+        lambda *a, **k: (_ for _ in ()).throw(ValueError("napaka")),
+    )
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    with pytest.raises(EslogRenderNapaka) as error:
+        render_eslog(izdani_racun)
+
+    assert error.value.koda == "ESLOG_CISCENJE_NI_USPELO"
+
+
+def test_eslog_sprejme_metapodatke_ki_jih_je_shranil_drug_render(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prava_storitev = __import__(
+        "rendering.services", fromlist=["nastavi_eslog_artifact"]
+    ).nastavi_eslog_artifact
+
+    def shrani_in_javi_napako(*args, **kwargs):
+        prava_storitev(*args, **kwargs)
+        raise ValueError("sočasni render")
+
+    monkeypatch.setattr(
+        "rendering.services.nastavi_eslog_artifact", shrani_in_javi_napako
+    )
+
+    rezultat = render_eslog(izdani_racun)
+
+    izdani_racun.refresh_from_db()
+    assert izdani_racun.rendered_eslog_path == rezultat.pot
+    assert izdani_racun.rendered_eslog_checksum == rezultat.checksum

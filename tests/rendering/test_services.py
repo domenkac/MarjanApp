@@ -2,6 +2,7 @@
 from dataclasses import replace
 from decimal import Decimal
 from hashlib import sha256
+from pathlib import Path
 
 import pytest
 
@@ -162,7 +163,7 @@ def test_neuspel_zapis_ne_nastavi_metapodatkov_ali_finalne_datoteke(
     def napaka(*args, **kwargs):
         raise OSError("napaka")
 
-    monkeypatch.setattr("rendering.services.os.replace", napaka)
+    monkeypatch.setattr("rendering.services.os.link", napaka)
     with pytest.raises(PdfRenderNapaka) as error:
         render_pdf(izdani_racun)
 
@@ -184,6 +185,18 @@ def test_ponovni_render_vrne_isti_artifact(izdani_racun, settings, tmp_path):
     drugi = render_pdf(izdani_racun)
 
     assert drugi == prvi
+
+
+def test_ponovni_pdf_render_ne_gradi_contexta(izdani_racun, settings, tmp_path, monkeypatch):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prvi = render_pdf(izdani_racun)
+
+    def napaka(*args, **kwargs):
+        raise AssertionError("Context se ne sme ponovno zgraditi.")
+
+    monkeypatch.setattr("rendering.services.pripravi_pdf_context", napaka)
+
+    assert render_pdf(izdani_racun) == prvi
 
 
 @pytest.mark.parametrize("napaka", ["manjka", "spremenjen"])
@@ -214,4 +227,91 @@ def test_neveljaven_network_asset_je_zavrnjen():
     with pytest.raises(PdfRenderNapaka) as error:
         _url_fetcher("https://primer.si/logo.png")
     assert error.value.koda == "ASSET_NEVELJAVEN"
+
+
+def test_neuspeli_pdf_metapodatki_odstranijo_artifact_in_dovolijo_ponovitev(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+
+    def napaka(*args, **kwargs):
+        raise ValueError("napaka")
+
+    with monkeypatch.context() as patch:
+        patch.setattr("rendering.services.nastavi_pdf_artifact", napaka)
+        with pytest.raises(PdfRenderNapaka) as error:
+            render_pdf(izdani_racun)
+
+    assert error.value.koda == "PDF_METAPODATKI_NISO_SHRANJENI"
+    izdani_racun.refresh_from_db()
+    assert not izdani_racun.rendered_pdf_path
+    assert not izdani_racun.checksum
+    assert render_pdf(izdani_racun).pot.endswith("/NP-00001.pdf")
+
+
+def test_pdf_cleanup_failure_je_izrecna(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    cilj = (
+        settings.RENDERING_ROOT
+        / f"company-{izdani_racun.company_id}"
+        / "NP-00001.pdf"
+    ).resolve()
+    pravi_unlink = Path.unlink
+
+    def unlink(pot, *args, **kwargs):
+        if pot.resolve() == cilj:
+            raise OSError("cleanup napaka")
+        return pravi_unlink(pot, *args, **kwargs)
+
+    monkeypatch.setattr("rendering.services.nastavi_pdf_artifact", lambda *a, **k: (_ for _ in ()).throw(ValueError("napaka")))
+    monkeypatch.setattr(Path, "unlink", unlink)
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        render_pdf(izdani_racun)
+
+    assert error.value.koda == "PDF_CISCENJE_NI_USPELO"
+
+
+def test_pdf_sprejme_metapodatke_ki_jih_je_shranil_drug_render(
+    izdani_racun, settings, tmp_path, monkeypatch
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    prava_storitev = __import__(
+        "rendering.services", fromlist=["nastavi_pdf_artifact"]
+    ).nastavi_pdf_artifact
+
+    def shrani_in_javi_napako(*args, **kwargs):
+        prava_storitev(*args, **kwargs)
+        raise ValueError("sočasni render")
+
+    monkeypatch.setattr(
+        "rendering.services.nastavi_pdf_artifact", shrani_in_javi_napako
+    )
+
+    rezultat = render_pdf(izdani_racun)
+
+    izdani_racun.refresh_from_db()
+    assert izdani_racun.rendered_pdf_path == rezultat.pot
+    assert izdani_racun.checksum == rezultat.checksum
+
+
+def test_pdf_ne_prepise_neregistriranega_drugacnega_artifacta(
+    izdani_racun, settings, tmp_path
+):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    pot = (
+        settings.RENDERING_ROOT
+        / f"company-{izdani_racun.company_id}"
+        / "NP-00001.pdf"
+    )
+    pot.parent.mkdir(parents=True)
+    pot.write_bytes(b"drug artifact")
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        render_pdf(izdani_racun)
+
+    assert error.value.koda == "PDF_POT_ZASEDENA"
+    assert pot.read_bytes() == b"drug artifact"
 
