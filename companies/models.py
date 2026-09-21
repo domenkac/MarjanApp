@@ -1,6 +1,12 @@
 from django.core.exceptions import ValidationError
 from django.db import models
 
+from core.eslog_konfiguracija import (
+    SEGMENTI_V1,
+    EslogKonfiguracijaNapaka,
+    normaliziraj_segmentne_nastavitve,
+    privzeti_segmenti_podjetja_v1,
+)
 from core.validators import (
     normaliziraj_iban,
     preveri_davcno_stevilko,
@@ -40,6 +46,9 @@ class Company(models.Model):
     rok_placila_dni_privzeto = models.IntegerField(default=15)
     ddv_razporeditev_potrjena = models.BooleanField(default=False)
     aktivno = models.BooleanField(default=True)
+    eslog_privzeti_neobvezni_segmenti = models.JSONField(
+        default=privzeti_segmenti_podjetja_v1
+    )
 
     class Meta:
         constraints = [  # noqa: RUF012
@@ -82,6 +91,17 @@ class Company(models.Model):
             napake["davcna_stevilka"] = (
                 "Aktivno podjetje s to davčno številko že obstaja."
             )
+        try:
+            segmenti = normaliziraj_segmentne_nastavitve(
+                self.eslog_privzeti_neobvezni_segmenti
+            )
+            if set(segmenti) != set(SEGMENTI_V1):
+                raise EslogKonfiguracijaNapaka(
+                    "ESLOG_PRIVZETI_SEGMENTI_MANJKAJO",
+                    "Podjetje mora določiti vse podprte eSLOG segmente.",
+                )
+        except EslogKonfiguracijaNapaka as exc:
+            napake["eslog_privzeti_neobvezni_segmenti"] = str(exc)
 
         if napake:
             raise ValidationError(napake)

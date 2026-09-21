@@ -99,6 +99,14 @@ PRIVZETI_SEGMENTI_PODJETJA_V1 = MappingProxyType(
     }
 )
 
+
+def privzeti_segmenti_podjetja_v1() -> dict[str, bool]:
+    """Vrne nov, trajno zamrznjen Company default za konfiguracijo v1."""
+    return {
+        "elektronski_naslov_kupca_vkljucen": False,
+        "kontaktni_podatki_kupca_vkljuceni": False,
+    }
+
 _EMAIL = re.compile(r"^[^@\s]+@[^@\s]+$")
 _KONTAKTNA_POLJA = frozenset(
     {KONTAKTNA_TOCKA_KUPCA, KONTAKTNI_TELEFON_KUPCA, KONTAKTNI_EMAIL_KUPCA}
@@ -217,6 +225,17 @@ def validiraj_ucinkovito_konfiguracijo(
         "segments": dict(segmenti),
         "fields": polja,
     }
+
+
+def razresi_eslog_konfiguracijo(
+    company_defaults: Mapping[str, Any],
+    tenant_overrides: Mapping[str, Any],
+    tenant_fields: Mapping[str, Any],
+) -> dict[str, Any]:
+    return validiraj_ucinkovito_konfiguracijo(
+        razresi_segmentne_nastavitve(company_defaults, tenant_overrides),
+        tenant_fields,
+    )
 
 
 def zgodovinski_baseline_v1() -> dict[str, Any]:

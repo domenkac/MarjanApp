@@ -6,6 +6,11 @@ from django.db import models
 
 from catalogs.models import VatRegime
 from companies.models import Company
+from core.eslog_konfiguracija import (
+    EslogKonfiguracijaNapaka,
+    normaliziraj_neobvezna_polja,
+    normaliziraj_segmentne_nastavitve,
+)
 from core.validators import (
     preveri_davcno_stevilko,
     preveri_kodo_drzave,
@@ -61,10 +66,26 @@ class Tenant(models.Model):
     ddv_zavezanec_s_polnim_odbitkom = models.BooleanField(default=False)
     email = models.EmailField()
     aktiven = models.BooleanField(default=True)
+    eslog_neobvezni_segmenti_override = models.JSONField(default=dict, blank=True)
+    eslog_neobvezna_polja = models.JSONField(default=dict, blank=True)
 
     def clean(self):
         super().clean()
         napake = {}
+        try:
+            self.eslog_neobvezni_segmenti_override = (
+                normaliziraj_segmentne_nastavitve(
+                    self.eslog_neobvezni_segmenti_override
+                )
+            )
+        except EslogKonfiguracijaNapaka as exc:
+            napake["eslog_neobvezni_segmenti_override"] = str(exc)
+        try:
+            self.eslog_neobvezna_polja = normaliziraj_neobvezna_polja(
+                self.eslog_neobvezna_polja
+            )
+        except EslogKonfiguracijaNapaka as exc:
+            napake["eslog_neobvezna_polja"] = str(exc)
         davcna_stevilka = (self.davcna_stevilka or "").strip()
         ddv_identifikacijska_stevilka = (
             self.ddv_identifikacijska_stevilka or ""

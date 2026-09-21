@@ -821,7 +821,7 @@ segments:
 fields: {}
 ```
 
-Vir konfiguracije za `STORNO` in `DOBROPIS` ostaja `UNRESOLVED`: poznejša odločitev mora izbrati kopiranje konfiguracije izvirnika ali razrešitev trenutne Company/Tenant konfiguracije.
+`STORNO` in `DOBROPIS` ob lastni končni potrditvi razrešita trenutno Company/Tenant eSLOG konfiguracijo. Konfiguracije izvirnika ne kopirata. Njuno razrešeno konfiguracijo potrditveni postopek shrani kot nespremenljiv snapshot.
 
 **Scope meja:** podatkovni/service model, potreben za pravilno generiranje XML, sodi v Fazo 2. Uporabniški UI za urejanje teh nastavitev ostane P1/poznejša faza, skladno s PRD.
 

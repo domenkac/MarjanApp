@@ -83,6 +83,9 @@ class Invoice(models.Model):
     rendered_eslog_path = models.CharField(blank=True)
     checksum = models.CharField(blank=True)
     rendered_eslog_checksum = models.CharField(blank=True, default="")
+    eslog_konfiguracija_snapshot = models.JSONField(
+        null=True, blank=True, editable=False, default=None
+    )
 
     class Meta:
         constraints = [  # noqa: RUF012

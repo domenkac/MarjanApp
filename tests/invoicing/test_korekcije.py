@@ -492,6 +492,7 @@ def test_napaka_po_stevilcenju_povrne_korekcijo_in_zaporedje(pogodba):
         Invoice.Status.OSNUTEK,
         None,
     )
+    assert storno.eslog_konfiguracija_snapshot is None
     assert NumberSequence.objects.get(tip="NP").zadnja_stevilka == 1
 
 

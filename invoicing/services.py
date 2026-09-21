@@ -24,6 +24,7 @@ from contracts.services import (
     efektivna_veljavnost_pogodbe,
     izracunaj_postavko,
 )
+from core.eslog_konfiguracija import razresi_eslog_konfiguracijo
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
 
@@ -35,6 +36,21 @@ ESLOG_KODE_DDV = {
     VatRegime.NacinObracuna.OBRNJENA_DAVCNA: "AE",
     VatRegime.NacinObracuna.NI_PREDMET: "O",
 }
+
+
+def _razresi_eslog_snapshot(invoice: Invoice) -> dict:
+    if invoice.lease_id is None:
+        raise ValueError("Račun nima pogodbe za razrešitev eSLOG konfiguracije.")
+    lease = Lease.objects.select_related("tenant", "unit__property__company").get(
+        pk=invoice.lease_id
+    )
+    if lease.unit.property.company_id != invoice.company_id:
+        raise ValueError("Podjetje računa se ne ujema s pogodbo.")
+    return razresi_eslog_konfiguracijo(
+        lease.unit.property.company.eslog_privzeti_neobvezni_segmenti,
+        lease.tenant.eslog_neobvezni_segmenti_override,
+        lease.tenant.eslog_neobvezna_polja,
+    )
 
 
 def _preveri_eslog_kodo(nacin: str, koda: str, vir: str) -> str:
@@ -373,6 +389,8 @@ def _potrdi_osnutek_np(
     if podpisnik.pk != podpisnik_id or podpisnik.podpis_slika.name != podpis_vir:
         raise ValueError("Podpisnik se je med potrditvijo spremenil.")
 
+    invoice.eslog_konfiguracija_snapshot = _razresi_eslog_snapshot(invoice)
+
     vrstice = list(InvoiceLine.objects.filter(invoice=invoice))
     if not vrstice:
         raise ValueError("NP osnutek nima vrstic.")
@@ -426,6 +444,7 @@ def _potrdi_osnutek_np(
             "skupaj_z_ddv",
             "rok_placila",
             "status",
+            "eslog_konfiguracija_snapshot",
         ]
     )
     return invoice
@@ -613,6 +632,7 @@ def _potrdi_korekcijski_osnutek(
         raise ValueError("Podpisnik se je med potrditvijo spremenil.")
     if invoice.company.logotip.name != logo_vir:
         raise ValueError("Logotip podjetja se je med potrditvijo spremenil.")
+    invoice.eslog_konfiguracija_snapshot = _razresi_eslog_snapshot(invoice)
     if (
         invoice.company_id != original.company_id
         or invoice.lease_id != original.lease_id
@@ -680,6 +700,7 @@ def _potrdi_korekcijski_osnutek(
             "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot",
             "pdf_template_version",
+            "eslog_konfiguracija_snapshot",
         ]
     )
     return invoice

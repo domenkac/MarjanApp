@@ -71,7 +71,7 @@ Tenant optional fields v1 so:
 
 Vir: *1. del*, §9.2, strani 17–18; *2. del*, segmenti 41–45, strani 72–76, in Dodatek A, strani 200–201; oba uradna XML primera.
 
-BT-49 uporablja samo izrecno konfiguracijsko vrednost; `Tenant.email` ni nadomestni vir. BT-10 in BT-19 nista podprta v v1, ker njuno lastništvo Tenant/Lease/Invoice ni odločeno. Vir konfiguracije za `STORNO` in `DOBROPIS` ostaja `UNRESOLVED`.
+BT-49 uporablja samo izrecno konfiguracijsko vrednost; `Tenant.email` ni nadomestni vir. BT-10 in BT-19 nista podprta v v1, ker njuno lastništvo Tenant/Lease/Invoice ni odločeno. `STORNO` in `DOBROPIS` ob lastni končni potrditvi razrešita trenutno Company/Tenant konfiguracijo, je ne kopirata iz izvirnika, nato pa ohranita svoj nespremenljiv snapshot.
 
 Snapshot verzija v celoti zamrzne semantiko. Stari snapshot nikoli ne podeduje novih ključev ali prihodnjih defaultov.
 

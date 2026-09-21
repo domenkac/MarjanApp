@@ -131,6 +131,7 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
         None,
         None,
     )
+    assert invoice.eslog_konfiguracija_snapshot is None
     assert (invoice.prejemnik_naziv, invoice.prejemnik_naslov) == (
         "Najemnik d.o.o.",
         "Trg 1",
@@ -546,6 +547,7 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
         potrdi_osnutek_np(invoice)
 
     invoice.refresh_from_db()
+    assert invoice.eslog_konfiguracija_snapshot is None
     assert (invoice.stevilka, invoice.status, invoice.rok_placila) == (
         None,
         Invoice.Status.OSNUTEK,

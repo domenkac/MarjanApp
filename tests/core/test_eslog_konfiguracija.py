@@ -8,6 +8,7 @@ from core.eslog_konfiguracija import (
     EslogKonfiguracijaNapaka,
     normaliziraj_neobvezna_polja,
     normaliziraj_segmentne_nastavitve,
+    razresi_eslog_konfiguracijo,
     razresi_segmentne_nastavitve,
     validiraj_ucinkovito_konfiguracijo,
     zgodovinski_baseline_v1,
@@ -232,4 +233,16 @@ def test_zgodovinski_baseline_v1_ima_zamrznjeno_eksplicitno_stanje():
             KONTAKTNI_PODATKI: False,
         },
         "fields": {},
+    }
+
+
+def test_razresitev_sestavi_kanonicni_snapshot_in_uposteva_override():
+    assert razresi_eslog_konfiguracijo(
+        {ELEKTRONSKI_NASLOV: True, KONTAKTNI_PODATKI: True},
+        {ELEKTRONSKI_NASLOV: False},
+        {"kontaktna_tocka_kupca": "  Nabava  "},
+    ) == {
+        "version": ESLOG_KONFIGURACIJA_VERZIJA,
+        "segments": {ELEKTRONSKI_NASLOV: False, KONTAKTNI_PODATKI: True},
+        "fields": {"kontaktna_tocka_kupca": "Nabava"},
     }
