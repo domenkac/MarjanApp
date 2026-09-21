@@ -605,6 +605,10 @@ Ista shema in rekapitulacija, izbira obdobja od–do in enega ali več podjetij.
 
 **Arhitekturna posledica.** Račun se ne modelira kot "PDF z vsebino", ampak kot strukturiran zapis, iz katerega se PDF **renderira**. eSLOG XML je drugi renderer istega zapisa.
 
+### Odločitev o obsegu izdaje V1/V2
+
+eSLOG ostaja tehnično implementirana in testirana arhitekturna zmožnost, vendar je njegova **produktna izpostavljenost v V1 izključena** (`FEATURE_ESLOG = False`). Običajni operativni postopki V1 ustvarjajo in uporabljajo samo PDF. V1 zato v UI ne ponuja konfiguracije eSLOG, izbire dostave eSLOG oziroma obeh oblik ali prenosa XML; orkestracija V1 tudi ne generira oziroma izdaja XML samodejno. Renderer, XSD-validacija, preslikave ter podpora snapshotom ostanejo implementirani in neposredno testirani. V2 sme obstoječo zmožnost vključiti v UI in postopke brez prenove rendererja ali snapshot modela. Ta odločitev omejuje obseg produkta in izdaje, ne odpravlja tehničnih zahtev eSLOG.
+
 ### 10.1 Dostavni kanal
 
 | Kanal | Vsebina |

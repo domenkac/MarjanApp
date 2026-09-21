@@ -2,6 +2,7 @@ from dataclasses import FrozenInstanceError
 from decimal import Decimal
 
 import pytest
+from django.conf import settings
 from lxml import etree
 
 from catalogs.models import VatRegime
@@ -43,6 +44,8 @@ def _nastavi_eslog_snapshot(invoice, *, elektronski=False, kontakt=False, fields
 
 
 def test_minimalni_np_je_xsd_veljaven(izdani_racun):
+    assert settings.FEATURE_ESLOG is False
+
     xml_bytes = render_eslog(izdani_racun)
 
     assert _vrednosti(xml_bytes, "//e:S_BGM/e:C_C106/e:D_1004/text()") == ["NP-00001"]

@@ -21,6 +21,8 @@ Faza 2 ne vsebuje UI mesečnega ciklusa, pošiljanja e-pošte, uradnega arhiva, 
 
 **Rezultat faze po PRD:** PDF in eSLOG nastajata iz istega strukturiranega zapisa; za vsako od petih podjetij je mogoče izdelati dejanski vzorčni PDF za pregled v čarovniku.
 
+**Naknadna odločitev o obsegu V1/V2:** Faza 2 je dobavila tehnično osnovo eSLOG: renderer, snapshot podporo, uradni XSD in validacijo ter neobvezno konfiguracijo. To ostaja implementirano in testirano. Produktna izpostavljenost je v V1 izključena z `FEATURE_ESLOG = False`: običajni postopki uporabljajo samo PDF ter XML ne generirajo oziroma izdajajo samodejno; UI ne izpostavi konfiguracije, dostave ali prenosa eSLOG. V2 lahko obstoječo osnovo poveže v UI in postopke brez prenove rendererja ali snapshot modela. Ta odločitev ne spreminja zgodovinskega obsega oziroma izvedbenih zahtev Faze 2.
+
 ### 0.1 Prioritete
 
 - **MUST** — blocker za zaključek Faze 2.

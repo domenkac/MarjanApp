@@ -1,6 +1,10 @@
 ﻿from django.conf import settings
 
 
+def test_eslog_ni_izpostavljen_v_v1():
+    assert settings.FEATURE_ESLOG is False
+
+
 def test_minimal_settings():
     assert settings.INSTALLED_APPS == [
         "django.contrib.contenttypes",
