@@ -1,0 +1,44 @@
+{% extends "ui/base.html" %}
+
+{% block title %}Nadzorna plošča · Marjan{% endblock %}
+
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Pregled</p>
+    <h1>Nadzorna plošča</h1>
+    <p>Pregled trenutno evidentiranih podatkov.</p>
+  </div>
+</header>
+
+<section class="metrics" aria-label="Povzetek podatkov">
+  <article class="metric-card"><span>Aktivna podjetja</span><strong>{{ counts.podjetja }}</strong><small>Podjetja v uporabi</small></article>
+  <article class="metric-card"><span>Aktivni najemniki</span><strong>{{ counts.najemniki }}</strong><small>Prejemniki računov</small></article>
+  <article class="metric-card"><span>Aktivne pogodbe</span><strong>{{ counts.pogodbe }}</strong><small>Nearhivirane pogodbe</small></article>
+  <article class="metric-card"><span>Izdani računi</span><strong>{{ counts.izdani_racuni }}</strong><small>Računi z uradno številko</small></article>
+</section>
+
+<div class="dashboard-grid">
+  <section class="panel">
+    <div class="panel-heading">
+      <div><span class="material-symbols-outlined" aria-hidden="true">task_alt</span><h2>Aktivna opravila</h2></div>
+      <span class="status-badge">Ni aktivnih</span>
+    </div>
+    <div class="empty-state">
+      <span class="material-symbols-outlined" aria-hidden="true">inbox</span>
+      <h3>Ni aktivnih opravil</h3>
+      <p>Mesečni obračun in ročne fakture še niso na voljo.</p>
+    </div>
+  </section>
+
+  <section class="panel">
+    <div class="panel-heading">
+      <div><span class="material-symbols-outlined" aria-hidden="true">send</span><h2>Dostava</h2></div>
+    </div>
+    <div class="delivery-state">
+      <span class="status-dot" aria-hidden="true"></span>
+      <div><strong>Pošiljanje ni vključeno</strong><p>Dostava računov bo dodana v kasnejši fazi.</p></div>
+    </div>
+  </section>
+</div>
+{% endblock %}

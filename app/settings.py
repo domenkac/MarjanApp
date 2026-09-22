@@ -7,11 +7,33 @@ BASE_DIR = Path(__file__).resolve().parent.parent
 
 # ponytail: restart changes this key; set DJANGO_SECRET_KEY if sessions are added.
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()
+DEBUG = os.environ.get("DJANGO_DEBUG", "1").strip().lower() in {
+    "1",
+    "true",
+    "yes",
+    "on",
+}
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
-INSTALLED_APPS = ["django.contrib.contenttypes", "core", "companies", "catalogs", "contracts", "invoicing", "rendering"]
+INSTALLED_APPS = [
+    "django.contrib.contenttypes",
+    "django.contrib.staticfiles",
+    "core",
+    "companies",
+    "catalogs",
+    "contracts",
+    "invoicing",
+    "rendering",
+    "ui",
+]
 MIDDLEWARE = ["django.middleware.csrf.CsrfViewMiddleware"]
 ROOT_URLCONF = "app.urls"
+TEMPLATES = [
+    {
+        "BACKEND": "django.template.backends.django.DjangoTemplates",
+        "APP_DIRS": True,
+    }
+]
 
 DATABASES = {
     "default": {
@@ -25,3 +47,4 @@ DATABASES = {
 PDF_TEMPLATE_VERSION = "1"
 RENDERING_ROOT = BASE_DIR / "rendered"
 FEATURE_ESLOG = False
+STATIC_URL = "static/"
