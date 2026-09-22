@@ -2,6 +2,67 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 
+class MonthlyCycle(models.Model):
+    class Korak(models.IntegerChoices):
+        IZBIRA_MESECA = 1, "Izbira meseca"
+        PREDHODNA_KONTROLA = 2, "Predhodna kontrola"
+        IZRACUN_OSNUTKOV = 3, "Izračun osnutkov"
+        PAKETNI_PREGLED = 4, "Paketni pregled"
+        POTRDITEV_PAKETA = 5, "Potrditev paketa"
+        ZAKLJUCEK = 6, "Zaključek ciklusa"
+
+    class Status(models.TextChoices):
+        V_TEKU = "V_TEKU", "V teku"
+        ZAKLJUCEN = "ZAKLJUCEN", "Zaključen"
+
+    obdobje = models.DateField(unique=True)
+    datum_izdaje = models.DateField()
+    trenutni_korak = models.PositiveSmallIntegerField(
+        choices=Korak,
+        default=Korak.IZBIRA_MESECA,
+    )
+    status = models.CharField(max_length=9, choices=Status, default=Status.V_TEKU)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(trenutni_korak__range=(1, 6)),
+                name="monthly_cycle_korak_1_6",
+            ),
+            models.UniqueConstraint(
+                fields=["status"],
+                condition=models.Q(status="V_TEKU"),
+                name="uniq_active_monthly_cycle",
+            ),
+        ]
+
+    def clean(self):
+        super().clean()
+        if self.obdobje and self.obdobje.day != 1:
+            raise ValidationError(
+                {"obdobje": "Obdobje mora biti prvi dan obračunskega meseca."}
+            )
+
+
+class MonthlyBatch(models.Model):
+    cycle = models.ForeignKey(
+        MonthlyCycle,
+        on_delete=models.PROTECT,
+        related_name="batches",
+    )
+    company = models.ForeignKey("companies.Company", on_delete=models.PROTECT)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle", "company"],
+                name="uniq_monthly_batch_cycle_company",
+            )
+        ]
+
+
 class Invoice(models.Model):
     class DocumentType(models.TextChoices):
         NP = "NP", "NP"

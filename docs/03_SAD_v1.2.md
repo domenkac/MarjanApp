@@ -89,7 +89,7 @@ Django app je fizična in vsebinska meja za podatkovno ter domensko plast skupaj
 | `companies` | 5 izdajateljev, zaporedja, podpisniki ter stanji uporabnikovih potrditev DDV-nastavitev in vzorca | `Company`, `Signatory`, `NumberSequence`; natančna struktura potrditve vzorca se določi v FSD prvega zagona |
 | `catalogs` | Šifranti — DDV režimi, storitve, enote mere | `VatRegime`, `ServiceCatalogItem` |
 | `contracts` | Najemne pogodbe, enote, nepremičnine, najemniki in prejemniki | `Property`, `Unit`, `Tenant`, `Lease`, `LeaseItem`, `IndexationEvent`, `PoracunIndeksacije`, `RecipientContact` |
-| `invoicing` | Jedro — računi, izračun, Δ izjeme in potrditev; pozneje tudi ročne storitvene fakture | `Invoice`, `InvoiceLine`; pozneje tudi `MonthlyBatch` kot stanje UI ciklusa |
+| `invoicing` | Jedro — računi, izračun, Δ izjeme in potrditev; pozneje tudi ročne storitvene fakture | `Invoice`, `InvoiceLine`, `MonthlyCycle` kot stanje skupnega postopka in `MonthlyBatch` kot stanje posameznega podjetja |
 | `rendering` | PDF in eSLOG generiranje; ločen način vzorca z dejansko PDF-predlogo, vendar brez izdaje | brez lastnih modelov — bere potrjene račune iz `invoicing`, pri vzorcu pa preverjene podatke pogodbe |
 | `delivery` | Pošiljanje e-pošte in dostavni poskusi | `DeliveryAttempt`; prejemnike bere iz `contracts.RecipientContact` |
 | `accounting_export` | Kontrolni dokument za računovodjo; prejem nima potrjevalnega ali statusnega učinka | `AccountantReport` |
@@ -101,7 +101,7 @@ Django app je fizična in vsebinska meja za podatkovno ter domensko plast skupaj
 
 Neuničujoči preizkus lokacij je odgovornost storitve v `archive/services.py`. Za lokalni arhiv, iCloud arhiv in Dropbox mapo storitev zapiše začasno datoteko, jo ponovno prebere in jo po uspešnem preverjanju odstrani. `ui` rezultat samo prikaže. Neuspeh katerekoli lokacije je blokada zaključka čarovnika in produkcijske izdaje. Ta začetna blokada ne spreminja pravila PRD §11.2 za kasnejšo začasno nedosegljivost iClouda in ne uvaja novega pravila za kasnejšo nedosegljivost Dropboxa.
 
-**Zakaj `invoicing` in ne `contracts` vsebuje mesečni ciklus:** pogodba je vir podatkov, ne izvajalec postopka. Ciklus (izbira meseca → izračun → pregled → potrditev → pošiljanje) je svoje področje z lastnim stanjem (`MonthlyBatch`), ki referencira pogodbe, a ni njihov del.
+**Zakaj `invoicing` in ne `contracts` vsebuje mesečni ciklus:** pogodba je vir podatkov, ne izvajalec postopka. `MonthlyCycle` hrani stanje enega skupnega šeststopenjskega uporabniškega postopka, `MonthlyBatch` pa je njegov otrok za posamezno podjetje. Hkrati je lahko v teku samo en `MonthlyCycle`, za isto obračunsko obdobje pa obstaja največ eden. Ob prvem začetku se v njegove `MonthlyBatch` zapise posnamejo takrat aktivna podjetja; poznejša aktivacija ali deaktivacija podjetja tega članstva ne spremeni.
 
 **Opozorilo, ki je bilo že omenjeno v razpravi in ga tu formaliziramo:** Django admin (§5) je namenjen vzdrževanju matičnih podatkov v `companies`, `catalogs`, `contracts`. **Mesečni ciklus v `invoicing` ni admin CRUD** — je poslovni proces s stanji in prehodi, implementiran kot navadne Django views v `ui/`, ne kot admin akcije ali inline urejanje. Če se ciklus kdaj poskuša stlačiti v admin, ker je "na voljo", se izgubi nadzor nad zaporedjem korakov iz PRD §7.4.
 
@@ -137,11 +137,11 @@ Invoice (RAČUN — NP ali ST)
   ├── rendered_pdf_path, rendered_eslog_path, checksum
   └── DeliveryAttempt (0..n)
 
-MonthlyBatch (mesečni ciklus)
-  ├── period (LLLL-MM)
-  ├── company
-  ├── status
-  └── Invoice (n, prek batch reference)
+MonthlyCycle (skupni šeststopenjski mesečni postopek)
+  ├── obdobje (prvi dan meseca; en cikel na obdobje)
+  ├── datum_izdaje, trenutni_korak, status
+  └── MonthlyBatch (n; posnetek podjetij ob začetku)
+        └── company
 
 AccountantReport (kontrolni dokument)
   ├── company, period

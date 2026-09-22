@@ -7,7 +7,7 @@ from itertools import pairwise
 from django.conf import settings
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.db import transaction
+from django.db import IntegrityError, transaction
 from django.db.models import Q
 
 from catalogs.models import VatRegime
@@ -28,7 +28,7 @@ from core.eslog_konfiguracija import razresi_eslog_konfiguracijo
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
 
-from .models import Invoice, InvoiceLine
+from .models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 
 ESLOG_KODE_DDV = {
     VatRegime.NacinObracuna.OBDAVCENO: "S",
@@ -36,6 +36,145 @@ ESLOG_KODE_DDV = {
     VatRegime.NacinObracuna.OBRNJENA_DAVCNA: "AE",
     VatRegime.NacinObracuna.NI_PREDMET: "O",
 }
+
+
+class MesecniCikelNapaka(Exception):
+    pass
+
+
+class AktivniMesecniCikelObstaja(MesecniCikelNapaka):
+    pass
+
+
+class ZakljucenoObdobje(MesecniCikelNapaka):
+    pass
+
+
+class NiAktivnihPodjetij(MesecniCikelNapaka):
+    pass
+
+
+class KonfliktPodatkovPrvegaKoraka(MesecniCikelNapaka):
+    pass
+
+
+class NeveljavenPrehodMesecnegaCikla(MesecniCikelNapaka):
+    pass
+
+
+def normaliziraj_obdobje(obdobje: date) -> date:
+    return obdobje.replace(day=1)
+
+
+def nalozi_aktivni_mesecni_cikel() -> MonthlyCycle | None:
+    return MonthlyCycle.objects.filter(status=MonthlyCycle.Status.V_TEKU).first()
+
+
+def nalozi_mesecni_cikel(pk: int) -> MonthlyCycle:
+    return MonthlyCycle.objects.get(pk=pk)
+
+
+def _poisci_nadaljevanje(obdobje: date) -> MonthlyCycle | None:
+    aktivni = nalozi_aktivni_mesecni_cikel()
+    if aktivni and aktivni.obdobje != obdobje:
+        raise AktivniMesecniCikelObstaja(
+            "Drug mesečni obračun je že v teku. Najprej nadaljujte tega."
+        )
+    if aktivni:
+        return aktivni
+    obstojeci = MonthlyCycle.objects.filter(obdobje=obdobje).first()
+    if obstojeci:
+        raise ZakljucenoObdobje("Že zaključenega obdobja ni mogoče znova začeti.")
+    return None
+
+
+def _zacni_ali_nadaljuj_v_transakciji(
+    obdobje: date, datum_izdaje: date
+) -> MonthlyCycle:
+    cycle = _poisci_nadaljevanje(obdobje)
+    if cycle:
+        return cycle
+    podjetja = list(Company.objects.filter(aktivno=True))
+    if not podjetja:
+        raise NiAktivnihPodjetij(
+            "Mesečnega obračuna ni mogoče začeti brez aktivnega podjetja."
+        )
+    cycle = MonthlyCycle.objects.create(
+        obdobje=obdobje,
+        datum_izdaje=datum_izdaje,
+    )
+    MonthlyBatch.objects.bulk_create(
+        MonthlyBatch(cycle=cycle, company=company)
+        for company in podjetja
+    )
+    return cycle
+
+
+def _preveri_podatke_prvega_koraka(
+    cycle: MonthlyCycle, datum_izdaje: date
+) -> None:
+    if cycle.datum_izdaje != datum_izdaje:
+        raise KonfliktPodatkovPrvegaKoraka(
+            "Datum izdaje se ne ujema z že shranjenim mesečnim obračunom."
+        )
+
+
+def _obnovi_zmagovalca(obdobje: date, datum_izdaje: date) -> MonthlyCycle:
+    cycle = _poisci_nadaljevanje(obdobje)
+    if cycle:
+        _preveri_podatke_prvega_koraka(cycle, datum_izdaje)
+        return cycle
+    raise IntegrityError("Mesečnega cikla po konfliktu ni mogoče obnoviti.")
+
+
+def zacni_ali_nadaljuj_mesecni_cikel(
+    obdobje: date, datum_izdaje: date
+) -> MonthlyCycle:
+    obdobje = normaliziraj_obdobje(obdobje)
+    try:
+        with transaction.atomic():
+            cycle = _zacni_ali_nadaljuj_v_transakciji(obdobje, datum_izdaje)
+            _preveri_podatke_prvega_koraka(cycle, datum_izdaje)
+            return cycle
+    except IntegrityError:
+        # Po neuspešni transakciji poizvedujemo zunaj njenega pokvarjenega stanja.
+        return _obnovi_zmagovalca(obdobje, datum_izdaje)
+
+
+def shrani_prvi_korak(obdobje: date, datum_izdaje: date) -> MonthlyCycle:
+    obdobje = normaliziraj_obdobje(obdobje)
+    try:
+        with transaction.atomic():
+            cycle = _zacni_ali_nadaljuj_v_transakciji(obdobje, datum_izdaje)
+            if cycle.trenutni_korak >= MonthlyCycle.Korak.PREDHODNA_KONTROLA:
+                _preveri_podatke_prvega_koraka(cycle, datum_izdaje)
+                return cycle
+            cycle.datum_izdaje = datum_izdaje
+            cycle.trenutni_korak = MonthlyCycle.Korak.PREDHODNA_KONTROLA
+            cycle.save(update_fields=["datum_izdaje", "trenutni_korak", "updated_at"])
+            return cycle
+    except IntegrityError:
+        return _obnovi_zmagovalca(obdobje, datum_izdaje)
+
+
+def premakni_mesecni_cikel(cycle: MonthlyCycle, korak: int) -> MonthlyCycle:
+    if korak not in MonthlyCycle.Korak.values:
+        raise NeveljavenPrehodMesecnegaCikla("Korak mora biti med 1 in 6.")
+    with transaction.atomic():
+        svezi = MonthlyCycle.objects.get(pk=cycle.pk)
+        if svezi.status == MonthlyCycle.Status.ZAKLJUCEN:
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Zaključenega mesečnega cikla ni mogoče premakniti."
+            )
+        if korak == svezi.trenutni_korak:
+            return svezi
+        if korak != svezi.trenutni_korak + 1:
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Mesečni cikel se lahko premakne samo na naslednji korak."
+            )
+        svezi.trenutni_korak = korak
+        svezi.save(update_fields=["trenutni_korak", "updated_at"])
+        return svezi
 
 
 def _razresi_eslog_snapshot(invoice: Invoice) -> dict:

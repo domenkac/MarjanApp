@@ -63,6 +63,8 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .wizard-step.is-active { color: var(--primary); border-bottom-color: var(--primary); }
 .wizard-step.is-active span { color: white; background: var(--primary); border-color: var(--primary); }
 .wizard-step.is-active strong { font-weight: 700; }
+.wizard-step.is-completed { color: #237b4b; }
+.wizard-step.is-completed span { color: white; background: #237b4b; border-color: #237b4b; }
 .billing-heading { margin-bottom: 22px; }
 .billing-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
 .billing-card { background: var(--surface); border: 1px solid var(--outline); }

@@ -4,7 +4,7 @@ import pytest
 from django.utils import timezone
 
 from companies.models import Company
-from invoicing.models import Invoice
+from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -87,6 +87,19 @@ def test_brez_aktivnih_podjetij_prikaze_blokado(client):
 
 
 @pytest.mark.django_db
+def test_neposreden_post_brez_podjetij_prikaze_storitveno_napako(client):
+    response = client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+
+    assert response.status_code == 200
+    assert "ni mogoče začeti brez aktivnega podjetja" in response.content.decode()
+    assert MonthlyCycle.objects.count() == 0
+    assert MonthlyBatch.objects.count() == 0
+
+
+@pytest.mark.django_db
 @pytest.mark.parametrize(
     ("podatki", "napaka"),
     [
@@ -130,25 +143,18 @@ def test_neveljaven_datum_izdaje_ohrani_obdobje_iz_oddanega_meseca(client):
 
 
 @pytest.mark.django_db
-def test_veljavna_izbira_ne_spremeni_baze_in_ne_izvede_naslednjih_korakov(client):
+def test_veljavna_izbira_uporabi_prg_in_ne_ustvari_racuna(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
-    podjetja_prej = Company.objects.count()
-
     response = client.post(
         "/mesecni-obracun/",
         {"leto": "2026", "mesec": "8", "datum_izdaje": "2026-08-12"},
     )
 
-    assert response.status_code == 200
-    assert response.context["nadaljevanje"] == {
-        "leto": 2026,
-        "mesec": 8,
-        "datum_izdaje": date(2026, 8, 12),
-        "obdobje_od": date(2026, 8, 1),
-        "obdobje_do": date(2026, 8, 31),
-    }
-    assert "Predhodna kontrola za 08/2026 še ni implementirana." in response.content.decode()
-    assert Company.objects.count() == podjetja_prej
+    assert response.status_code == 302
+    assert response.url == "/mesecni-obracun/"
+    cycle = MonthlyCycle.objects.get()
+    assert cycle.trenutni_korak == 2
+    assert MonthlyBatch.objects.count() == 1
     assert Invoice.objects.count() == 0
 
 
@@ -165,6 +171,56 @@ def test_prestopni_februar_ostane_obdobje_storitve_ne_glede_na_datum_izdaje(
         {"leto": "2024", "mesec": "2", "datum_izdaje": datum_izdaje},
     )
 
-    assert response.context["nadaljevanje"]["obdobje_od"] == date(2024, 2, 1)
-    assert response.context["nadaljevanje"]["obdobje_do"] == date(2024, 2, 29)
-    assert "01. 02. 2024 – 29. 02. 2024" in response.content.decode()
+    assert response.status_code == 302
+    assert MonthlyCycle.objects.get().obdobje == date(2024, 2, 1)
+
+
+@pytest.mark.django_db
+def test_nov_brskalnik_obnovi_mesec_datum_in_drugi_korak(client):
+    ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
+    response = client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+    assert response.status_code == 302
+
+    from django.test import Client
+
+    nov_brskalnik = Client()
+    response = nov_brskalnik.get("/mesecni-obracun/")
+    vsebina = response.content.decode()
+
+    assert response.context["trenutni_korak"] == 2
+    assert response.context["nadaljevanje"] == {
+        "leto": 2031,
+        "mesec": 2,
+        "datum_izdaje": date(2031, 2, 12),
+    }
+    assert "02/2031" in vsebina
+    assert "12. 02. 2031" in vsebina
+    assert 'class="wizard-step is-completed"' in vsebina
+    assert 'class="wizard-step is-active" aria-current="step"><span>2</span>' in vsebina
+    assert "eSLOG" not in vsebina
+    assert "XML" not in vsebina
+    assert "sessionid" not in nov_brskalnik.cookies
+
+
+@pytest.mark.django_db
+def test_konflikten_post_na_drugem_koraku_prikaze_napako_brez_obrazca(client):
+    ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
+    client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+
+    response = client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-13"},
+    )
+    vsebina = response.content.decode()
+
+    assert response.status_code == 200
+    assert "Datum izdaje se ne ujema" in vsebina
+    assert 'role="alert"' in vsebina
+    assert "<form" not in vsebina
+    assert MonthlyCycle.objects.get().datum_izdaje == date(2031, 2, 12)

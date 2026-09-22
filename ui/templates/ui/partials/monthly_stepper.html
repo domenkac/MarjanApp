@@ -1,6 +1,6 @@
 <nav class="wizard-steps" aria-label="Koraki mesečnega obračuna">
-  <div class="wizard-step is-active" aria-current="step"><span>1</span><strong>Izbira meseca</strong></div>
-  <div class="wizard-step"><span>2</span><strong>Predhodna kontrola</strong></div>
+  <div class="wizard-step{% if trenutni_korak == 1 %} is-active{% elif trenutni_korak > 1 %} is-completed{% endif %}"{% if trenutni_korak == 1 %} aria-current="step"{% endif %}><span>{% if trenutni_korak > 1 %}✓{% else %}1{% endif %}</span><strong>Izbira meseca</strong></div>
+  <div class="wizard-step{% if trenutni_korak == 2 %} is-active{% endif %}"{% if trenutni_korak == 2 %} aria-current="step"{% endif %}><span>2</span><strong>Predhodna kontrola</strong></div>
   <div class="wizard-step"><span>3</span><strong>Izračun osnutkov</strong></div>
   <div class="wizard-step"><span>4</span><strong>Paketni pregled Δ</strong></div>
   <div class="wizard-step"><span>5</span><strong>Potrditev paketa</strong></div>

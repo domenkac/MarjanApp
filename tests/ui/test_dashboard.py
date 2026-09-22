@@ -1,8 +1,10 @@
+from datetime import date
+
 import pytest
 from django.template.loader import render_to_string
 
 from companies.models import Company
-from invoicing.models import Invoice
+from invoicing.models import Invoice, MonthlyCycle
 
 
 @pytest.mark.django_db
@@ -100,3 +102,16 @@ def test_nadzorna_plosca_prikaze_resnicna_stevila(client):
 
 def test_nadzorna_plosca_nima_pisalnega_endpointa(client):
     assert client.post("/").status_code == 405
+
+
+@pytest.mark.django_db
+def test_nadzorna_plosca_ponudi_nadaljevanje_aktivnega_cikla(client):
+    MonthlyCycle.objects.create(
+        obdobje=date(2026, 8, 1),
+        datum_izdaje=date(2026, 8, 12),
+    )
+
+    vsebina = client.get("/").content.decode()
+
+    assert "Nadaljuj mesečni obračun" in vsebina
+    assert "Začni mesečni obračun" not in vsebina

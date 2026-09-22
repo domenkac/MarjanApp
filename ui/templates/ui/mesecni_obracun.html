@@ -5,18 +5,26 @@
 {% block content %}
 {% include "ui/partials/monthly_stepper.html" %}
 
+{% if sporocilo_napake %}
+<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">error</span>{{ sporocilo_napake }}</div>
+{% endif %}
+
+{% if nadaljevanje %}
+<header class="page-heading billing-heading">
+  <p class="eyebrow">Mesečni obračunski postopek</p>
+  <h1>Predhodna kontrola</h1>
+  <p>Izbrano obdobje: {{ nadaljevanje.mesec|stringformat:"02d" }}/{{ nadaljevanje.leto }}. Datum izdaje: {{ nadaljevanje.datum_izdaje|date:"d. m. Y" }}.</p>
+</header>
+<section class="continuation-state" aria-live="polite">
+  <span class="material-symbols-outlined" aria-hidden="true">info</span>
+  <div><strong>Izbira meseca je shranjena.</strong><p>Predhodna kontrola še ni implementirana.</p></div>
+</section>
+{% else %}
 <header class="page-heading billing-heading">
   <p class="eyebrow">Mesečni obračunski postopek</p>
   <h1>Izbira obračunskega meseca</h1>
   <p>Določite obračunsko obdobje in datum izdaje.</p>
 </header>
-
-{% if nadaljevanje %}
-<section class="continuation-state" aria-live="polite">
-  <span class="material-symbols-outlined" aria-hidden="true">check_circle</span>
-  <div><strong>Izbira je veljavna.</strong><p>Predhodna kontrola za {{ nadaljevanje.mesec|stringformat:"02d" }}/{{ nadaljevanje.leto }} še ni implementirana.</p></div>
-</section>
-{% endif %}
 
 <div class="billing-grid">
   <section class="billing-card">
@@ -64,4 +72,5 @@
     {% endif %}
   </aside>
 </div>
+{% endif %}
 {% endblock %}

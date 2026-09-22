@@ -9,7 +9,7 @@
     <h1>Nadzorna plošča</h1>
     <p>Pregled trenutno evidentiranih podatkov.</p>
   </div>
-  <a class="button-primary dashboard-primary-action" href="{% url 'ui:mesecni_obracun' %}"><span class="material-symbols-outlined" aria-hidden="true">calculate</span>Začni mesečni obračun</a>
+  <a class="button-primary dashboard-primary-action" href="{% url 'ui:mesecni_obracun' %}"><span class="material-symbols-outlined" aria-hidden="true">calculate</span>{% if aktivni_cikel %}Nadaljuj{% else %}Začni{% endif %} mesečni obračun</a>
 </header>
 
 <section class="metrics" aria-label="Povzetek podatkov">
