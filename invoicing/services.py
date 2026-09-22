@@ -1,3 +1,5 @@
+import hashlib
+import json
 from calendar import monthrange
 from collections import Counter
 from dataclasses import dataclass
@@ -1727,7 +1729,7 @@ def izracunaj_kandidata(
     return RacunKandidat(vrstice, skupaj, True, tuple(izjeme))
 
 
-CALCULATION_SNAPSHOT_VERSION = 2
+CALCULATION_SNAPSHOT_VERSION = 3
 
 
 def _decimal_string(value: Decimal | None) -> str | None:
@@ -1744,8 +1746,16 @@ def _previous_invoice_snapshot(invoice_id: int | None) -> dict | None:
             InvoiceLine.objects.filter(invoice=invoice).values_list("skupaj", flat=True),
             Decimal("0.00"),
         )
+    lines = InvoiceLine.objects.filter(invoice=invoice).order_by(
+        "lease_item_id", "pk"
+    )
+    is_migration_baseline = (
+        invoice.status == Invoice.Status.ARHIVIRAN_NI_IZDAN
+        and invoice.razlog_arhiviranja == MIGRACIJSKI_RAZLOG
+    )
     return {
         "id": invoice.pk,
+        "is_migration_baseline": is_migration_baseline,
         "number": invoice.stevilka,
         "period_start": invoice.obdobje_od.isoformat(),
         "period_end": invoice.obdobje_do.isoformat(),
@@ -1771,7 +1781,176 @@ def _previous_invoice_snapshot(invoice_id: int | None) -> dict | None:
         },
         "contract_reference": invoice.oznaka_pogodbe,
         "property_label": invoice.objekt_naziv,
+        "delivery_contacts": (
+            {} if is_migration_baseline else invoice.dostavni_kontakti_snapshot
+        ),
+        "delivery_contacts_available": (
+            not is_migration_baseline and bool(invoice.dostavni_kontakti_snapshot)
+        ),
+        "lines": [
+            {
+                "lease_item_id": line.lease_item_id,
+                "vat_method": line.ddv_nacin_obracuna,
+                "vat_rate": _decimal_string(line.ddv_stopnja),
+                "vat_clause": line.ddv_klavzula,
+                "vat_summary_group": line.ddv_rekap_skupina,
+            }
+            for line in lines
+        ],
     }
+
+
+def _exception(code, message, lease_item_id=None):
+    return {"code": code, "message": message, "lease_item_id": lease_item_id}
+
+
+def _delivery_snapshot(company, tenant, contacts) -> dict:
+    result = {
+        "tenant_email": tenant.email,
+        "accountant_bcc": company.email_racunovodja,
+        "to": [],
+        "cc": [],
+        "bcc": [],
+    }
+    for contact in contacts:
+        result[contact.vloga.lower()].append(
+            {"email": contact.email, "channel": contact.kanal}
+        )
+    return result
+
+
+def _comparison_exceptions(current, previous):
+    if previous is None or previous["is_migration_baseline"]:
+        return []
+    exceptions = []
+    fields = {
+        "name": ("NAZIV", "Spremenjen naziv izdajatelja."),
+        "address": ("NASLOV", "Spremenjen naslov izdajatelja."),
+        "country": ("DRZAVA", "Spremenjena država izdajatelja."),
+        "vat_registered": ("DDV_STATUS", "Spremenjen DDV status izdajatelja."),
+        "tax_number": ("DAVCNA_STEVILKA", "Spremenjena davčna številka izdajatelja."),
+        "registration_number": (
+            "MATICNA_STEVILKA", "Spremenjena matična številka izdajatelja."
+        ),
+        "iban": ("IBAN", "Spremenjen IBAN izdajatelja."),
+    }
+    for field, (code, message) in fields.items():
+        if current["issuer"].get(field) != previous["issuer"].get(field):
+            exceptions.append(_exception(
+                f"SPREMEMBA_IZDAJATELJA_{code}",
+                message,
+            ))
+    fields = {
+        "type": ("TIP", "Spremenjen tip prejemnika."),
+        "name": ("NAZIV", "Spremenjen naziv prejemnika."),
+        "address": ("NASLOV", "Spremenjen naslov prejemnika."),
+        "country": ("DRZAVA", "Spremenjena država prejemnika."),
+        "vat_registered": ("DDV_STATUS", "Spremenjen DDV status prejemnika."),
+        "tax_number": ("DAVCNA_STEVILKA", "Spremenjena davčna številka prejemnika."),
+        "vat_id": (
+            "DDV_IDENTIFIKACIJA", "Spremenjena DDV identifikacijska številka prejemnika."
+        ),
+        "registration_number": (
+            "MATICNA_STEVILKA", "Spremenjena matična številka prejemnika."
+        ),
+    }
+    for field, (code, message) in fields.items():
+        if current["recipient"].get(field) != previous["recipient"].get(field):
+            exceptions.append(_exception(
+                f"SPREMEMBA_PREJEMNIKA_{code}",
+                message,
+            ))
+    if current["contract_reference"] != previous["contract_reference"]:
+        exceptions.append(_exception(
+            "SPREMEMBA_SKLICA_POGODBE", "Spremenjen sklic na pogodbo."
+        ))
+    if current["property_label"] != previous["property_label"]:
+        exceptions.append(_exception(
+            "SPREMEMBA_OZNAKE_OBJEKTA", "Spremenjena oznaka objekta."
+        ))
+    return exceptions
+
+
+def _vat_exceptions(current_lines, previous):
+    if previous is None:
+        return []
+    old = {}
+    for line in previous["lines"]:
+        old.setdefault(line["lease_item_id"], []).append(
+            tuple(line.get(field) for field in (
+                "vat_method", "vat_rate", "vat_clause", "vat_summary_group"
+            ))
+        )
+    new = {}
+    for line in current_lines:
+        new.setdefault(line["lease_item_id"], []).append(
+            tuple(line.get(field) for field in (
+                "vat_method", "vat_rate", "vat_clause", "vat_summary_group"
+            ))
+        )
+    return [
+        _exception(
+            "SPREMEMBA_DDV",
+            "Spremenjen DDV režim postavke.",
+            lease_item_id,
+        )
+        for lease_item_id in sorted(old.keys() & new.keys(), key=lambda value: value or 0)
+        if sorted(old[lease_item_id]) != sorted(new[lease_item_id])
+    ]
+
+
+def _lifecycle_exceptions(lease, period_start, period_end):
+    exceptions = []
+    end = lease.datum_konca
+    fixed = lease.tip_trajanja == Lease.TipTrajanja.DOLOCEN_CAS and end is not None
+    if fixed and period_start <= end <= period_end:
+        exceptions.append(_exception(
+            "POGODBA_POTECE_V_OBDOBJU",
+            f"Pogodba poteče v obračunskem obdobju ({end:%d.%m.%Y}).",
+        ))
+    elif fixed and period_end < end <= period_end + timedelta(days=30):
+        exceptions.append(_exception(
+            "POGODBA_POTECE_V_30_DNEH",
+            f"Pogodba poteče v naslednjih 30 dneh ({end:%d.%m.%Y}).",
+        ))
+    if fixed and lease.samodejno_podaljsanje and period_start <= end <= period_end + timedelta(days=30):
+        suffix = (
+            f" za {lease.obdobje_podaljsanja_mesecev} mesecev"
+            if lease.obdobje_podaljsanja_mesecev else ""
+        )
+        exceptions.append(_exception(
+            "SAMODEJNO_PODALJSANJE_OB_KONCU",
+            f"Pogodba s samodejnim podaljšanjem{suffix} doseže konec {end:%d.%m.%Y}.",
+        ))
+    termination = lease.datum_prenehanja
+    if lease.status == Lease.Status.ODPOVEDANA and termination:
+        termination_month = termination.replace(day=1)
+        previous_month = (termination_month - timedelta(days=1)).replace(day=1)
+        if period_start == termination_month:
+            exceptions.append(_exception(
+                "ODPOVED_ZADNJI_MESEC", "Pogodba je v zadnjem mesecu zaračunavanja."
+            ))
+        elif period_start == previous_month:
+            exceptions.append(_exception(
+                "ODPOVED_PREDZADNJI_MESEC",
+                "Pogodba je v predzadnjem mesecu zaračunavanja.",
+            ))
+    return exceptions
+
+
+def _candidate_fingerprint(candidate, *, company, period_start, period_end, issue_date):
+    value = {
+        "schema_version": CALCULATION_SNAPSHOT_VERSION,
+        "period_start": period_start,
+        "period_end": period_end,
+        "issue_date": issue_date,
+        "company": company,
+        "candidate": candidate,
+    }
+    canonical = json.dumps(
+        value, ensure_ascii=False, sort_keys=True, separators=(",", ":")
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
 
 def _previous_month_archived_snapshot(lease, period_start: date) -> dict:
@@ -1863,6 +2042,9 @@ def _calculation_snapshot(batch, cycle, issues):
         return base
 
     signatory = izberi_veljavnega_podpisnika(company, cycle.datum_izdaje)
+    sample_confirmation = veljavna_potrditev_vzorca(company).potrditev
+    pdf_template_version = sample_confirmation.pdf_template_version
+    base["pdf_template_version"] = pdf_template_version
     base["company"] = {
         "id": company.pk,
         "name": company.naziv,
@@ -1898,14 +2080,84 @@ def _calculation_snapshot(batch, cycle, issues):
             lease, cycle.obdobje, period_end, cycle.datum_izdaje
         )
         tenant = lease.tenant
-        contacts = RecipientContact.objects.filter(
+        contacts = list(RecipientContact.objects.filter(
             lease=lease, aktiven=True
-        ).order_by("pk")
+        ).order_by("vloga", "email", "kanal", "pk"))
+        delivery = _delivery_snapshot(company, tenant, contacts)
+        previous = _previous_invoice_snapshot(delta.prejsnji_racun_id)
+        current_header = {
+            "issuer": {
+                "name": company.naziv,
+                "address": company.naslov,
+                "country": company.drzava_koda,
+                "vat_registered": company.ddv_zavezanec,
+                "tax_number": company.davcna_stevilka,
+                "registration_number": company.maticna_stevilka,
+                "iban": company.trr,
+            },
+            "recipient": {
+                "type": tenant.tip,
+                "name": tenant.naziv,
+                "address": tenant.naslov,
+                "country": tenant.drzava_koda,
+                "vat_registered": tenant.identificiran_za_ddv,
+                "tax_number": tenant.davcna_stevilka,
+                "vat_id": tenant.ddv_identifikacijska_stevilka,
+                "registration_number": tenant.maticna_stevilka,
+            },
+            "contract_reference": lease.oznaka_pogodbe,
+            "property_label": lease.unit.property.naziv,
+        }
         exceptions = sorted(
-            ({"code": item.koda, "message": item.opis, "lease_item_id": item.lease_item_id} for item in candidate.izjeme),
+            ({"code": item.koda, "message": item.opis, "lease_item_id": item.lease_item_id}
+             for item in candidate.izjeme if item.koda != "SPREMEMBA_DDV"),
             key=lambda item: (item["code"], item["lease_item_id"] or 0, item["message"]),
         )
-        base["candidates"].append({
+        lines = [{
+            "lease_item_id": line.lease_item_id, "description": line.opis,
+            "net": _decimal_string(line.osnova),
+            "vat_rate": _decimal_string(line.ddv_stopnja),
+            "vat": _decimal_string(line.ddv_znesek),
+            "total": _decimal_string(line.skupaj),
+            "vat_method": line.ddv_nacin_obracuna,
+            "vat_clause": line.ddv_klavzula,
+            "vat_summary_group": line.ddv_rekap_skupina,
+            "proportional": line.je_sorazmerno,
+        } for line in sorted(candidate.vrstice, key=lambda line: (line.lease_item_id or 0, line.opis))]
+        if delta.obstaja_razlika:
+            exceptions.append(_exception(
+                "ZNESEK_SPREMENJEN",
+                (
+                    "Znesek se razlikuje od uvoženega migracijskega izhodišča."
+                    if previous and previous["is_migration_baseline"]
+                    else "Znesek se razlikuje od zadnjega dejansko izdanega računa."
+                ),
+            ))
+        exceptions.extend(_comparison_exceptions(current_header, previous))
+        exceptions.extend(_vat_exceptions(lines, previous))
+        exceptions.extend(_lifecycle_exceptions(lease, cycle.obdobje, period_end))
+        archived = _previous_month_archived_snapshot(lease, cycle.obdobje)
+        if archived["exists"]:
+            exceptions.append(_exception(
+                "PREJSNJI_MESEC_ARHIVIRAN_NI_IZDAN",
+                "Prejšnji mesec je bil račun arhiviran kot neizdan.",
+            ))
+        if (
+            previous
+            and previous["delivery_contacts_available"]
+            and delivery != previous["delivery_contacts"]
+        ):
+            exceptions.append(_exception(
+                "SPREMEMBA_DOSTAVNIH_KONTAKTOV",
+                "Spremenjen e-naslov ali dostavni kontakti.",
+            ))
+        exceptions = sorted(
+            {(
+                item["code"], item["lease_item_id"], item["message"]
+            ): item for item in exceptions}.values(),
+            key=lambda item: (item["code"], item["lease_item_id"] or 0, item["message"]),
+        )
+        candidate_snapshot = {
             "lease_id": lease.pk,
             "contract_reference": lease.oznaka_pogodbe,
             "property_id": lease.unit.property_id,
@@ -1930,40 +2182,45 @@ def _calculation_snapshot(batch, cycle, issues):
                 }
                 for contact in contacts
             ],
+            "delivery_contacts": delivery,
+            "historical_delivery_contacts_available": bool(
+                previous and previous["delivery_contacts_available"]
+            ),
+            "pdf_template_version": pdf_template_version,
             "payment_due_days": lease.rok_placila_dni,
             "due_date": (cycle.datum_izdaje + timedelta(days=lease.rok_placila_dni)).isoformat(),
             "will_issue": candidate.se_izda,
             "non_issue_reason": candidate.razlog_neizdaje,
-            "lines": [{
-                "lease_item_id": line.lease_item_id, "description": line.opis,
-                "net": _decimal_string(line.osnova),
-                "vat_rate": _decimal_string(line.ddv_stopnja),
-                "vat": _decimal_string(line.ddv_znesek),
-                "total": _decimal_string(line.skupaj),
-                "vat_method": line.ddv_nacin_obracuna,
-                "vat_clause": line.ddv_klavzula,
-                "vat_summary_group": line.ddv_rekap_skupina,
-                "proportional": line.je_sorazmerno,
-            } for line in sorted(candidate.vrstice, key=lambda line: (line.lease_item_id or 0, line.opis))],
+            "lines": lines,
             "totals": {
                 "net": _decimal_string(sum((line.osnova for line in candidate.vrstice), Decimal("0.00"))),
                 "vat": _decimal_string(sum((line.ddv_znesek for line in candidate.vrstice), Decimal("0.00"))),
                 "total": _decimal_string(candidate.skupaj_z_ddv),
             },
             "exceptions": exceptions,
-            "previous_invoice": _previous_invoice_snapshot(delta.prejsnji_racun_id),
+            "previous_invoice": previous,
             "first_issue": delta.prejsnji_racun_id is None,
             "previous_month_archived_not_issued": (
-                _previous_month_archived_snapshot(lease, cycle.obdobje)
+                archived
             ),
             "lease_state": {
                 "type": lease.tip_trajanja, "status": lease.status,
                 "start_date": lease.datum_zacetka.isoformat(),
                 "end_date": lease.datum_konca.isoformat() if lease.datum_konca else None,
+                "cancellation_date": lease.datum_odpovedi.isoformat() if lease.datum_odpovedi else None,
                 "termination_date": lease.datum_prenehanja.isoformat() if lease.datum_prenehanja else None,
                 "automatic_extension": lease.samodejno_podaljsanje,
+                "automatic_extension_months": lease.obdobje_podaljsanja_mesecev,
             },
-        })
+        }
+        candidate_snapshot["candidate_fingerprint"] = _candidate_fingerprint(
+            candidate_snapshot,
+            company=base["company"],
+            period_start=base["period_start"],
+            period_end=base["period_end"],
+            issue_date=base["issue_date"],
+        )
+        base["candidates"].append(candidate_snapshot)
     return base
 
 
@@ -1971,7 +2228,15 @@ def aktivni_izracuni_mesecnega_cikla(cycle: MonthlyCycle):
     return cycle.batches.filter(
         preflight_status=MonthlyBatch.PreflightStatus.PASSED,
         calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+        calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
     )
+
+
+def so_vsi_uspesni_izracuni_aktivni(cycle: MonthlyCycle) -> bool:
+    active = aktivni_izracuni_mesecnega_cikla(cycle)
+    return active.exists() and not cycle.batches.filter(
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED
+    ).exclude(pk__in=active.values("pk")).exists()
 
 
 def izracunaj_mesecne_kandidate(
@@ -1996,7 +2261,8 @@ def izracunaj_mesecne_kandidate(
     )
     if samo_brez_aktivnega_izracuna:
         batches = batches.exclude(
-            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
+            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+            calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
         )
     batches = batches.select_related("company").order_by("company_id")
     for batch in batches:

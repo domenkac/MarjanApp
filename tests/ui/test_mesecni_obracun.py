@@ -5,6 +5,7 @@ from django.utils import timezone
 
 from companies.models import Company
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
+from invoicing.services import CALCULATION_SNAPSHOT_VERSION
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -21,6 +22,33 @@ def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
         keychain_kljuc_posiljatelja=f"marjanapp-{davcna_stevilka}",
         aktivno=aktivno,
     )
+
+
+def _mixed_schema_cycle():
+    cycle = MonthlyCycle.objects.create(
+        obdobje=date(2031, 2, 1),
+        datum_izdaje=date(2031, 2, 12),
+        trenutni_korak=MonthlyCycle.Korak.IZRACUN_OSNUTKOV,
+    )
+    current = MonthlyBatch.objects.create(
+        cycle=cycle,
+        company=ustvari_podjetje("Alfa d.o.o.", "15012557"),
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED,
+        calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+        calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
+        calculation_snapshot={"schema_version": CALCULATION_SNAPSHOT_VERSION},
+        calculated_at=timezone.now(),
+    )
+    stale = MonthlyBatch.objects.create(
+        cycle=cycle,
+        company=ustvari_podjetje("Beta d.o.o.", "69165028"),
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED,
+        calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+        calculation_schema_version=2,
+        calculation_snapshot={"schema_version": 2},
+        calculated_at=timezone.now(),
+    )
+    return cycle, current, stale
 
 
 @pytest.mark.django_db
@@ -307,3 +335,44 @@ def test_delni_step2_je_attention_in_se_lahko_ponovi_brez_pomika_nazaj(client):
     )
     assert response.redirect_chain == [("/mesecni-obracun/", 302)]
     assert MonthlyCycle.objects.get().trenutni_korak == 3
+
+
+@pytest.mark.django_db
+def test_mixed_schema_ne_more_nadaljevati_v_step4(client):
+    cycle, _, _ = _mixed_schema_cycle()
+
+    client.post("/mesecni-obracun/", {"action": "continue_step4"})
+
+    cycle.refresh_from_db()
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.IZRACUN_OSNUTKOV
+
+
+@pytest.mark.django_db
+def test_mixed_schema_step3_context_ni_dokoncan(client):
+    _, current, stale = _mixed_schema_cycle()
+
+    response = client.get("/mesecni-obracun/")
+    batches = {batch.pk: batch for batch in response.context["batches"]}
+
+    assert response.context["step3_complete"] is False
+    assert response.context["step3_can_continue"] is False
+    assert batches[current.pk].is_active_calculation is True
+    assert batches[stale.pk].is_active_calculation is False
+
+
+@pytest.mark.django_db
+def test_stara_shema_zahteva_ponovni_izracun_brez_veljavnega_casa(client):
+    cycle, current, stale = _mixed_schema_cycle()
+    current.delete()
+
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    batch = response.context["batches"][0]
+
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.IZRACUN_OSNUTKOV
+    assert batch.pk == stale.pk
+    assert batch.is_active_calculation is False
+    assert batch.needs_recalculation is True
+    assert "Potreben ponovni izračun" in content
+    assert "Izračunano " not in content
+    assert 'class="status-badge">Potreben ponovni izračun</span>' in content

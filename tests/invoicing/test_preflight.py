@@ -10,6 +10,7 @@ from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
+    CALCULATION_SNAPSHOT_VERSION,
     MIGRACIJSKI_RAZLOG,
     NeveljavenPrehodMesecnegaCikla,
     izracunaj_mesecne_kandidate,
@@ -190,6 +191,19 @@ def _historical_invoice(data, lease, *, status=Invoice.Status.POSLAN, reason=Non
     )
 
 
+def _calculate(data):
+    preveri_predhodno_kontrolo(data["cycle"])
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    izracunaj_mesecne_kandidate(data["cycle"])
+    data["batch"].refresh_from_db()
+    return data["batch"].calculation_snapshot["candidates"]
+
+
+def _candidate_codes(candidate):
+    return {item["code"] for item in candidate["exceptions"]}
+
+
 def test_batch_defaults_to_not_checked(db):
     assert MonthlyBatch._meta.get_field("preflight_status").get_default() == "NOT_CHECKED"
     assert MonthlyBatch._meta.get_field("preflight_issues").get_default() == []
@@ -355,6 +369,326 @@ def test_previous_month_archived_not_issued_evidence(ready_company, reason, expe
 
     assert evidence["exists"] is expected
     assert (evidence["invoice_id"] is not None) is expected
+    assert (
+        "PREJSNJI_MESEC_ARHIVIRAN_NI_IZDAN" in _candidate_codes(candidate)
+    ) is expected
+
+
+def test_snapshot_v3_fingerprint_and_pdf_contract(ready_company, settings):
+    candidate = _calculate(ready_company)[0]
+
+    assert CALCULATION_SNAPSHOT_VERSION == 3
+    assert ready_company["batch"].calculation_schema_version == 3
+    assert ready_company["batch"].calculation_snapshot["schema_version"] == 3
+    assert candidate["pdf_template_version"] == settings.PDF_TEMPLATE_VERSION
+    assert len(candidate["candidate_fingerprint"]) == 64
+    assert candidate["lease_state"] == {
+        "type": Lease.TipTrajanja.NEDOLOCEN_CAS,
+        "status": Lease.Status.AKTIVNA,
+        "start_date": "2026-01-01",
+        "end_date": None,
+        "cancellation_date": None,
+        "termination_date": None,
+        "automatic_extension": False,
+        "automatic_extension_months": None,
+    }
+
+
+def test_fingerprint_is_stable_and_excludes_calculation_timestamp(ready_company):
+    first = _calculate(ready_company)[0]["candidate_fingerprint"]
+    first_time = ready_company["batch"].calculated_at
+    izracunaj_mesecne_kandidate(ready_company["cycle"])
+    ready_company["batch"].refresh_from_db()
+
+    assert ready_company["batch"].calculated_at > first_time
+    assert ready_company["batch"].calculation_snapshot["candidates"][0][
+        "candidate_fingerprint"
+    ] == first
+
+
+@pytest.mark.parametrize(
+    ("model", "field", "value"),
+    [
+        (LeaseItem, "znesek_neto_mesecno", Decimal("101.00")),
+        (Tenant, "naziv", "Nov prejemnik d.o.o."),
+        (Tenant, "email", "nov@example.com"),
+    ],
+)
+def test_document_input_change_changes_fingerprint(
+    ready_company, model, field, value
+):
+    first = _calculate(ready_company)[0]["candidate_fingerprint"]
+    model.objects.filter(
+        pk=(ready_company["item"].pk if model is LeaseItem else ready_company["tenant"].pk)
+    ).update(**{field: value})
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    second = _calculate(ready_company)[0]["candidate_fingerprint"]
+
+    assert second != first
+
+
+def test_issuer_change_changes_fingerprint(ready_company):
+    first = _calculate(ready_company)[0]["candidate_fingerprint"]
+    Company.objects.filter(pk=ready_company["company"].pk).update(naziv="Nova Alfa d.o.o.")
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    second = _calculate(ready_company)[0]["candidate_fingerprint"]
+
+    assert second != first
+
+
+def test_other_candidate_change_does_not_change_fingerprint(ready_company):
+    second_lease = _add_lease(ready_company, with_item=True)
+    second_item = LeaseItem.objects.get(lease=second_lease)
+    potrdi_ddv_nastavitve(ready_company["company"])
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    first_candidates = _calculate(ready_company)
+    untouched = next(
+        item for item in first_candidates if item["lease_id"] == ready_company["lease"].pk
+    )["candidate_fingerprint"]
+    LeaseItem.objects.filter(pk=second_item.pk).update(znesek_neto_mesecno=Decimal("51.00"))
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    second_candidates = _calculate(ready_company)
+
+    assert next(
+        item for item in second_candidates if item["lease_id"] == ready_company["lease"].pk
+    )["candidate_fingerprint"] == untouched
+
+
+def test_first_issue_and_proportional_exceptions(ready_company):
+    Lease.objects.filter(pk=ready_company["lease"].pk).update(
+        datum_zacetka=date(2026, 9, 10)
+    )
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    codes = _candidate_codes(_calculate(ready_company)[0])
+
+    assert {"PRVA_IZDAJA", "SORAZMERNO"} <= codes
+
+
+def test_amount_master_data_and_vat_change_exceptions(ready_company):
+    previous = _historical_invoice(ready_company, ready_company["lease"])
+    previous.izdajatelj_naziv = "Stara Alfa d.o.o."
+    previous.prejemnik_naziv = "Star najemnik d.o.o."
+    previous.save(update_fields=["izdajatelj_naziv", "prejemnik_naziv"])
+    InvoiceLine.objects.create(
+        invoice=previous,
+        lease=ready_company["lease"],
+        lease_item=ready_company["item"],
+        opis="Najemnina",
+        osnova=Decimal("45.08"),
+        ddv_stopnja=Decimal("9.50"),
+        ddv_znesek=Decimal("4.28"),
+        skupaj=Decimal("49.36"),
+        ddv_nacin_obracuna="OBDAVCENO",
+        ddv_klavzula="Stara klavzula",
+        ddv_rekap_skupina="DDV 9,5 %",
+    )
+    codes = _candidate_codes(_calculate(ready_company)[0])
+
+    assert {
+        "ZNESEK_SPREMENJEN",
+        "SPREMEMBA_IZDAJATELJA_NAZIV",
+        "SPREMEMBA_PREJEMNIKA_NAZIV",
+        "SPREMEMBA_DDV",
+    } <= codes
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected"),
+    [
+        (
+            {"tip_trajanja": Lease.TipTrajanja.DOLOCEN_CAS,
+             "datum_konca": date(2026, 9, 30)},
+            "POGODBA_POTECE_V_OBDOBJU",
+        ),
+        (
+            {"tip_trajanja": Lease.TipTrajanja.DOLOCEN_CAS,
+             "datum_konca": date(2026, 10, 15)},
+            "POGODBA_POTECE_V_30_DNEH",
+        ),
+        (
+            {"tip_trajanja": Lease.TipTrajanja.DOLOCEN_CAS,
+             "datum_konca": date(2026, 9, 30), "samodejno_podaljsanje": True,
+             "obdobje_podaljsanja_mesecev": 12},
+            "SAMODEJNO_PODALJSANJE_OB_KONCU",
+        ),
+        (
+            {"status": Lease.Status.ODPOVEDANA,
+             "datum_odpovedi": date(2026, 8, 1),
+             "datum_prenehanja": date(2026, 9, 20)},
+            "ODPOVED_ZADNJI_MESEC",
+        ),
+        (
+            {"status": Lease.Status.ODPOVEDANA,
+             "datum_odpovedi": date(2026, 8, 1),
+             "datum_prenehanja": date(2026, 10, 20)},
+            "ODPOVED_PREDZADNJI_MESEC",
+        ),
+    ],
+)
+def test_contract_lifecycle_exceptions(ready_company, updates, expected):
+    Lease.objects.filter(pk=ready_company["lease"].pk).update(**updates)
+    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+
+    assert expected in _candidate_codes(_calculate(ready_company)[0])
+
+
+def test_historical_delivery_contacts_are_compared_only_when_known(ready_company):
+    previous = _historical_invoice(ready_company, ready_company["lease"])
+    candidate = _calculate(ready_company)[0]
+    assert candidate["historical_delivery_contacts_available"] is False
+    assert "SPREMEMBA_DOSTAVNIH_KONTAKTOV" not in _candidate_codes(candidate)
+
+    previous.dostavni_kontakti_snapshot = {
+        "tenant_email": "stari@example.com", "to": [], "cc": [], "bcc": []
+    }
+    previous.save(update_fields=["dostavni_kontakti_snapshot"])
+    candidate = _calculate(ready_company)[0]
+    assert candidate["historical_delivery_contacts_available"] is True
+    assert "SPREMEMBA_DOSTAVNIH_KONTAKTOV" in _candidate_codes(candidate)
+
+
+def test_step4_partial_calculation_upgrades_old_schema(ready_company):
+    data = ready_company
+    preveri_predhodno_kontrolo(data["cycle"])
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    MonthlyBatch.objects.filter(pk=data["batch"].pk).update(
+        calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+        calculation_schema_version=2,
+        calculation_snapshot={"schema_version": 2},
+    )
+
+    result = izracunaj_mesecne_kandidate(
+        data["cycle"], samo_brez_aktivnega_izracuna=True
+    )
+    data["batch"].refresh_from_db()
+
+    assert [batch.pk for batch in result] == [data["batch"].pk]
+    assert data["cycle"].trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
+    assert data["batch"].calculation_schema_version == 3
+    assert len(data["batch"].calculation_snapshot["candidates"][0][
+        "candidate_fingerprint"
+    ]) == 64
+
+
+def test_migration_baseline_only_compares_economics_and_vat(ready_company):
+    data = ready_company
+    baseline = _historical_invoice(
+        data,
+        data["lease"],
+        status=Invoice.Status.ARHIVIRAN_NI_IZDAN,
+        reason=MIGRACIJSKI_RAZLOG,
+    )
+    baseline.dostavni_kontakti_snapshot = {
+        "tenant_email": "zgodovina@example.com",
+        "accountant_bcc": "zgodovina-racunovodja@example.com",
+        "to": [], "cc": [], "bcc": [],
+    }
+    baseline.save(update_fields=["dostavni_kontakti_snapshot"])
+    InvoiceLine.objects.create(
+        invoice=baseline,
+        lease=data["lease"],
+        lease_item=data["item"],
+        opis="Migracijsko izhodišče",
+        osnova=Decimal("45.08"),
+        ddv_stopnja=Decimal("9.50"),
+        ddv_znesek=Decimal("4.28"),
+        skupaj=Decimal("49.36"),
+        ddv_nacin_obracuna="OBDAVCENO",
+        ddv_klavzula="Stara klavzula",
+        ddv_rekap_skupina="DDV 9,5 %",
+    )
+
+    candidate = _calculate(data)[0]
+    codes = _candidate_codes(candidate)
+
+    assert candidate["first_issue"] is False
+    assert candidate["previous_invoice"]["is_migration_baseline"] is True
+    assert candidate["historical_delivery_contacts_available"] is False
+    assert {"ZNESEK_SPREMENJEN", "SPREMEMBA_DDV"} <= codes
+    assert not any(
+        code.startswith(("SPREMEMBA_IZDAJATELJA_", "SPREMEMBA_PREJEMNIKA_"))
+        for code in codes
+    )
+    assert not {
+        "SPREMEMBA_SKLICA_POGODBE",
+        "SPREMEMBA_OZNAKE_OBJEKTA",
+        "SPREMEMBA_DOSTAVNIH_KONTAKTOV",
+    } & codes
+    amount = next(
+        item for item in candidate["exceptions"]
+        if item["code"] == "ZNESEK_SPREMENJEN"
+    )
+    assert "migracijskega izhodišča" in amount["message"]
+
+
+def test_vat_only_change_emits_one_authoritative_exception(ready_company):
+    data = ready_company
+    previous = _historical_invoice(data, data["lease"])
+    previous.skupaj_z_ddv = Decimal("122.00")
+    previous.save(update_fields=["skupaj_z_ddv"])
+    InvoiceLine.objects.create(
+        invoice=previous,
+        lease=data["lease"],
+        lease_item=data["item"],
+        opis="Najemnina",
+        osnova=Decimal("100.00"),
+        ddv_stopnja=Decimal("22.00"),
+        ddv_znesek=Decimal("22.00"),
+        skupaj=Decimal("122.00"),
+        ddv_nacin_obracuna="OBDAVCENO",
+        ddv_klavzula="Druga klavzula",
+        ddv_rekap_skupina="Druga skupina",
+    )
+
+    vat = [
+        item for item in _calculate(data)[0]["exceptions"]
+        if item["code"] == "SPREMEMBA_DDV"
+    ]
+
+    assert len(vat) == 1
+    assert vat[0]["lease_item_id"] == data["item"].pk
+
+
+def test_delivery_snapshot_includes_accountant_and_fingerprints_it(ready_company):
+    data = ready_company
+    first = _calculate(data)[0]
+
+    assert first["delivery_contacts"]["accountant_bcc"] == data[
+        "company"
+    ].email_racunovodja
+
+    Company.objects.filter(pk=data["company"].pk).update(
+        email_racunovodja="novo-racunovodstvo@example.com"
+    )
+    second = _calculate(data)[0]
+
+    assert second["delivery_contacts"]["accountant_bcc"] == (
+        "novo-racunovodstvo@example.com"
+    )
+    assert second["candidate_fingerprint"] != first["candidate_fingerprint"]
+
+
+def test_header_change_messages_use_slovenian_labels(ready_company):
+    data = ready_company
+    previous = _historical_invoice(data, data["lease"])
+    previous.izdajatelj_identificiran_za_ddv = False
+    previous.prejemnik_maticna_stevilka = "0000000000"
+    previous.save(update_fields=[
+        "izdajatelj_identificiran_za_ddv",
+        "prejemnik_maticna_stevilka",
+    ])
+
+    messages = {
+        item["code"]: item["message"] for item in _calculate(data)[0]["exceptions"]
+    }
+
+    assert messages["SPREMEMBA_IZDAJATELJA_DDV_STATUS"] == (
+        "Spremenjen DDV status izdajatelja."
+    )
+    assert messages["SPREMEMBA_PREJEMNIKA_MATICNA_STEVILKA"] == (
+        "Spremenjena matična številka prejemnika."
+    )
 
 
 def test_step3_get_uses_persisted_snapshot_without_writes(ready_company, client):

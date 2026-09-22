@@ -144,6 +144,7 @@ def test_invoice_polja_izbire_in_privzeti_status(company):
         "prejemnik_tip",
         "rendered_eslog_checksum",
         "eslog_konfiguracija_snapshot",
+        "dostavni_kontakti_snapshot",
     }
     invoice = Invoice(**podatki_racuna(company))
     invoice.full_clean()

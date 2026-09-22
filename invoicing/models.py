@@ -172,6 +172,7 @@ class Invoice(models.Model):
     eslog_konfiguracija_snapshot = models.JSONField(
         null=True, blank=True, editable=False, default=None
     )
+    dostavni_kontakti_snapshot = models.JSONField(default=dict, editable=False)
 
     class Meta:
         constraints = [  # noqa: RUF012

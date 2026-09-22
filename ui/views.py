@@ -16,6 +16,7 @@ from invoicing.services import (
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
     shrani_prvi_korak,
+    so_vsi_uspesni_izracuni_aktivni,
 )
 
 from .forms import IzbiraMesecaForm, obdobje_za_mesec
@@ -104,15 +105,7 @@ def mesecni_obracun(request):
             izracunaj_mesecne_kandidate(cycle)
         return redirect("ui:mesecni_obracun")
     if request.method == "POST" and action == "continue_step4" and cycle:
-        passed = cycle.batches.filter(
-            preflight_status=MonthlyBatch.PreflightStatus.PASSED
-        )
-        if (
-            aktivni_izracuni_mesecnega_cikla(cycle).exists()
-            and not passed.exclude(
-                calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
-            ).exists()
-        ):
+        if so_vsi_uspesni_izracuni_aktivni(cycle):
             premakni_mesecni_cikel(cycle, MonthlyCycle.Korak.PAKETNI_PREGLED)
         return redirect("ui:mesecni_obracun")
 
@@ -149,14 +142,19 @@ def mesecni_obracun(request):
             cycle.obdobje.year, cycle.obdobje.month
         )
         batches = list(cycle.batches.select_related("company").order_by("company__naziv"))
+        active_calculation_ids = set(
+            aktivni_izracuni_mesecnega_cikla(cycle).values_list("pk", flat=True)
+        )
         for batch in batches:
             for issue in batch.preflight_issues:
                 issue["location"] = _preflight_location(issue, batch.company, cycle)
             snapshot = batch.calculation_snapshot or {}
-            batch.is_active_calculation = (
+            batch.is_active_calculation = batch.pk in active_calculation_ids
+            batch.needs_recalculation = (
                 batch.preflight_status == MonthlyBatch.PreflightStatus.PASSED
                 and batch.calculation_status
                 == MonthlyBatch.CalculationStatus.CALCULATED
+                and not batch.is_active_calculation
             )
             candidates = (
                 snapshot.get("candidates", []) if batch.is_active_calculation else []
@@ -182,15 +180,7 @@ def mesecni_obracun(request):
             "not_checked": sum(batch.preflight_status == MonthlyBatch.PreflightStatus.NOT_CHECKED for batch in batches),
         }
 
-    step3_complete = bool(
-        cycle
-        and aktivni_izracuni_mesecnega_cikla(cycle).exists()
-        and not cycle.batches.filter(
-            preflight_status=MonthlyBatch.PreflightStatus.PASSED
-        ).exclude(
-            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
-        ).exists()
-    )
+    step3_complete = bool(cycle and so_vsi_uspesni_izracuni_aktivni(cycle))
     return render(
         request,
         "ui/mesecni_obracun.html",
