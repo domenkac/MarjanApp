@@ -52,6 +52,11 @@ class MonthlyBatch(models.Model):
         PASSED = "PASSED", "Uspešno"
         BLOCKED = "BLOCKED", "Blokirano"
 
+    class CalculationStatus(models.TextChoices):
+        NOT_CALCULATED = "NOT_CALCULATED", "Ni izračunano"
+        CALCULATED = "CALCULATED", "Izračunano"
+        BLOCKED = "BLOCKED", "Blokirano"
+
     cycle = models.ForeignKey(
         MonthlyCycle,
         on_delete=models.PROTECT,
@@ -65,6 +70,14 @@ class MonthlyBatch(models.Model):
     )
     preflight_checked_at = models.DateTimeField(null=True, blank=True)
     preflight_issues = models.JSONField(default=list)
+    calculation_status = models.CharField(
+        max_length=14,
+        choices=CalculationStatus,
+        default=CalculationStatus.NOT_CALCULATED,
+    )
+    calculated_at = models.DateTimeField(null=True, blank=True)
+    calculation_schema_version = models.PositiveSmallIntegerField(null=True, blank=True)
+    calculation_snapshot = models.JSONField(default=dict)
 
     class Meta:
         constraints = [  # noqa: RUF012

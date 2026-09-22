@@ -22,7 +22,7 @@ from companies.services import (
     veljavna_potrditev_vzorca,
     veljavni_podpisniki_na_dan,
 )
-from contracts.models import IndexationEvent, Lease, LeaseItem
+from contracts.models import IndexationEvent, Lease, LeaseItem, RecipientContact
 from contracts.services import (
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
@@ -692,6 +692,14 @@ def _company_preflight_issues(company, cycle, period_end):
 
 def preveri_predhodno_kontrolo(cycle: MonthlyCycle) -> list[MonthlyBatch]:
     cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if not (
+        MonthlyCycle.Korak.PREDHODNA_KONTROLA
+        <= cycle.trenutni_korak
+        <= MonthlyCycle.Korak.PAKETNI_PREGLED
+    ):
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Predhodna kontrola je dovoljena samo v korakih 2 do 4."
+        )
     period_end = cycle.obdobje.replace(
         day=monthrange(cycle.obdobje.year, cycle.obdobje.month)[1]
     )
@@ -703,11 +711,18 @@ def preveri_predhodno_kontrolo(cycle: MonthlyCycle) -> list[MonthlyBatch]:
             if any(issue["severity"] == "BLOCKER" for issue in issues)
             else MonthlyBatch.PreflightStatus.PASSED
         )
+        updates = {
+            "preflight_status": status,
+            "preflight_checked_at": timezone.now(),
+            "preflight_issues": issues,
+        }
+        if status == MonthlyBatch.PreflightStatus.BLOCKED:
+            updates["calculation_status"] = (
+                MonthlyBatch.CalculationStatus.NOT_CALCULATED
+            )
         with transaction.atomic():
             MonthlyBatch.objects.filter(pk=batch.pk).update(
-                preflight_status=status,
-                preflight_checked_at=timezone.now(),
-                preflight_issues=issues,
+                **updates,
             )
         batch.refresh_from_db()
         checked.append(batch)
@@ -1625,7 +1640,7 @@ def _primerjaj_delta_np(
 
 
 def _izracunaj_vrstice_np(
-    lease: Lease, obdobje_od: date, obdobje_do: date
+    lease: Lease, obdobje_od: date, obdobje_do: date, *, validate_eslog: bool = True
 ) -> tuple[InvoiceLine, ...]:
     vrstice = []
     postavke = LeaseItem.objects.filter(lease=lease).select_related(
@@ -1649,10 +1664,14 @@ def _izracunaj_vrstice_np(
                     f"{unit.oznaka}, {property.naziv} · "
                     f"Pogodba št. {pogodba.oznaka_pogodbe}"
                 ),
-                ddv_eslog_koda=_preveri_eslog_kodo(
-                    izracun.ddv_nacin_obracuna,
-                    postavka.vat_regime.eslog_koda,
-                    f"DDV režim {postavka.vat_regime.sifra}",
+                ddv_eslog_koda=(
+                    _preveri_eslog_kodo(
+                        izracun.ddv_nacin_obracuna,
+                        postavka.vat_regime.eslog_koda,
+                        f"DDV režim {postavka.vat_regime.sifra}",
+                    )
+                    if validate_eslog
+                    else ""
                 ),
                 **vars(izracun),
             )
@@ -1706,3 +1725,295 @@ def izracunaj_kandidata(
     delta = _primerjaj_delta_np(osnutek, vrstice)
     izjeme.extend(r for r in delta.razlage if r.koda != "BREZ_RAZLIKE")
     return RacunKandidat(vrstice, skupaj, True, tuple(izjeme))
+
+
+CALCULATION_SNAPSHOT_VERSION = 2
+
+
+def _decimal_string(value: Decimal | None) -> str | None:
+    return format(value, "f") if value is not None else None
+
+
+def _previous_invoice_snapshot(invoice_id: int | None) -> dict | None:
+    if invoice_id is None:
+        return None
+    invoice = Invoice.objects.get(pk=invoice_id)
+    total = invoice.skupaj_z_ddv
+    if total is None:
+        total = sum(
+            InvoiceLine.objects.filter(invoice=invoice).values_list("skupaj", flat=True),
+            Decimal("0.00"),
+        )
+    return {
+        "id": invoice.pk,
+        "number": invoice.stevilka,
+        "period_start": invoice.obdobje_od.isoformat(),
+        "period_end": invoice.obdobje_do.isoformat(),
+        "total": _decimal_string(total),
+        "issuer": {
+            "name": invoice.izdajatelj_naziv,
+            "address": invoice.izdajatelj_naslov,
+            "country": invoice.izdajatelj_drzava_koda,
+            "vat_registered": invoice.izdajatelj_identificiran_za_ddv,
+            "tax_number": invoice.izdajatelj_davcna_stevilka,
+            "registration_number": invoice.izdajatelj_maticna_stevilka,
+            "iban": invoice.izdajatelj_trr,
+        },
+        "recipient": {
+            "type": invoice.prejemnik_tip,
+            "name": invoice.prejemnik_naziv,
+            "address": invoice.prejemnik_naslov,
+            "country": invoice.prejemnik_drzava_koda,
+            "vat_registered": invoice.prejemnik_identificiran_za_ddv,
+            "tax_number": invoice.prejemnik_davcna_stevilka,
+            "vat_id": invoice.prejemnik_ddv_identifikacijska_stevilka,
+            "registration_number": invoice.prejemnik_maticna_stevilka,
+        },
+        "contract_reference": invoice.oznaka_pogodbe,
+        "property_label": invoice.objekt_naziv,
+    }
+
+
+def _previous_month_archived_snapshot(lease, period_start: date) -> dict:
+    previous_end = period_start - timedelta(days=1)
+    previous_start = previous_end.replace(day=1)
+    invoice = (
+        Invoice.objects.filter(
+            company=lease.unit.property.company,
+            lease=lease,
+            document_type=Invoice.DocumentType.NP,
+            status=Invoice.Status.ARHIVIRAN_NI_IZDAN,
+            obdobje_od=previous_start,
+            obdobje_do=previous_end,
+        )
+        .exclude(razlog_arhiviranja=MIGRACIJSKI_RAZLOG)
+        .order_by("-datum_izdaje", "-pk")
+        .first()
+    )
+    return {
+        "exists": invoice is not None,
+        "invoice_id": invoice.pk if invoice else None,
+        "period_start": invoice.obdobje_od.isoformat() if invoice else None,
+        "period_end": invoice.obdobje_do.isoformat() if invoice else None,
+        "archive_reason": invoice.razlog_arhiviranja if invoice else None,
+    }
+
+
+def _monthly_candidate(lease, period_start, period_end, issue_date):
+    lines = _izracunaj_vrstice_np(
+        lease, period_start, period_end, validate_eslog=False
+    )
+    total = sum((line.skupaj for line in lines), Decimal("0.00"))
+    draft = Invoice(
+        company=lease.unit.property.company,
+        lease=lease,
+        document_type=Invoice.DocumentType.NP,
+        status=Invoice.Status.OSNUTEK,
+        datum_izdaje=issue_date,
+        obdobje_od=period_start,
+        obdobje_do=period_end,
+    )
+    delta = _primerjaj_delta_np(draft, lines)
+    if not lines:
+        start, end = efektivna_veljavnost_pogodbe(lease)
+        reason = (
+            "Pogodba ne velja v tem obdobju"
+            if not dnevi_v_obdobju(period_start, period_end, start, end)
+            else "Pogodba nima obračunljivih postavk v tem obdobju"
+        )
+        exceptions = tuple(
+            item for item in delta.razlage if item.koda != "BREZ_RAZLIKE"
+        )
+        candidate = RacunKandidat((), total, False, exceptions, reason)
+    else:
+        exceptions = [
+            DeltaRazlaga(line.lease_item_id, "SORAZMERNO", "Sorazmerni obračun postavke")
+            for line in lines
+            if line.je_sorazmerno
+        ]
+        exceptions.extend(item for item in delta.razlage if item.koda != "BREZ_RAZLIKE")
+        candidate = RacunKandidat(lines, total, True, tuple(exceptions))
+    return candidate, delta
+
+
+def _calculation_snapshot(batch, cycle, issues):
+    company = batch.company
+    period_end = cycle.obdobje.replace(
+        day=monthrange(cycle.obdobje.year, cycle.obdobje.month)[1]
+    )
+    blockers = sorted(
+        (issue.copy() for issue in issues if issue["severity"] == "BLOCKER"),
+        key=lambda item: (item["code"], item["model"], item["object_id"], item.get("field") or ""),
+    )
+    warnings = sorted(
+        (issue.copy() for issue in issues if issue["severity"] == "WARNING"),
+        key=lambda item: (item["code"], item["model"], item["object_id"], item.get("field") or ""),
+    )
+    base = {
+        "schema_version": CALCULATION_SNAPSHOT_VERSION,
+        "company_id": company.pk,
+        "period_start": cycle.obdobje.isoformat(),
+        "period_end": period_end.isoformat(),
+        "issue_date": cycle.datum_izdaje.isoformat(),
+        "preflight_warnings": warnings,
+        "blockers": blockers,
+        "candidates": [],
+    }
+    if blockers:
+        return base
+
+    signatory = izberi_veljavnega_podpisnika(company, cycle.datum_izdaje)
+    base["company"] = {
+        "id": company.pk,
+        "name": company.naziv,
+        "address": company.naslov,
+        "country": company.drzava_koda,
+        "tax_number": company.davcna_stevilka,
+        "registration_number": company.maticna_stevilka,
+        "vat_registered": company.ddv_zavezanec,
+        "iban": company.trr,
+        "default_payment_due_days": company.rok_placila_dni_privzeto,
+        "logo_source": company.logotip.name,
+        "logo_checksum": company.logotip_checksum or None,
+        "signatory": {
+            "id": signatory.pk,
+            "name": signatory.ime_priimek,
+            "function": signatory.funkcija,
+            "signature_source": signatory.podpis_slika.name,
+            "signature_checksum": signatory.podpis_checksum or None,
+        },
+    }
+    leases = Lease.objects.filter(
+        unit__property__company=company,
+        arhivirana=False,
+        unit__property__aktivna=True,
+        unit__aktivna=True,
+        tenant__aktiven=True,
+    ).select_related("tenant", "unit__property__company").order_by("pk")
+    for lease in leases:
+        start, end = efektivna_veljavnost_pogodbe(lease)
+        if not dnevi_v_obdobju(cycle.obdobje, period_end, start, end):
+            continue
+        candidate, delta = _monthly_candidate(
+            lease, cycle.obdobje, period_end, cycle.datum_izdaje
+        )
+        tenant = lease.tenant
+        contacts = RecipientContact.objects.filter(
+            lease=lease, aktiven=True
+        ).order_by("pk")
+        exceptions = sorted(
+            ({"code": item.koda, "message": item.opis, "lease_item_id": item.lease_item_id} for item in candidate.izjeme),
+            key=lambda item: (item["code"], item["lease_item_id"] or 0, item["message"]),
+        )
+        base["candidates"].append({
+            "lease_id": lease.pk,
+            "contract_reference": lease.oznaka_pogodbe,
+            "property_id": lease.unit.property_id,
+            "property_label": lease.unit.property.naziv,
+            "unit_id": lease.unit_id,
+            "unit_label": lease.unit.oznaka,
+            "tenant": {
+                "id": tenant.pk, "type": tenant.tip, "name": tenant.naziv,
+                "address": tenant.naslov, "country": tenant.drzava_koda,
+                "tax_number": tenant.davcna_stevilka,
+                "vat_id": tenant.ddv_identifikacijska_stevilka,
+                "registration_number": tenant.maticna_stevilka,
+                "vat_registered": tenant.identificiran_za_ddv,
+                "email": tenant.email,
+            },
+            "recipient_contacts": [
+                {
+                    "id": contact.pk,
+                    "email": contact.email,
+                    "role": contact.vloga,
+                    "channel": contact.kanal,
+                }
+                for contact in contacts
+            ],
+            "payment_due_days": lease.rok_placila_dni,
+            "due_date": (cycle.datum_izdaje + timedelta(days=lease.rok_placila_dni)).isoformat(),
+            "will_issue": candidate.se_izda,
+            "non_issue_reason": candidate.razlog_neizdaje,
+            "lines": [{
+                "lease_item_id": line.lease_item_id, "description": line.opis,
+                "net": _decimal_string(line.osnova),
+                "vat_rate": _decimal_string(line.ddv_stopnja),
+                "vat": _decimal_string(line.ddv_znesek),
+                "total": _decimal_string(line.skupaj),
+                "vat_method": line.ddv_nacin_obracuna,
+                "vat_clause": line.ddv_klavzula,
+                "vat_summary_group": line.ddv_rekap_skupina,
+                "proportional": line.je_sorazmerno,
+            } for line in sorted(candidate.vrstice, key=lambda line: (line.lease_item_id or 0, line.opis))],
+            "totals": {
+                "net": _decimal_string(sum((line.osnova for line in candidate.vrstice), Decimal("0.00"))),
+                "vat": _decimal_string(sum((line.ddv_znesek for line in candidate.vrstice), Decimal("0.00"))),
+                "total": _decimal_string(candidate.skupaj_z_ddv),
+            },
+            "exceptions": exceptions,
+            "previous_invoice": _previous_invoice_snapshot(delta.prejsnji_racun_id),
+            "first_issue": delta.prejsnji_racun_id is None,
+            "previous_month_archived_not_issued": (
+                _previous_month_archived_snapshot(lease, cycle.obdobje)
+            ),
+            "lease_state": {
+                "type": lease.tip_trajanja, "status": lease.status,
+                "start_date": lease.datum_zacetka.isoformat(),
+                "end_date": lease.datum_konca.isoformat() if lease.datum_konca else None,
+                "termination_date": lease.datum_prenehanja.isoformat() if lease.datum_prenehanja else None,
+                "automatic_extension": lease.samodejno_podaljsanje,
+            },
+        })
+    return base
+
+
+def aktivni_izracuni_mesecnega_cikla(cycle: MonthlyCycle):
+    return cycle.batches.filter(
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED,
+        calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+    )
+
+
+def izracunaj_mesecne_kandidate(
+    cycle: MonthlyCycle, *, samo_brez_aktivnega_izracuna: bool = False
+) -> list[MonthlyBatch]:
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED:
+        if not samo_brez_aktivnega_izracuna:
+            raise NeveljavenPrehodMesecnegaCikla(
+                "V koraku 4 je dovoljen samo izračun novih upravičenih podjetij."
+            )
+    elif cycle.trenutni_korak != MonthlyCycle.Korak.IZRACUN_OSNUTKOV:
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Izračun je dovoljen samo v koraku 3 ali 4."
+        )
+    period_end = cycle.obdobje.replace(
+        day=monthrange(cycle.obdobje.year, cycle.obdobje.month)[1]
+    )
+    results = []
+    batches = MonthlyBatch.objects.filter(
+        cycle=cycle, preflight_status=MonthlyBatch.PreflightStatus.PASSED
+    )
+    if samo_brez_aktivnega_izracuna:
+        batches = batches.exclude(
+            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
+        )
+    batches = batches.select_related("company").order_by("company_id")
+    for batch in batches:
+        issues = _company_preflight_issues(batch.company, cycle, period_end)
+        snapshot = _calculation_snapshot(batch, cycle, issues)
+        status = (
+            MonthlyBatch.CalculationStatus.BLOCKED
+            if snapshot["blockers"]
+            else MonthlyBatch.CalculationStatus.CALCULATED
+        )
+        with transaction.atomic():
+            MonthlyBatch.objects.filter(pk=batch.pk).update(
+                calculation_status=status,
+                calculated_at=timezone.now(),
+                calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
+                calculation_snapshot=snapshot,
+            )
+        batch.refresh_from_db()
+        results.append(batch)
+    return results

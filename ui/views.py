@@ -1,4 +1,5 @@
 from calendar import monthrange
+from decimal import Decimal
 
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods
@@ -9,6 +10,8 @@ from contracts.services import dnevi_v_obdobju, efektivna_veljavnost_pogodbe
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
+    aktivni_izracuni_mesecnega_cikla,
+    izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
@@ -69,13 +72,24 @@ def mesecni_obracun(request):
     sporocilo_napake = None
     form_is_valid = form.is_valid() if request.method == "POST" and not action else False
 
-    if (
-        request.method == "POST"
-        and action == "rerun_preflight"
-        and cycle
-        and cycle.trenutni_korak >= MonthlyCycle.Korak.PREDHODNA_KONTROLA
-    ):
-        preveri_predhodno_kontrolo(cycle)
+    if request.method == "POST" and action == "rerun_preflight" and cycle:
+        if (
+            MonthlyCycle.Korak.PREDHODNA_KONTROLA
+            <= cycle.trenutni_korak
+            <= MonthlyCycle.Korak.PAKETNI_PREGLED
+        ):
+            preveri_predhodno_kontrolo(cycle)
+        return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "rerun_calculation" and cycle:
+        if cycle.trenutni_korak == MonthlyCycle.Korak.IZRACUN_OSNUTKOV:
+            izracunaj_mesecne_kandidate(cycle)
+        return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "refresh_review" and cycle:
+        if cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED:
+            preveri_predhodno_kontrolo(cycle)
+            izracunaj_mesecne_kandidate(
+                cycle, samo_brez_aktivnega_izracuna=True
+            )
         return redirect("ui:mesecni_obracun")
     if request.method == "POST" and action == "continue_step3" and cycle:
         if (
@@ -84,7 +98,22 @@ def mesecni_obracun(request):
                 preflight_status=MonthlyBatch.PreflightStatus.PASSED
             ).exists()
         ):
-            premakni_mesecni_cikel(cycle, MonthlyCycle.Korak.IZRACUN_OSNUTKOV)
+            cycle = premakni_mesecni_cikel(
+                cycle, MonthlyCycle.Korak.IZRACUN_OSNUTKOV
+            )
+            izracunaj_mesecne_kandidate(cycle)
+        return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "continue_step4" and cycle:
+        passed = cycle.batches.filter(
+            preflight_status=MonthlyBatch.PreflightStatus.PASSED
+        )
+        if (
+            aktivni_izracuni_mesecnega_cikla(cycle).exists()
+            and not passed.exclude(
+                calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
+            ).exists()
+        ):
+            premakni_mesecni_cikel(cycle, MonthlyCycle.Korak.PAKETNI_PREGLED)
         return redirect("ui:mesecni_obracun")
 
     if request.method == "POST":
@@ -123,6 +152,26 @@ def mesecni_obracun(request):
         for batch in batches:
             for issue in batch.preflight_issues:
                 issue["location"] = _preflight_location(issue, batch.company, cycle)
+            snapshot = batch.calculation_snapshot or {}
+            batch.is_active_calculation = (
+                batch.preflight_status == MonthlyBatch.PreflightStatus.PASSED
+                and batch.calculation_status
+                == MonthlyBatch.CalculationStatus.CALCULATED
+            )
+            candidates = (
+                snapshot.get("candidates", []) if batch.is_active_calculation else []
+            )
+            batch.calculation_summary = {
+                "candidates": len(candidates),
+                "issued": sum(item.get("will_issue", False) for item in candidates),
+                "total": sum(
+                    Decimal(item.get("totals", {}).get("total", "0.00"))
+                    for item in candidates if item.get("will_issue", False)
+                ),
+                "issues": len(snapshot.get("preflight_warnings", []))
+                + sum(len(item.get("exceptions", [])) for item in candidates),
+                "blockers": snapshot.get("blockers", []),
+            }
         passed = sum(batch.preflight_status == MonthlyBatch.PreflightStatus.PASSED for batch in batches)
         blocked = sum(batch.preflight_status == MonthlyBatch.PreflightStatus.BLOCKED for batch in batches)
         summary = {
@@ -133,6 +182,15 @@ def mesecni_obracun(request):
             "not_checked": sum(batch.preflight_status == MonthlyBatch.PreflightStatus.NOT_CHECKED for batch in batches),
         }
 
+    step3_complete = bool(
+        cycle
+        and aktivni_izracuni_mesecnega_cikla(cycle).exists()
+        and not cycle.batches.filter(
+            preflight_status=MonthlyBatch.PreflightStatus.PASSED
+        ).exclude(
+            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED
+        ).exists()
+    )
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -150,6 +208,8 @@ def mesecni_obracun(request):
             "preflight_summary": summary,
             "step2_all_passed": bool(summary and summary["passed"] == summary["total"]),
             "step2_partial": bool(summary and summary["passed"] and summary["blocked"]),
+            "step3_complete": step3_complete,
+            "step3_can_continue": step3_complete,
         },
     )
 

@@ -461,6 +461,8 @@ Vrstice `✓ Enako` so privzeto potrjene. Vrstice `⚠` zahtevajo posamično pot
 
 Vsak račun se ob potrditvi zaklene in oštevilči v svoji atomarni transakciji. Če se postopek prekine sredi paketa, že potrjeni računi ostanejo veljavni, preostali pa ostanejo osnutki in se lahko varno nadaljujejo pozneje.
 
+Dokler je cikel v koraku 4 **Paketni pregled**, se lahko prej blokirano podjetje po uspešni ponovni kontroli in izračunu pridruži istemu mesečnemu paketu. Prehod v korak 5 **Potrditev paketa** zamrzne članstvo paketa in posnetke izračuna; nadaljnje ponovne kontrole ali izračuni jih ne spreminjajo.
+
 V uporabniškem korakovniku je osem operativnih korakov združenih v šest vidnih korakov (§16.1): paketni pregled in obravnava izjem sta en korak **Pregled**, pošiljanje, preverjanje, arhiviranje in zbirno obvestilo pa so del koraka **Zaključek**. Zelena kljukica se prikaže šele, ko so uspešno izvedena vsa opravila znotraj vidnega koraka.
 
 ### 7.5 Statusi dokumentov

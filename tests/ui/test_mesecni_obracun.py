@@ -278,7 +278,8 @@ def test_vsa_uspesna_podjetja_nadaljujejo_na_step3_in_oznacijo_step2_zeleno(clie
     content = response.content.decode()
 
     assert MonthlyCycle.objects.get().trenutni_korak == 3
-    assert "Izračun osnutkov še ni implementiran." in content
+    assert "Izračun osnutkov" in content
+    assert "Računi še niso ustvarjeni." in content
     assert "wizard-step is-completed" in content
     assert "eSLOG" not in content
     assert "XML" not in content

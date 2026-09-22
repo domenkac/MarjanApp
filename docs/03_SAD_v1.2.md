@@ -220,6 +220,8 @@ Uporabnik → ui: »Nov mesečni paket«
     Zaključek: poslani / neizdani / neuspešni / arhivirani
 ```
 
+V koraku 4 se lahko prej blokirani `MonthlyBatch` po uspešni ponovni kontroli in izračunu pridruži istemu paketu; pregled se osveži brez premika cikla nazaj. Vstop v korak 5 zamrzne članstvo paketa in trajne posnetke izračuna, zato backend od tega koraka dalje zavrne njihove ponovne izračune in predhodne kontrole.
+
 **Kritična točka atomarnosti:** vsak potrjeni račun ima svojo `transaction.atomic()` transakcijo. Številka se dodeli šele ob potrditvi tega računa, zato prekinitev mesečnega postopka ne povzroči praznih številk in ne razveljavi že potrjenih računov. Generiranje datotek, pošiljanje in arhiviranje potekajo zunaj transakcije baze; stanje računa omogoča varno nadaljevanje. Paket je zato lahko delno zaključen, vendar je vsak posamezni račun notranje konsistenten.
 
 ### 6.2 Ročna storitvena faktura
