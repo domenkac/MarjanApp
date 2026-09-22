@@ -1,3 +1,4 @@
+from calendar import monthrange
 from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -9,6 +10,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 from django.db.models import Q
+from django.utils import timezone
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence
@@ -16,17 +18,27 @@ from companies.services import (
     dodeli_naslednjo_stevilko,
     izberi_veljavnega_podpisnika,
     shrani_nespremenljiv_asset,
+    veljavna_potrditev_ddv,
+    veljavna_potrditev_vzorca,
     veljavni_podpisniki_na_dan,
 )
 from contracts.models import IndexationEvent, Lease, LeaseItem
 from contracts.services import (
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
+    efektivna_veljavnost_postavke,
     izracunaj_postavko,
 )
 from core.eslog_konfiguracija import razresi_eslog_konfiguracijo
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
+from core.validators import (
+    normaliziraj_iban,
+    preveri_davcno_stevilko,
+    preveri_iban,
+    preveri_kodo_drzave,
+    preveri_maticno_stevilko,
+)
 
 from .models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 
@@ -175,6 +187,531 @@ def premakni_mesecni_cikel(cycle: MonthlyCycle, korak: int) -> MonthlyCycle:
         svezi.trenutni_korak = korak
         svezi.save(update_fields=["trenutni_korak", "updated_at"])
         return svezi
+
+
+def _preflight_issue(code, message, model, object_id, field=None, *, warning=False):
+    return {
+        "code": code,
+        "severity": "WARNING" if warning else "BLOCKER",
+        "message": message,
+        "model": model,
+        "object_id": object_id,
+        "field": field,
+    }
+
+
+def _confirmation_issues(company):
+    issues = []
+    for result, missing_code, stale_code, label in (
+        (
+            veljavna_potrditev_ddv(company),
+            "DDV_POTRDITEV_MANJKA",
+            "DDV_POTRDITEV_ZASTARELA",
+            "Potrditev nastavitev DDV",
+        ),
+        (
+            veljavna_potrditev_vzorca(company),
+            "VZOREC_POTRDITEV_MANJKA",
+            "VZOREC_POTRDITEV_ZASTARELA",
+            "Potrditev vzorca računa",
+        ),
+    ):
+        if result.stanje == "missing":
+            issues.append(
+                _preflight_issue(
+                    missing_code,
+                    f"{label} manjka.",
+                    "Company",
+                    company.pk,
+                )
+            )
+        elif result.stanje == "stale":
+            issues.append(
+                _preflight_issue(
+                    stale_code,
+                    f"{label} ni več veljavna za trenutno stanje.",
+                    "Company",
+                    company.pk,
+                )
+            )
+    return issues
+
+
+def _signatory_issues(company, issue_date):
+    count = veljavni_podpisniki_na_dan(company, issue_date).count()
+    if count == 0:
+        return [
+            _preflight_issue(
+                "PODPISNIK_MANJKA",
+                f"Za datum izdaje {issue_date:%d. %m. %Y} ni veljavnega podpisnika.",
+                "Company",
+                company.pk,
+            )
+        ]
+    if count > 1:
+        return [
+            _preflight_issue(
+                "PODPISNIK_PREKRIVANJE",
+                "Za datum izdaje je veljavnih več podpisnikov.",
+                "Company",
+                company.pk,
+            )
+        ]
+    return []
+
+
+def _validation_issue(code, instance, field, message):
+    return _preflight_issue(code, message, type(instance).__name__, instance.pk, field)
+
+
+def _field_validation_issues(instance, fields, code):
+    excluded = {field.name for field in instance._meta.fields} - set(fields)
+    try:
+        instance.clean_fields(exclude=excluded)
+    except ValidationError as exc:
+        return [
+            _validation_issue(code, instance, field, str(messages[0]))
+            for field, messages in exc.message_dict.items()
+        ]
+    return []
+
+
+def _company_validation_issues(company):
+    issues = _field_validation_issues(
+        company,
+        {"naziv", "davcna_stevilka", "maticna_stevilka", "naslov", "drzava_koda", "trr"},
+        "PODJETJE_NEVELJAVNO",
+    )
+    for field, message in (
+        ("naziv", "Manjka naziv podjetja."),
+        ("naslov", "Manjka naslov podjetja."),
+        ("davcna_stevilka", "Manjka davčna številka podjetja."),
+        ("maticna_stevilka", "Manjka matična številka podjetja."),
+        ("drzava_koda", "Manjka država podjetja."),
+        ("trr", "Manjka račun podjetja."),
+    ):
+        if not str(getattr(company, field, "") or "").strip():
+            issues.append(
+                _validation_issue("PODJETJE_NEVELJAVNO", company, field, message)
+            )
+    if company.davcna_stevilka and not preveri_davcno_stevilko(
+        company.davcna_stevilka
+    ):
+        issues.append(
+            _validation_issue(
+                "PODJETJE_NEVELJAVNO",
+                company,
+                "davcna_stevilka",
+                "Davčna številka podjetja ni veljavna.",
+            )
+        )
+    if company.maticna_stevilka and not preveri_maticno_stevilko(
+        company.maticna_stevilka
+    ):
+        issues.append(
+            _validation_issue(
+                "PODJETJE_NEVELJAVNO",
+                company,
+                "maticna_stevilka",
+                "Matična številka podjetja ni veljavna.",
+            )
+        )
+    try:
+        preveri_kodo_drzave(company.drzava_koda)
+    except ValidationError as exc:
+        issues.append(
+            _validation_issue(
+                "PODJETJE_NEVELJAVNO",
+                company,
+                "drzava_koda",
+                str(exc.messages[0]),
+            )
+        )
+    if company.trr and not preveri_iban(normaliziraj_iban(company.trr)):
+        issues.append(
+            _validation_issue(
+                "PODJETJE_NEVELJAVNO",
+                company,
+                "trr",
+                "IBAN podjetja ni veljaven.",
+            )
+        )
+    return issues
+
+
+def _tenant_validation_issues(tenant):
+    issues = _field_validation_issues(
+        tenant,
+        {
+            "tip", "naziv", "davcna_stevilka", "ddv_identifikacijska_stevilka",
+            "maticna_stevilka", "naslov", "drzava_koda", "identificiran_za_ddv",
+            "ddv_zavezanec_s_polnim_odbitkom",
+        },
+        "NAJEMNIK_NEVELJAVEN",
+    )
+    for field, message in (
+        ("naziv", "Manjka naziv najemnika."),
+        ("naslov", "Manjka naslov najemnika."),
+        ("drzava_koda", "Manjka država najemnika."),
+    ):
+        if not str(getattr(tenant, field, "") or "").strip():
+            issues.append(
+                _validation_issue("NAJEMNIK_NEVELJAVEN", tenant, field, message)
+            )
+    try:
+        preveri_kodo_drzave(tenant.drzava_koda)
+    except ValidationError as exc:
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "drzava_koda",
+                str(exc.messages[0]),
+            )
+        )
+    tax_number = (tenant.davcna_stevilka or "").strip()
+    registration_number = (tenant.maticna_stevilka or "").strip()
+    if (tenant.tip == tenant.Tip.PRAVNA_OSEBA or tenant.identificiran_za_ddv) and not tax_number:
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "davcna_stevilka",
+                "Davčna številka pravne osebe je obvezna.",
+            )
+        )
+    if tenant.drzava_koda == "SI" and tax_number and not preveri_davcno_stevilko(
+        tax_number
+    ):
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "davcna_stevilka",
+                "Davčna številka najemnika ni veljavna.",
+            )
+        )
+    if (
+        tenant.tip == tenant.Tip.PRAVNA_OSEBA
+        and tenant.drzava_koda == "SI"
+        and not registration_number
+    ):
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "maticna_stevilka",
+                "Matična številka slovenske pravne osebe je obvezna.",
+            )
+        )
+    if (
+        tenant.drzava_koda == "SI"
+        and registration_number
+        and not preveri_maticno_stevilko(registration_number)
+    ):
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "maticna_stevilka",
+                "Matična številka najemnika ni veljavna.",
+            )
+        )
+    if (
+        tenant.identificiran_za_ddv
+        and tenant.drzava_koda != "SI"
+        and not (tenant.ddv_identifikacijska_stevilka or "").strip()
+    ):
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "ddv_identifikacijska_stevilka",
+                "Tuji najemnik, identificiran za DDV, mora imeti DDV identifikacijsko številko.",
+            )
+        )
+    if tenant.ddv_zavezanec_s_polnim_odbitkom and not tenant.identificiran_za_ddv:
+        issues.append(
+            _validation_issue(
+                "NAJEMNIK_NEVELJAVEN",
+                tenant,
+                "ddv_zavezanec_s_polnim_odbitkom",
+                "Polni odbitek DDV zahteva identifikacijo za DDV.",
+            )
+        )
+    return issues
+
+
+def _source_validation_issues(lease, items):
+    issues = _field_validation_issues(
+        lease.unit.property,
+        {"naziv", "naslov"},
+        "NEPREMICNINA_NEVELJAVNA",
+    )
+    issues.extend(
+        _field_validation_issues(
+            lease.unit, {"oznaka", "tip_enote", "povrsina_m2"}, "ENOTA_NEVELJAVNA"
+        )
+    )
+    tenant = lease.tenant
+    for instance, field, code, message in (
+        (lease.unit.property, "naziv", "NEPREMICNINA_NEVELJAVNA", "Manjka naziv nepremičnine."),
+        (lease.unit.property, "naslov", "NEPREMICNINA_NEVELJAVNA", "Manjka naslov nepremičnine."),
+        (lease.unit, "oznaka", "ENOTA_NEVELJAVNA", "Manjka oznaka enote."),
+        (lease, "oznaka_pogodbe", "POGODBA_NEVELJAVNA", "Manjka oznaka pogodbe."),
+    ):
+        if not str(getattr(instance, field, "") or "").strip():
+            issues.append(_validation_issue(code, instance, field, message))
+
+    try:
+        issues.extend(
+            _field_validation_issues(
+                lease,
+                {
+                    "oznaka_pogodbe", "tip_trajanja", "datum_zacetka",
+                    "datum_konca", "samodejno_podaljsanje",
+                    "obdobje_podaljsanja_mesecev", "odpovedni_rok_mesecev",
+                    "datum_odpovedi", "datum_prenehanja", "status",
+                    "rok_placila_dni", "ima_klavzulo_indeksacije",
+                    "opis_pogoja_indeksacije", "tip_pogoja_indeksacije",
+                    "prag_spremembe_odstotek",
+                },
+                "POGODBA_NEVELJAVNA",
+            )
+        )
+        lease.clean()
+    except ValidationError as exc:
+        for field, messages in exc.message_dict.items():
+            issues.append(
+                _validation_issue(
+                    "POGODBA_NEVELJAVNA", lease, field, str(messages[0])
+                )
+            )
+
+    issues.extend(_tenant_validation_issues(tenant))
+
+    for item in items:
+        issues.extend(
+            _field_validation_issues(
+                item,
+                {
+                    "naziv_postavke", "znesek_neto_mesecno", "referenca_listine",
+                    "datum_reference", "datum_zacetka_postavke",
+                    "datum_prenehanja_postavke", "indeks_ob_osnovi",
+                    "datum_osnove_indeksacije", "osnovna_najemnina_ob_sklenitvi",
+                },
+                "POSTAVKA_NEVELJAVNA",
+            )
+        )
+        if not item.naziv_postavke.strip():
+            issues.append(
+                _validation_issue(
+                    "POSTAVKA_NEVELJAVNA",
+                    item,
+                    "naziv_postavke",
+                    "Manjka naziv postavke.",
+                )
+            )
+        if item.znesek_neto_mesecno <= 0:
+            issues.append(
+                _validation_issue(
+                    "POSTAVKA_NEVELJAVNA",
+                    item,
+                    "znesek_neto_mesecno",
+                    "Mesečni znesek postavke mora biti večji od nič.",
+                )
+            )
+        if lease.ima_klavzulo_indeksacije:
+            for field, message in (
+                ("indeks_ob_osnovi", "Manjka izhodiščni indeks postavke."),
+                ("datum_osnove_indeksacije", "Manjka datum osnove indeksacije."),
+            ):
+                if getattr(item, field) is None:
+                    issues.append(
+                        _validation_issue("POSTAVKA_NEVELJAVNA", item, field, message)
+                    )
+
+        regime = item.vat_regime
+        if regime.nacin_obracuna not in VatRegime.NacinObracuna.values:
+            issues.append(
+                _validation_issue(
+                    "DDV_REZIM_NEVELJAVEN",
+                    regime,
+                    "nacin_obracuna",
+                    "Način obračuna DDV ni veljaven.",
+                )
+            )
+        if regime.stopnja is None:
+            issues.append(
+                _validation_issue(
+                    "DDV_REZIM_NEVELJAVEN",
+                    regime,
+                    "stopnja",
+                    "Manjka stopnja DDV.",
+                )
+            )
+        if (
+            regime.nacin_obracuna
+            in {VatRegime.NacinObracuna.OPROSCENO, VatRegime.NacinObracuna.OBRNJENA_DAVCNA}
+            and not regime.klavzula.strip()
+        ):
+            issues.append(
+                _validation_issue(
+                    "DDV_REZIM_NEVELJAVEN",
+                    regime,
+                    "klavzula",
+                    "Za izbrani način obračuna DDV manjka klavzula.",
+                )
+            )
+        if not regime.rekapitulacijska_skupina.strip():
+            issues.append(
+                _validation_issue(
+                    "DDV_REZIM_NEVELJAVEN",
+                    regime,
+                    "rekapitulacijska_skupina",
+                    "Manjka rekapitulacijska skupina DDV.",
+                )
+            )
+        if regime.zahteva_referenco:
+            if not item.referenca_listine.strip():
+                issues.append(
+                    _validation_issue(
+                        "REFERENCA_LISTINE_MANJKA",
+                        item,
+                        "referenca_listine",
+                        "Manjka obvezna referenca listine.",
+                    )
+                )
+            if item.datum_reference is None:
+                issues.append(
+                    _validation_issue(
+                        "DATUM_REFERENCE_MANJKA",
+                        item,
+                        "datum_reference",
+                        "Manjka datum obvezne reference.",
+                    )
+                )
+    return issues
+
+
+def _lease_warning_issues(lease, items, period_start, period_end):
+    issues = []
+    start, end = efektivna_veljavnost_pogodbe(lease)
+    if start > period_start or (end is not None and end < period_end):
+        issues.append(
+            _preflight_issue(
+                "SORAZMERNO_OBDOBJE_POGODBE",
+                "Pogodba je v mesecu veljavna le del obdobja.",
+                "Lease",
+                lease.pk,
+                warning=True,
+            )
+        )
+    if lease.tip_trajanja == Lease.TipTrajanja.DOLOCEN_CAS and lease.datum_konca:
+        if period_start <= lease.datum_konca <= period_end:
+            code, message = "POGODBA_POTECE_V_MESECU", "Pogodba poteče v izbranem mesecu."
+        elif period_end < lease.datum_konca <= period_end + timedelta(days=30):
+            code, message = "POGODBA_POTECE_V_30_DNEH", "Pogodba poteče v naslednjih 30 dneh."
+        else:
+            code = None
+        if code:
+            issues.append(_preflight_issue(code, message, "Lease", lease.pk, warning=True))
+    if lease.samodejno_podaljsanje and lease.datum_konca and period_start <= lease.datum_konca <= period_end:
+        issues.append(
+            _preflight_issue(
+                "SAMODEJNO_PODALJSANJE",
+                "Pogodba v mesecu doseže datum samodejnega podaljšanja.",
+                "Lease",
+                lease.pk,
+                warning=True,
+            )
+        )
+    if lease.status == Lease.Status.ODPOVEDANA and end and period_start <= end <= period_end:
+        issues.append(
+            _preflight_issue(
+                "ODPOVEDANA_ZADNJE_OBDOBJE",
+                "Odpovedana pogodba je v zadnjem obračunskem obdobju.",
+                "Lease",
+                lease.pk,
+                warning=True,
+            )
+        )
+    for item in items:
+        item_start, item_end = efektivna_veljavnost_postavke(item)
+        if item_start > period_start or (item_end is not None and item_end < period_end):
+            issues.append(
+                _preflight_issue(
+                    "SORAZMERNO_OBDOBJE_POSTAVKE",
+                    "Postavka je v mesecu veljavna le del obdobja.",
+                    "LeaseItem",
+                    item.pk,
+                    warning=True,
+                )
+            )
+    return issues
+
+
+def _company_preflight_issues(company, cycle, period_end):
+    issues = (
+        _confirmation_issues(company)
+        + _signatory_issues(company, cycle.datum_izdaje)
+        + _company_validation_issues(company)
+    )
+    leases = Lease.objects.filter(
+        unit__property__company=company,
+        arhivirana=False,
+        unit__property__aktivna=True,
+        unit__aktivna=True,
+        tenant__aktiven=True,
+    ).select_related("tenant", "unit__property__company")
+    for lease in leases.order_by("pk"):
+        start, end = efektivna_veljavnost_pogodbe(lease)
+        if not dnevi_v_obdobju(cycle.obdobje, period_end, start, end):
+            continue
+        items = []
+        for item in LeaseItem.objects.filter(lease=lease, arhivirana=False).select_related(
+            "vat_regime", "lease__tenant", "lease__unit__property__company"
+        ).order_by("pk"):
+            item_start, item_end = efektivna_veljavnost_postavke(item)
+            if dnevi_v_obdobju(cycle.obdobje, period_end, item_start, item_end):
+                items.append(item)
+        issues.extend(_source_validation_issues(lease, items))
+        issues.extend(_lease_warning_issues(lease, items, cycle.obdobje, period_end))
+    seen = set()
+    unique = []
+    for issue in issues:
+        identity = tuple(
+            issue[key]
+            for key in ("code", "severity", "model", "object_id", "field")
+        )
+        if identity not in seen:
+            seen.add(identity)
+            unique.append(issue)
+    return unique
+
+
+def preveri_predhodno_kontrolo(cycle: MonthlyCycle) -> list[MonthlyBatch]:
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    period_end = cycle.obdobje.replace(
+        day=monthrange(cycle.obdobje.year, cycle.obdobje.month)[1]
+    )
+    checked = []
+    for batch in MonthlyBatch.objects.filter(cycle=cycle).select_related("company").order_by("company_id"):
+        issues = _company_preflight_issues(batch.company, cycle, period_end)
+        status = (
+            MonthlyBatch.PreflightStatus.BLOCKED
+            if any(issue["severity"] == "BLOCKER" for issue in issues)
+            else MonthlyBatch.PreflightStatus.PASSED
+        )
+        with transaction.atomic():
+            MonthlyBatch.objects.filter(pk=batch.pk).update(
+                preflight_status=status,
+                preflight_checked_at=timezone.now(),
+                preflight_issues=issues,
+            )
+        batch.refresh_from_db()
+        checked.append(batch)
+    return checked
 
 
 def _razresi_eslog_snapshot(invoice: Invoice) -> dict:

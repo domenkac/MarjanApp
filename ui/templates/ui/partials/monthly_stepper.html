@@ -1,7 +1,7 @@
 <nav class="wizard-steps" aria-label="Koraki mesečnega obračuna">
   <div class="wizard-step{% if trenutni_korak == 1 %} is-active{% elif trenutni_korak > 1 %} is-completed{% endif %}"{% if trenutni_korak == 1 %} aria-current="step"{% endif %}><span>{% if trenutni_korak > 1 %}✓{% else %}1{% endif %}</span><strong>Izbira meseca</strong></div>
-  <div class="wizard-step{% if trenutni_korak == 2 %} is-active{% endif %}"{% if trenutni_korak == 2 %} aria-current="step"{% endif %}><span>2</span><strong>Predhodna kontrola</strong></div>
-  <div class="wizard-step"><span>3</span><strong>Izračun osnutkov</strong></div>
+  <div class="wizard-step{% if trenutni_korak == 2 %} is-active{% elif trenutni_korak > 2 and step2_all_passed %} is-completed{% elif trenutni_korak > 2 %} is-attention{% endif %}"{% if trenutni_korak == 2 %} aria-current="step"{% endif %}><span>{% if trenutni_korak > 2 and step2_all_passed %}✓{% elif trenutni_korak > 2 %}!{% else %}2{% endif %}</span><strong>Predhodna kontrola</strong></div>
+  <div class="wizard-step{% if trenutni_korak == 3 %} is-active{% endif %}"{% if trenutni_korak == 3 %} aria-current="step"{% endif %}><span>3</span><strong>Izračun osnutkov</strong></div>
   <div class="wizard-step"><span>4</span><strong>Paketni pregled Δ</strong></div>
   <div class="wizard-step"><span>5</span><strong>Potrditev paketa</strong></div>
   <div class="wizard-step"><span>6</span><strong>Zaključek ciklusa</strong></div>

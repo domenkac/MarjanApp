@@ -224,3 +224,85 @@ def test_konflikten_post_na_drugem_koraku_prikaze_napako_brez_obrazca(client):
     assert 'role="alert"' in vsebina
     assert "<form" not in vsebina
     assert MonthlyCycle.objects.get().datum_izdaje == date(2031, 2, 12)
+
+
+@pytest.mark.django_db
+def test_step2_prikaze_trajne_rezultate_in_brez_starega_placeholderja(client):
+    ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
+    client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    batch = MonthlyBatch.objects.get()
+
+    assert batch.preflight_status == MonthlyBatch.PreflightStatus.BLOCKED
+    assert batch.preflight_checked_at is not None
+    assert "DDV_POTRDITEV_MANJKA" not in content
+    assert "Potrditev nastavitev DDV manjka." in content
+    assert "Predhodna kontrola še ni implementirana." not in content
+    assert "eSLOG" not in content
+    assert "XML" not in content
+
+
+@pytest.mark.django_db
+def test_step2_brez_uspesnega_podjetja_ne_nadaljuje(client):
+    ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
+    client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+
+    response = client.post(
+        "/mesecni-obracun/", {"action": "continue_step3"}, follow=True
+    )
+
+    assert response.redirect_chain == [("/mesecni-obracun/", 302)]
+    assert MonthlyCycle.objects.get().trenutni_korak == 2
+
+
+@pytest.mark.django_db
+def test_vsa_uspesna_podjetja_nadaljujejo_na_step3_in_oznacijo_step2_zeleno(client):
+    ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
+    client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+    MonthlyBatch.objects.update(preflight_status=MonthlyBatch.PreflightStatus.PASSED)
+
+    response = client.post(
+        "/mesecni-obracun/", {"action": "continue_step3"}, follow=True
+    )
+    content = response.content.decode()
+
+    assert MonthlyCycle.objects.get().trenutni_korak == 3
+    assert "Izračun osnutkov še ni implementiran." in content
+    assert "wizard-step is-completed" in content
+    assert "eSLOG" not in content
+    assert "XML" not in content
+
+
+@pytest.mark.django_db
+def test_delni_step2_je_attention_in_se_lahko_ponovi_brez_pomika_nazaj(client):
+    ustvari_podjetje("Alfa d.o.o.", "15012557")
+    ustvari_podjetje("Beta d.o.o.", "69165028")
+    client.post(
+        "/mesecni-obracun/",
+        {"leto": "2031", "mesec": "2", "datum_izdaje": "2031-02-12"},
+    )
+    first_batch = MonthlyBatch.objects.order_by("pk").first()
+    MonthlyBatch.objects.filter(pk=first_batch.pk).update(
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED
+    )
+    client.post("/mesecni-obracun/", {"action": "continue_step3"})
+
+    response = client.get("/mesecni-obracun/")
+    assert "wizard-step is-attention" in response.content.decode()
+
+    response = client.post(
+        "/mesecni-obracun/", {"action": "rerun_preflight"}, follow=True
+    )
+    assert response.redirect_chain == [("/mesecni-obracun/", 302)]
+    assert MonthlyCycle.objects.get().trenutni_korak == 3

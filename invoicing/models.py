@@ -47,12 +47,24 @@ class MonthlyCycle(models.Model):
 
 
 class MonthlyBatch(models.Model):
+    class PreflightStatus(models.TextChoices):
+        NOT_CHECKED = "NOT_CHECKED", "Ni preverjeno"
+        PASSED = "PASSED", "Uspešno"
+        BLOCKED = "BLOCKED", "Blokirano"
+
     cycle = models.ForeignKey(
         MonthlyCycle,
         on_delete=models.PROTECT,
         related_name="batches",
     )
     company = models.ForeignKey("companies.Company", on_delete=models.PROTECT)
+    preflight_status = models.CharField(
+        max_length=11,
+        choices=PreflightStatus,
+        default=PreflightStatus.NOT_CHECKED,
+    )
+    preflight_checked_at = models.DateTimeField(null=True, blank=True)
+    preflight_issues = models.JSONField(default=list)
 
     class Meta:
         constraints = [  # noqa: RUF012
