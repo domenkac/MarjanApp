@@ -34,6 +34,7 @@ class Company(models.Model):
     )
     trr = models.CharField(max_length=34)
     logotip = models.FileField(upload_to=varno_ime_slike, validators=[preveri_sliko])
+    logotip_checksum = models.CharField(max_length=64, blank=True, editable=False)
     ddv_zavezanec = models.BooleanField(default=True)
     email_racunovodja = models.EmailField()
     email_posiljatelj = models.EmailField()
@@ -118,6 +119,7 @@ class Signatory(models.Model):
     podpis_slika = models.FileField(
         upload_to=varno_ime_slike, validators=[preveri_sliko]
     )
+    podpis_checksum = models.CharField(max_length=64, blank=True, editable=False)
     velja_od = models.DateField()
     velja_do = models.DateField(null=True, blank=True)
 
@@ -169,4 +171,42 @@ class NumberSequence(models.Model):
                 condition=(models.Q(tip="NP", leto=0) | models.Q(tip="ST", leto__gt=0)),
                 name="number_sequence_veljaven_tip_leto",
             ),
+        ]
+
+
+class VatSettingsConfirmation(models.Model):
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.PROTECT,
+        related_name="vat_settings_confirmations",
+    )
+    confirmed_at = models.DateTimeField(auto_now_add=True)
+    source_fingerprint = models.CharField(max_length=64)
+    fingerprint_schema_version = models.PositiveSmallIntegerField()
+
+    class Meta:
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["company", "-confirmed_at"]),
+        ]
+
+
+class CompanySampleConfirmation(models.Model):
+    company = models.ForeignKey(
+        Company,
+        on_delete=models.PROTECT,
+        related_name="sample_confirmations",
+    )
+    lease = models.ForeignKey(
+        "contracts.Lease",
+        on_delete=models.PROTECT,
+        related_name="sample_confirmations",
+    )
+    confirmed_at = models.DateTimeField(auto_now_add=True)
+    pdf_template_version = models.CharField(max_length=64)
+    source_fingerprint = models.CharField(max_length=64)
+    fingerprint_schema_version = models.PositiveSmallIntegerField()
+
+    class Meta:
+        indexes = [  # noqa: RUF012
+            models.Index(fields=["company", "-confirmed_at"]),
         ]

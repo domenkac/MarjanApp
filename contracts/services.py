@@ -8,7 +8,7 @@ from django.db import IntegrityError, transaction
 from django.db.models.deletion import ProtectedError
 
 from catalogs.models import VatRegime
-from companies.models import Company
+from companies.models import Company, CompanySampleConfirmation
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
 from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
@@ -499,6 +499,7 @@ def odloci_o_fizicnem_izbrisu(zapis, *, izrecna_potrditev=False) -> IzbrisOdloci
             (RecipientContact, "lease_id", "PODREJENI_ZAPISI"),
             (Invoice, "lease_id", "POVEZAN_RACUN"),
             (InvoiceLine, "lease_id", "POVEZAN_RACUN"),
+            (CompanySampleConfirmation, "lease_id", "POVEZANA_POTRDITEV"),
         ),
         LeaseItem: (
             (InvoiceLine, "lease_item_id", "POVEZAN_RACUN"),

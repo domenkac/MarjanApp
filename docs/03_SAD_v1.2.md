@@ -297,7 +297,7 @@ Uporabnik → ui: »Začni začetno nastavitev«
 
 **Varnostna meja vzorca:** način vzorca uporablja isto produkcijsko PDF-predlogo, ne uporablja pa storitve za dodelitev številke in ne sme ustvariti ali spreminjati `Invoice`, `NumberSequence`, `DeliveryAttempt`, `ArchivedFile` ali evidence izdanih računov. To mora biti preverljivo s testi storitev.
 
-**Zastarelost:** sprememba DDV-nastavitev razveljavi obe uporabnikovi potrditvi. Računovodsko pomembna sprememba ali sprememba PDF-predloge razveljavi potrditev vzorca; manjša vizualna sprememba ne razveljavi potrditve DDV. Natančna podatkovna struktura, stanja nadaljevanja čarovnika in razvrstitev sprememb sodijo v prihodnji FSD prvega zagona.
+**Zastarelost:** sprememba DDV-nastavitev razveljavi obe uporabnikovi potrditvi. Računovodsko pomembna sprememba ali sprememba PDF-predloge razveljavi potrditev vzorca; manjša vizualna sprememba ne razveljavi potrditve DDV. Podatkovno strukturo in current-state fingerprint semantiko potrditev določa `06_FSD_Potrditve_prvega_zagona_v1.0.md`; stanja nadaljevanja čarovnika ostajajo predmet prihodnje UI specifikacije.
 
 **Življenjski cikel začetnih podatkov:** vsak app, ki je lastnik poslovnega zapisa, izvede arhiviranje, ponovno aktivacijo in fizični izbris v svojem `services.py`. `ui` in Django admin ne kličeta `.delete()` neposredno. Skupni vmesnik storitve vrne strukturiran rezultat z najmanj `dovoljeno`, seznamom `razlogi` in `mozno_arhiviranje`; vsak razlog vsebuje stabilno kodo, človeku razumljivo sporočilo, vrsto povezave in število najdenih povezav.
 
