@@ -3,12 +3,13 @@
 {% block title %}Nadzorna plošča · Marjan{% endblock %}
 
 {% block content %}
-<header class="page-heading">
+<header class="page-heading dashboard-heading">
   <div>
     <p class="eyebrow">Pregled</p>
     <h1>Nadzorna plošča</h1>
     <p>Pregled trenutno evidentiranih podatkov.</p>
   </div>
+  <a class="button-primary dashboard-primary-action" href="{% url 'ui:mesecni_obracun' %}"><span class="material-symbols-outlined" aria-hidden="true">calculate</span>Začni mesečni obračun</a>
 </header>
 
 <section class="metrics" aria-label="Povzetek podatkov">
@@ -27,7 +28,7 @@
     <div class="empty-state">
       <span class="material-symbols-outlined" aria-hidden="true">inbox</span>
       <h3>Ni aktivnih opravil</h3>
-      <p>Mesečni obračun in ročne fakture še niso na voljo.</p>
+      <p>Trajno stanje mesečnih postopkov še ni prikazano.</p>
     </div>
   </section>
 

@@ -26,7 +26,6 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .nav-item { display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 8px 12px; color: #434655; font-size: 13px; text-decoration: none; border-left: 2px solid transparent; }
 .nav-item.is-active { color: #003ea8; background: var(--primary-soft); border-left-color: var(--primary); font-weight: 600; }
 .nav-item.is-disabled { color: #737686; cursor: not-allowed; }
-.sidebar-action { margin: 12px; display: flex; align-items: center; justify-content: center; gap: 8px; padding: 10px; color: #737686; background: #e6e8ea; font-size: 13px; font-weight: 600; cursor: not-allowed; }
 .app-shell { margin-left: 240px; min-height: 100vh; }
 .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; background: rgba(255, 255, 255, .96); border-bottom: 1px solid var(--outline); }
 .issuer { display: flex; align-items: center; gap: 8px; font-size: 12px; }
@@ -35,6 +34,7 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .location { display: flex; align-items: center; gap: 7px; color: var(--muted); font-size: 13px; }
 .page-content { max-width: 1440px; margin: 0 auto; padding: 32px; }
 .page-heading { margin-bottom: 28px; }
+.dashboard-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
 .page-heading h1 { margin: 4px 0 6px; font-size: 32px; line-height: 40px; letter-spacing: -.02em; }
 .page-heading p { margin: 0; color: var(--muted); font-size: 14px; }
 .page-heading .eyebrow { color: var(--primary); }
@@ -56,8 +56,55 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .delivery-state { min-height: 230px; display: flex; align-items: flex-start; gap: 12px; padding: 24px; }
 .delivery-state strong { display: block; margin-bottom: 5px; font-size: 14px; }
 .status-dot { width: 9px; height: 9px; margin-top: 5px; flex: 0 0 auto; border-radius: 50%; background: #737686; }
+.wizard-steps { display: grid; grid-template-columns: repeat(6, minmax(0, 1fr)); margin: -32px -32px 28px; padding: 14px 32px 0; background: var(--surface-low); border-bottom: 1px solid var(--outline); }
+.wizard-step { min-height: 58px; display: flex; align-items: center; gap: 8px; padding: 0 8px 12px; color: #737686; font-size: 12px; border-bottom: 3px solid transparent; }
+.wizard-step span { width: 22px; height: 22px; flex: 0 0 auto; display: grid; place-items: center; border: 1px solid var(--outline); border-radius: 50%; font: 500 11px/1 "JetBrains Mono", monospace; }
+.wizard-step strong { font-weight: 500; }
+.wizard-step.is-active { color: var(--primary); border-bottom-color: var(--primary); }
+.wizard-step.is-active span { color: white; background: var(--primary); border-color: var(--primary); }
+.wizard-step.is-active strong { font-weight: 700; }
+.billing-heading { margin-bottom: 22px; }
+.billing-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(300px, 1fr); gap: 16px; align-items: start; }
+.billing-card { background: var(--surface); border: 1px solid var(--outline); }
+.card-heading { min-height: 58px; display: flex; align-items: center; gap: 10px; padding: 14px 18px; background: var(--surface-low); border-bottom: 1px solid var(--outline); }
+.card-heading .material-symbols-outlined { color: var(--primary); }
+.card-heading h2 { margin: 0; font-size: 18px; }
+.billing-card form { padding: 22px; }
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+.field label { display: block; margin-bottom: 6px; color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.field input, .field select { width: 100%; height: 44px; padding: 0 12px; color: var(--text); background: var(--surface); border: 1px solid var(--outline); border-radius: 0; font: 500 14px "JetBrains Mono", monospace; }
+.field input:focus, .field select:focus { border: 2px solid var(--primary); outline: 0; }
+.field-error { margin: 6px 0 0; color: #ba1a1a; font-size: 12px; }
+.derived-period { min-height: 70px; display: flex; flex-direction: column; justify-content: center; padding: 8px 12px; background: var(--surface-low); border: 1px solid var(--outline); }
+.derived-period span { color: var(--muted); font-size: 11px; font-weight: 700; letter-spacing: .05em; text-transform: uppercase; }
+.derived-period strong { margin: 5px 0 3px; font: 500 14px "JetBrains Mono", monospace; }
+.derived-period small, .payment-note { color: var(--muted); font-size: 12px; }
+.payment-note { margin: 16px 0 0; }
+.form-note { display: flex; align-items: center; gap: 9px; margin-top: 18px; padding: 13px; color: var(--muted); background: var(--primary-soft); border-left: 3px solid var(--primary); font-size: 13px; }
+.form-note .material-symbols-outlined { color: var(--primary); }
+.form-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 24px; padding-top: 18px; border-top: 1px solid var(--outline); }
+.button-primary, .button-secondary { min-height: 40px; display: inline-flex; align-items: center; justify-content: center; padding: 9px 16px; border-radius: 0; font: 600 13px Inter, sans-serif; text-decoration: none; }
+.button-primary { color: white; background: var(--primary); border: 1px solid var(--primary); cursor: pointer; }
+.button-primary:disabled { color: #737686; background: #e6e8ea; border-color: var(--outline); cursor: not-allowed; }
+.button-secondary { color: var(--muted); background: var(--surface); border: 1px solid var(--outline); }
+.dashboard-primary-action { gap: 8px; flex: 0 0 auto; }
+.card-intro { margin: 14px 16px 8px; color: var(--muted); font-size: 12px; }
+.company-list { margin: 0; padding: 0 16px; list-style: none; }
+.company-list li { min-height: 54px; display: grid; grid-template-columns: 32px minmax(0, 1fr) auto; align-items: center; gap: 10px; border-bottom: 1px solid var(--outline); font-size: 13px; }
+.company-mark { width: 30px; height: 30px; display: grid; place-items: center; color: var(--primary); background: var(--primary-soft); font-weight: 700; }
+.company-total { margin: 0; padding: 14px 16px; background: var(--surface-low); font-size: 13px; }
+.company-total strong { color: var(--primary); font-family: "JetBrains Mono", monospace; }
+.blocked-state { min-height: 220px; display: grid; place-content: center; justify-items: center; padding: 28px; text-align: center; }
+.blocked-state > .material-symbols-outlined { color: #ba1a1a; font-size: 30px; }
+.blocked-state strong { margin: 10px 0 5px; }
+.blocked-state p { max-width: 260px; margin: 0; color: var(--muted); font-size: 12px; }
+.continuation-state { display: flex; align-items: center; gap: 12px; margin-bottom: 16px; padding: 14px 16px; color: #003ea8; background: var(--primary-soft); border: 1px solid var(--primary); }
+.continuation-state p { margin: 3px 0 0; color: var(--muted); font-size: 12px; }
 
 @media (max-width: 1100px) {
   .page-content { padding: 24px; }
   .metrics { grid-template-columns: repeat(2, 1fr); }
+  .wizard-steps { margin: -24px -24px 24px; padding-inline: 24px; }
+  .wizard-step { align-items: flex-start; flex-direction: column; }
+  .billing-grid { grid-template-columns: 1fr; }
 }

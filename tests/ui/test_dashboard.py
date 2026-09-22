@@ -18,25 +18,43 @@ def test_prazna_nadzorna_plosca(client):
     }
     vsebina = response.content.decode()
     assert "<h1>Nadzorna plošča</h1>" in vsebina
+    assert 'class="page-heading dashboard-heading"' in vsebina
     assert 'aria-current="page"' in vsebina
-    for oznaka in (
-        "Nadzorna plošča",
-        "Mesečni obračun",
-        "Pogodbe",
-        "Najemniki",
-        "Podjetja",
-        "Nepremičnine",
-        "Šifranti",
-        "Arhiv",
-        "Nastavitve",
-        "Nova ročna faktura",
-    ):
-        assert oznaka in vsebina
+    assert 'href="/mesecni-obracun/"' in vsebina
+    assert "Začni mesečni obračun" in vsebina
+    assert "Mesečni obračun in ročne fakture še niso na voljo." not in vsebina
+    assert 'class="nav-item is-active" href="/" aria-current="page"' in vsebina
     assert "eSLOG" not in vsebina
     assert "XML" not in vsebina
     assert "Pošiljanje ni vključeno" in vsebina
     assert "Dostava računov bo dodana v kasnejši fazi." in vsebina
     assert "Ni še poslano" not in vsebina
+
+
+def test_prva_raven_navigacije_sledi_prd():
+    vsebina = render_to_string("ui/partials/sidebar.html")
+
+    for oznaka in ("Nadzorna plošča", "Pogodbe", "Arhiv", "Nastavitve"):
+        assert oznaka in vsebina
+    for oznaka in (
+        "Mesečni obračun",
+        "Najemniki",
+        "Podjetja",
+        "Nepremičnine",
+        "Šifranti",
+        "Nova ročna faktura",
+    ):
+        assert oznaka not in vsebina
+
+
+def test_sidebar_lahko_aktivira_drugo_prvoravensko_sekcijo():
+    vsebina = render_to_string(
+        "ui/partials/sidebar.html",
+        {"active_section": "pogodbe"},
+    )
+
+    assert 'class="nav-item" href="/"' in vsebina
+    assert 'class="nav-item is-disabled is-active" aria-current="page"' in vsebina
 
 
 def test_osnovna_predloga_ne_potrebuje_dashboard_contexta():
