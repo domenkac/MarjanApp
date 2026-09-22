@@ -88,6 +88,29 @@ class MonthlyBatch(models.Model):
         ]
 
 
+class MonthlyCandidateReview(models.Model):
+    batch = models.ForeignKey(
+        MonthlyBatch, on_delete=models.PROTECT, related_name="candidate_reviews"
+    )
+    lease = models.ForeignKey("contracts.Lease", on_delete=models.PROTECT)
+    candidate_fingerprint = models.CharField(max_length=64)
+    selected = models.BooleanField()
+    requires_confirmation = models.BooleanField()
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+    non_issue_reason = models.TextField(blank=True, default="")
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["batch", "lease", "candidate_fingerprint"],
+                name="uniq_monthly_candidate_review_version",
+            )
+        ]
+
+
 class Invoice(models.Model):
     class DocumentType(models.TextChoices):
         NP = "NP", "NP"

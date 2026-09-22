@@ -17,6 +17,7 @@ from invoicing.services import (
     preveri_predhodno_kontrolo,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    uskladi_preglede_mesecnega_cikla,
 )
 
 from .forms import IzbiraMesecaForm, obdobje_za_mesec
@@ -91,6 +92,7 @@ def mesecni_obracun(request):
             izracunaj_mesecne_kandidate(
                 cycle, samo_brez_aktivnega_izracuna=True
             )
+            uskladi_preglede_mesecnega_cikla(cycle)
         return redirect("ui:mesecni_obracun")
     if request.method == "POST" and action == "continue_step3" and cycle:
         if (
@@ -106,7 +108,10 @@ def mesecni_obracun(request):
         return redirect("ui:mesecni_obracun")
     if request.method == "POST" and action == "continue_step4" and cycle:
         if so_vsi_uspesni_izracuni_aktivni(cycle):
-            premakni_mesecni_cikel(cycle, MonthlyCycle.Korak.PAKETNI_PREGLED)
+            cycle = premakni_mesecni_cikel(
+                cycle, MonthlyCycle.Korak.PAKETNI_PREGLED
+            )
+            uskladi_preglede_mesecnega_cikla(cycle)
         return redirect("ui:mesecni_obracun")
 
     if request.method == "POST":

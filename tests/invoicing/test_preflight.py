@@ -3,18 +3,31 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from django.core.exceptions import ValidationError
+from django.db import IntegrityError
+from django.utils import timezone
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
-from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from invoicing.models import (
+    Invoice,
+    InvoiceLine,
+    MonthlyBatch,
+    MonthlyCandidateReview,
+    MonthlyCycle,
+)
 from invoicing.services import (
     CALCULATION_SNAPSHOT_VERSION,
     MIGRACIJSKI_RAZLOG,
     NeveljavenPrehodMesecnegaCikla,
     izracunaj_mesecne_kandidate,
+    nastavi_izbiro_kandidata,
+    potrdi_izjemo_kandidata,
     preveri_predhodno_kontrolo,
+    trenutni_pregledi_mesecnega_cikla,
+    uskladi_preglede_mesecnega_cikla,
 )
 
 PNG = base64.b64decode(
@@ -202,6 +215,21 @@ def _calculate(data):
 
 def _candidate_codes(candidate):
     return {item["code"] for item in candidate["exceptions"]}
+
+
+def _enter_step4_with_reviews(data, *, will_issue=True, exceptions=None):
+    _calculate(data)
+    data["batch"].refresh_from_db()
+    snapshot = data["batch"].calculation_snapshot
+    candidate = snapshot["candidates"][0]
+    candidate["will_issue"] = will_issue
+    candidate["exceptions"] = [] if exceptions is None else exceptions
+    data["batch"].calculation_snapshot = snapshot
+    data["batch"].save(update_fields=["calculation_snapshot"])
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    return candidate, MonthlyCandidateReview.objects.get()
 
 
 def test_batch_defaults_to_not_checked(db):
@@ -897,6 +925,285 @@ def test_step4_refresh_excludes_newly_blocked_stale_member(ready_company, client
     assert data["batch"].calculation_status == MonthlyBatch.CalculationStatus.NOT_CALCULATED
     assert rendered_batch.is_active_calculation is False
     assert rendered_batch.calculation_summary["candidates"] == 0
+
+
+def test_candidate_review_unique_constraint(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data)
+    with pytest.raises(IntegrityError):
+        MonthlyCandidateReview.objects.create(
+            batch=review.batch,
+            lease=review.lease,
+            candidate_fingerprint=review.candidate_fingerprint,
+            selected=True,
+            requires_confirmation=False,
+        )
+
+
+@pytest.mark.parametrize(
+    ("will_issue", "exceptions", "selected", "requires_confirmation"),
+    [
+        (True, [], True, False),
+        (True, [{"code": "TEST"}], True, True),
+        (False, [{"code": "TEST"}], False, False),
+    ],
+)
+def test_candidate_review_defaults(
+    ready_company, will_issue, exceptions, selected, requires_confirmation
+):
+    _candidate, review = _enter_step4_with_reviews(
+        ready_company, will_issue=will_issue, exceptions=exceptions
+    )
+    assert review.selected is selected
+    assert review.requires_confirmation is requires_confirmation
+    assert review.confirmed_at is None
+    assert review.non_issue_reason == ""
+    assert review.reviewed_at is None
+
+
+def test_review_sync_is_idempotent_and_preserves_decisions(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data)
+    stamp = timezone.now()
+    MonthlyCandidateReview.objects.filter(pk=review.pk).update(
+        selected=False,
+        confirmed_at=stamp,
+        non_issue_reason="Ročna odločitev",
+        reviewed_at=stamp,
+    )
+
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    reopened = MonthlyCandidateReview.objects.get()
+
+    assert MonthlyCandidateReview.objects.count() == 1
+    assert (reopened.selected, reopened.confirmed_at, reopened.non_issue_reason, reopened.reviewed_at) == (
+        False, stamp, "Ročna odločitev", stamp
+    )
+
+
+def test_step4_http_refresh_preserves_user_decision(ready_company, client):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data)
+    review = nastavi_izbiro_kandidata(
+        data["cycle"],
+        lease_id=review.lease_id,
+        candidate_fingerprint=review.candidate_fingerprint,
+        selected=False,
+        non_issue_reason="Ne izdaj",
+    )
+    expected = (
+        review.pk,
+        review.candidate_fingerprint,
+        review.selected,
+        review.confirmed_at,
+        review.non_issue_reason,
+        review.reviewed_at,
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "refresh_review"})
+    current = trenutni_pregledi_mesecnega_cikla(data["cycle"])
+
+    assert response.status_code == 302
+    assert len(current) == 1
+    review = current[0]
+    assert (
+        review.pk,
+        review.candidate_fingerprint,
+        review.selected,
+        review.confirmed_at,
+        review.non_issue_reason,
+        review.reviewed_at,
+    ) == expected
+
+
+def test_step4_http_refresh_adds_late_join_review_without_resetting_existing(
+    ready_company, client
+):
+    data = ready_company
+    second_company, second_batch = _add_ready_company(data)
+    second_lease = Lease.objects.get(unit__property__company=second_company)
+    second_iban = second_company.trr
+    Company.objects.filter(pk=second_company.pk).update(trr="SI00NEVELJAVEN")
+    preveri_predhodno_kontrolo(data["cycle"])
+    client.post("/mesecni-obracun/", {"action": "continue_step3"})
+    client.post("/mesecni-obracun/", {"action": "continue_step4"})
+    data["batch"].refresh_from_db()
+    original_snapshot = data["batch"].calculation_snapshot
+    first_review = MonthlyCandidateReview.objects.get(batch=data["batch"])
+    first_review = nastavi_izbiro_kandidata(
+        data["cycle"],
+        lease_id=first_review.lease_id,
+        candidate_fingerprint=first_review.candidate_fingerprint,
+        selected=False,
+        non_issue_reason="Ne izdaj A",
+    )
+
+    Company.objects.filter(pk=second_company.pk).update(trr=second_iban)
+    response = client.post("/mesecni-obracun/", {"action": "refresh_review"})
+    data["batch"].refresh_from_db()
+    second_batch.refresh_from_db()
+    current = trenutni_pregledi_mesecnega_cikla(data["cycle"])
+
+    assert response.status_code == 302
+    assert data["batch"].calculation_snapshot == original_snapshot
+    preserved = next(review for review in current if review.batch_id == data["batch"].pk)
+    assert preserved.pk == first_review.pk
+    assert preserved.candidate_fingerprint == first_review.candidate_fingerprint
+    assert preserved.selected is False
+    assert preserved.non_issue_reason == "Ne izdaj A"
+    assert preserved.reviewed_at == first_review.reviewed_at
+    assert second_batch.calculation_status == MonthlyBatch.CalculationStatus.CALCULATED
+    joined = next(review for review in current if review.batch_id == second_batch.pk)
+    assert joined.lease_id == second_lease.pk
+    assert len(current) == 2
+    assert {review.pk for review in current} == set(
+        MonthlyCandidateReview.objects.values_list("pk", flat=True)
+    )
+
+
+def test_changed_fingerprint_creates_fresh_review_and_keeps_stale(ready_company):
+    data = ready_company
+    candidate, old = _enter_step4_with_reviews(data)
+    MonthlyCandidateReview.objects.filter(pk=old.pk).update(
+        selected=False, non_issue_reason="Ne izdaj", reviewed_at=timezone.now()
+    )
+    snapshot = data["batch"].calculation_snapshot
+    snapshot["candidates"][0]["candidate_fingerprint"] = "b" * 64
+    data["batch"].calculation_snapshot = snapshot
+    data["batch"].save(update_fields=["calculation_snapshot"])
+
+    current = uskladi_preglede_mesecnega_cikla(data["cycle"])
+
+    assert MonthlyCandidateReview.objects.count() == 2
+    assert len(current) == 1
+    assert current[0].candidate_fingerprint == "b" * 64
+    assert current[0].selected is True
+    assert current[0].non_issue_reason == ""
+    assert MonthlyCandidateReview.objects.filter(
+        candidate_fingerprint=candidate["candidate_fingerprint"]
+    ).exists()
+
+
+def test_blocked_review_stays_stored_but_is_not_current_and_can_return(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data)
+    MonthlyBatch.objects.filter(pk=data["batch"].pk).update(
+        preflight_status=MonthlyBatch.PreflightStatus.BLOCKED
+    )
+    assert trenutni_pregledi_mesecnega_cikla(data["cycle"]) == []
+    assert MonthlyCandidateReview.objects.filter(pk=review.pk).exists()
+
+    MonthlyBatch.objects.filter(pk=data["batch"].pk).update(
+        preflight_status=MonthlyBatch.PreflightStatus.PASSED
+    )
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    assert [item.pk for item in trenutni_pregledi_mesecnega_cikla(data["cycle"])] == [review.pk]
+
+
+def test_selection_and_confirmation_guards(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(
+        data, exceptions=[{"code": "TEST"}]
+    )
+    args = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+    with pytest.raises(ValidationError):
+        nastavi_izbiro_kandidata(data["cycle"], selected=False, **args)
+
+    review = nastavi_izbiro_kandidata(
+        data["cycle"], selected=False, non_issue_reason="  Ne izdaj  ", **args
+    )
+    assert review.non_issue_reason == "Ne izdaj"
+    assert review.reviewed_at is not None
+    assert review.confirmed_at is None
+    with pytest.raises(ValidationError):
+        potrdi_izjemo_kandidata(data["cycle"], **args)
+
+    review = nastavi_izbiro_kandidata(data["cycle"], selected=True, **args)
+    assert review.non_issue_reason == ""
+    review = potrdi_izjemo_kandidata(data["cycle"], **args)
+    assert review.confirmed_at is not None
+    assert review.reviewed_at == review.confirmed_at
+
+    args["candidate_fingerprint"] = "c" * 64
+    with pytest.raises(ValidationError):
+        nastavi_izbiro_kandidata(data["cycle"], selected=True, **args)
+
+
+def test_nonissuable_cannot_be_selected_and_plain_candidate_cannot_be_confirmed(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data, will_issue=False)
+    args = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+    with pytest.raises(ValidationError):
+        nastavi_izbiro_kandidata(data["cycle"], selected=True, **args)
+    with pytest.raises(ValidationError):
+        potrdi_izjemo_kandidata(data["cycle"], **args)
+
+
+def test_selected_plain_candidate_cannot_be_confirmed(ready_company):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(data)
+    with pytest.raises(ValidationError):
+        potrdi_izjemo_kandidata(
+            data["cycle"],
+            lease_id=review.lease_id,
+            candidate_fingerprint=review.candidate_fingerprint,
+        )
+
+
+@pytest.mark.parametrize(
+    "step",
+    [
+        MonthlyCycle.Korak.IZBIRA_MESECA,
+        MonthlyCycle.Korak.PREDHODNA_KONTROLA,
+        MonthlyCycle.Korak.IZRACUN_OSNUTKOV,
+        MonthlyCycle.Korak.POTRDITEV_PAKETA,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    ],
+)
+def test_review_services_reject_outside_step4(ready_company, step):
+    data = ready_company
+    data["cycle"].trenutni_korak = step
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    with pytest.raises(NeveljavenPrehodMesecnegaCikla):
+        uskladi_preglede_mesecnega_cikla(data["cycle"])
+
+
+@pytest.mark.parametrize(
+    "step",
+    [MonthlyCycle.Korak.IZRACUN_OSNUTKOV, MonthlyCycle.Korak.POTRDITEV_PAKETA],
+)
+@pytest.mark.parametrize("operation", ["select", "confirm"])
+def test_review_mutations_reject_outside_step4(ready_company, step, operation):
+    data = ready_company
+    _candidate, review = _enter_step4_with_reviews(
+        data, exceptions=[{"code": "TEST"}]
+    )
+    data["cycle"].trenutni_korak = step
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    args = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+
+    with pytest.raises(NeveljavenPrehodMesecnegaCikla):
+        if operation == "select":
+            nastavi_izbiro_kandidata(data["cycle"], selected=True, **args)
+        else:
+            potrdi_izjemo_kandidata(data["cycle"], **args)
+
+
+def test_sync_has_no_invoice_or_numbering_side_effects(ready_company):
+    before = list(NumberSequence.objects.values_list("pk", "zadnja_stevilka"))
+    _enter_step4_with_reviews(ready_company)
+    assert not Invoice.objects.exists()
+    assert not InvoiceLine.objects.exists()
+    assert list(NumberSequence.objects.values_list("pk", "zadnja_stevilka")) == before
 
 
 @pytest.mark.parametrize("step", [MonthlyCycle.Korak.POTRDITEV_PAKETA, MonthlyCycle.Korak.ZAKLJUCEK])

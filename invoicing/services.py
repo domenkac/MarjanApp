@@ -42,7 +42,13 @@ from core.validators import (
     preveri_maticno_stevilko,
 )
 
-from .models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from .models import (
+    Invoice,
+    InvoiceLine,
+    MonthlyBatch,
+    MonthlyCandidateReview,
+    MonthlyCycle,
+)
 
 ESLOG_KODE_DDV = {
     VatRegime.NacinObracuna.OBDAVCENO: "S",
@@ -2230,6 +2236,125 @@ def aktivni_izracuni_mesecnega_cikla(cycle: MonthlyCycle):
         calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
         calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
     )
+
+
+def _aktivni_kandidati(cycle: MonthlyCycle):
+    for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by("company_id", "pk"):
+        for candidate in batch.calculation_snapshot.get("candidates", []):
+            lease_id = candidate.get("lease_id")
+            fingerprint = candidate.get("candidate_fingerprint")
+            if not lease_id or not fingerprint:
+                raise ValidationError(
+                    "Aktivni kandidat mora vsebovati lease_id in candidate_fingerprint."
+                )
+            yield batch, candidate, lease_id, fingerprint
+
+
+def _zahtevaj_cetrti_korak(cycle: MonthlyCycle) -> MonthlyCycle:
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if cycle.trenutni_korak != MonthlyCycle.Korak.PAKETNI_PREGLED:
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Pregled kandidatov je dovoljen samo v koraku 4."
+        )
+    return cycle
+
+
+def uskladi_preglede_mesecnega_cikla(cycle: MonthlyCycle) -> list[MonthlyCandidateReview]:
+    cycle = _zahtevaj_cetrti_korak(cycle)
+    desired = [
+        MonthlyCandidateReview(
+            batch=batch,
+            lease_id=lease_id,
+            candidate_fingerprint=fingerprint,
+            selected=bool(candidate["will_issue"]),
+            requires_confirmation=(
+                bool(candidate.get("exceptions")) and bool(candidate["will_issue"])
+            ),
+        )
+        for batch, candidate, lease_id, fingerprint in _aktivni_kandidati(cycle)
+    ]
+    with transaction.atomic():
+        MonthlyCandidateReview.objects.bulk_create(desired, ignore_conflicts=True)
+    return trenutni_pregledi_mesecnega_cikla(cycle)
+
+
+def trenutni_pregledi_mesecnega_cikla(cycle: MonthlyCycle) -> list[MonthlyCandidateReview]:
+    identities = {
+        (batch.pk, lease_id, fingerprint)
+        for batch, _candidate, lease_id, fingerprint in _aktivni_kandidati(cycle)
+    }
+    if not identities:
+        return []
+    batch_ids = {identity[0] for identity in identities}
+    reviews = MonthlyCandidateReview.objects.filter(batch_id__in=batch_ids).select_related(
+        "batch", "lease"
+    )
+    return [
+        review
+        for review in reviews
+        if (review.batch_id, review.lease_id, review.candidate_fingerprint) in identities
+    ]
+
+
+def _trenutni_pregled_in_kandidat(cycle, lease_id, candidate_fingerprint):
+    cycle = _zahtevaj_cetrti_korak(cycle)
+    for batch, candidate, current_lease_id, fingerprint in _aktivni_kandidati(cycle):
+        if current_lease_id == lease_id and fingerprint == candidate_fingerprint:
+            return (
+                MonthlyCandidateReview.objects.get(
+                    batch=batch,
+                    lease_id=lease_id,
+                    candidate_fingerprint=candidate_fingerprint,
+                ),
+                candidate,
+            )
+    raise ValidationError("Kandidat ni trenutni aktivni kandidat.")
+
+
+def nastavi_izbiro_kandidata(
+    cycle: MonthlyCycle,
+    *,
+    lease_id: int,
+    candidate_fingerprint: str,
+    selected: bool,
+    non_issue_reason: str = "",
+) -> MonthlyCandidateReview:
+    review, candidate = _trenutni_pregled_in_kandidat(
+        cycle, lease_id, candidate_fingerprint
+    )
+    reason = non_issue_reason.strip()
+    if selected and not candidate["will_issue"]:
+        raise ValidationError("Kandidata, ki ga sistem ne izda, ni dovoljeno izbrati.")
+    if not selected and candidate["will_issue"] and not reason:
+        raise ValidationError("Za neizdajo kandidata je potreben razlog.")
+    review.selected = selected
+    review.non_issue_reason = "" if selected else reason
+    fields = ["selected", "non_issue_reason", "updated_at"]
+    if not selected:
+        review.confirmed_at = None
+        review.reviewed_at = timezone.now()
+        fields.extend(["confirmed_at", "reviewed_at"])
+    review.save(update_fields=fields)
+    return review
+
+
+def potrdi_izjemo_kandidata(
+    cycle: MonthlyCycle, *, lease_id: int, candidate_fingerprint: str
+) -> MonthlyCandidateReview:
+    review, candidate = _trenutni_pregled_in_kandidat(
+        cycle, lease_id, candidate_fingerprint
+    )
+    if not review.selected:
+        raise ValidationError("Neizbranega kandidata ni dovoljeno potrditi.")
+    if not review.requires_confirmation or not (
+        bool(candidate.get("exceptions")) and candidate["will_issue"]
+    ):
+        raise ValidationError("Kandidat ne zahteva potrditve izjeme.")
+    now = timezone.now()
+    review.confirmed_at = now
+    review.reviewed_at = now
+    review.save(update_fields=["confirmed_at", "reviewed_at", "updated_at"])
+    return review
 
 
 def so_vsi_uspesni_izracuni_aktivni(cycle: MonthlyCycle) -> bool:
