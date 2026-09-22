@@ -1,6 +1,7 @@
 from calendar import monthrange
 from decimal import Decimal
 
+from django.core.exceptions import ValidationError
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods
 
@@ -13,10 +14,13 @@ from invoicing.services import (
     aktivni_izracuni_mesecnega_cikla,
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
+    nastavi_izbiro_kandidata,
+    potrdi_izjemo_kandidata,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
 )
 
@@ -72,7 +76,34 @@ def mesecni_obracun(request):
     )
     nadaljevanje = None
     sporocilo_napake = None
+    review_error = None
+    review_error_identity = None
     form_is_valid = form.is_valid() if request.method == "POST" and not action else False
+
+    review_actions = {"select_candidate", "deselect_candidate", "confirm_candidate"}
+    if request.method == "POST" and action in review_actions:
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.PAKETNI_PREGLED:
+                raise ValidationError("Pregled kandidatov je dovoljen samo v koraku 4.")
+            lease_id = int(request.POST.get("lease_id", ""))
+            fingerprint = request.POST.get("candidate_fingerprint", "")
+            review_error_identity = (lease_id, fingerprint)
+            if action == "confirm_candidate":
+                potrdi_izjemo_kandidata(
+                    cycle, lease_id=lease_id, candidate_fingerprint=fingerprint
+                )
+            else:
+                nastavi_izbiro_kandidata(
+                    cycle,
+                    lease_id=lease_id,
+                    candidate_fingerprint=fingerprint,
+                    selected=action == "select_candidate",
+                    non_issue_reason=request.POST.get("non_issue_reason", ""),
+                )
+        except (TypeError, ValueError, ValidationError) as exc:
+            review_error = _review_error_message(exc)
+        else:
+            return redirect("ui:mesecni_obracun")
 
     if request.method == "POST" and action == "rerun_preflight" and cycle:
         if (
@@ -114,7 +145,7 @@ def mesecni_obracun(request):
             uskladi_preglede_mesecnega_cikla(cycle)
         return redirect("ui:mesecni_obracun")
 
-    if request.method == "POST":
+    if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
         obdobje_do = form.cleaned_data.get("obdobje_do")
     else:
@@ -186,6 +217,30 @@ def mesecni_obracun(request):
         }
 
     step3_complete = bool(cycle and so_vsi_uspesni_izracuni_aktivni(cycle))
+    review_rows = []
+    review_summary = None
+    if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED:
+        review_rows = _review_rows(cycle, review_error_identity, review_error)
+        review_summary = {
+            "total": len(review_rows),
+            "selected": sum(row["selected"] for row in review_rows),
+            "requiring_confirmation": sum(
+                row["selected"]
+                and row["requires_confirmation"]
+                and not row["confirmed_at"]
+                for row in review_rows
+            ),
+            "confirmed": sum(
+                row["requires_confirmation"] and bool(row["confirmed_at"])
+                for row in review_rows
+            ),
+            "user_deselected": sum(
+                row["will_issue"] and not row["selected"] for row in review_rows
+            ),
+            "system_non_issuable": sum(
+                not row["will_issue"] for row in review_rows
+            ),
+        }
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -205,8 +260,111 @@ def mesecni_obracun(request):
             "step2_partial": bool(summary and summary["passed"] and summary["blocked"]),
             "step3_complete": step3_complete,
             "step3_can_continue": step3_complete,
+            "review_rows": review_rows,
+            "review_summary": review_summary,
+            "review_error": review_error,
         },
     )
+
+
+def _review_rows(cycle, error_identity=None, error=None):
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    rows = []
+    for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by("company_id", "pk"):
+        snapshot = batch.calculation_snapshot
+        company_name = snapshot.get("company", {}).get("name", "")
+        for candidate in snapshot.get("candidates", []):
+            identity = (
+                batch.pk,
+                candidate["lease_id"],
+                candidate["candidate_fingerprint"],
+            )
+            review = reviews.get(identity)
+            if review is None:
+                continue
+            previous_invoice = candidate.get("previous_invoice")
+            current_total = Decimal(candidate["totals"]["total"])
+            previous_total = (
+                Decimal(previous_invoice["total"]) if previous_invoice else None
+            )
+            delta_eur = (
+                current_total - previous_total if previous_total is not None else None
+            )
+            delta_percent = (
+                delta_eur / previous_total * Decimal(100)
+                if previous_total not in (None, Decimal(0))
+                else None
+            )
+            lease_id = candidate["lease_id"]
+            fingerprint = candidate["candidate_fingerprint"]
+            rows.append(
+                {
+                    "company_name": company_name,
+                    "tenant_name": candidate.get("tenant", {}).get("name", ""),
+                    "property_unit_label": " / ".join(
+                        filter(
+                            None,
+                            (candidate.get("property_label"), candidate.get("unit_label")),
+                        )
+                    ),
+                    "contract_reference": candidate.get("contract_reference", ""),
+                    "previous_total": previous_total,
+                    "current_total": current_total,
+                    "delta_eur": delta_eur,
+                    "delta_percent": delta_percent,
+                    "previous_display": (
+                        _money(previous_total) if previous_total is not None else "Nova"
+                    ),
+                    "current_display": _money(current_total),
+                    "delta_eur_display": _signed_money(delta_eur),
+                    "delta_percent_display": _signed_percent(delta_percent),
+                    "first_issue": bool(candidate.get("first_issue")),
+                    "will_issue": bool(candidate["will_issue"]),
+                    "system_non_issue_reason": candidate.get("non_issue_reason", ""),
+                    "exceptions": candidate.get("exceptions", []),
+                    "selected": review.selected,
+                    "requires_confirmation": review.requires_confirmation,
+                    "confirmed_at": review.confirmed_at,
+                    "user_non_issue_reason": review.non_issue_reason,
+                    "candidate_fingerprint": fingerprint,
+                    "lease_id": lease_id,
+                    "error": (
+                        error if error_identity == (lease_id, fingerprint) else None
+                    ),
+                }
+            )
+    return rows
+
+
+def _money(value):
+    return f"{value:.2f}".replace(".", ",") + " €"
+
+
+def _signed_money(value):
+    if value is None:
+        return "—"
+    return f"{value:+.2f}".replace(".", ",") + " €" if value else "0,00 €"
+
+
+def _signed_percent(value):
+    if value is None:
+        return "—"
+    return f"{value:+.2f}".replace(".", ",") + " %" if value else "0,00 %"
+
+
+def _review_error_message(exc):
+    message = exc.messages[0] if isinstance(exc, ValidationError) else "Neveljaven kandidat."
+    return {
+        "Kandidat ni trenutni aktivni kandidat.": (
+            "Kandidat ni več trenutni kandidat. Osvežite paketni pregled."
+        ),
+        "Neizbranega kandidata ni dovoljeno potrditi.": (
+            "Neizbranega kandidata ni mogoče potrditi."
+        ),
+    }.get(message, message)
 
 
 def _preflight_location(issue, company, cycle):

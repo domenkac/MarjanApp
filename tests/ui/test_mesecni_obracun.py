@@ -3,8 +3,15 @@ from datetime import date
 import pytest
 from django.utils import timezone
 
-from companies.models import Company
-from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
+from companies.models import Company, NumberSequence
+from contracts.models import Lease, Property, Tenant, Unit
+from invoicing.models import (
+    Invoice,
+    InvoiceLine,
+    MonthlyBatch,
+    MonthlyCandidateReview,
+    MonthlyCycle,
+)
 from invoicing.services import CALCULATION_SNAPSHOT_VERSION
 
 
@@ -49,6 +56,88 @@ def _mixed_schema_cycle():
         calculated_at=timezone.now(),
     )
     return cycle, current, stale
+
+
+def _review_cycle(*candidates):
+    cycle = MonthlyCycle.objects.create(
+        obdobje=date(2031, 2, 1),
+        datum_izdaje=date(2031, 2, 12),
+        trenutni_korak=MonthlyCycle.Korak.PAKETNI_PREGLED,
+    )
+    reviews = []
+    for index, options in enumerate(candidates, start=1):
+        company = ustvari_podjetje(
+            options.get("company", f"Podjetje {index} d.o.o."),
+            ("15012557", "69165028", "24561004")[index - 1],
+        )
+        property_ = Property.objects.create(
+            company=company, naziv=f"Objekt {index}", naslov="Naslov 1"
+        )
+        unit = Unit.objects.create(
+            property=property_, oznaka=f"E-{index}", tip_enote=Unit.TipEnote.PISARNA
+        )
+        tenant = Tenant.objects.create(
+            tip=Tenant.Tip.PRAVNA_OSEBA,
+            naziv=options.get("tenant", f"Najemnik {index}"),
+            davcna_stevilka="15012557",
+            maticna_stevilka="1234567000",
+            naslov="Trg 1",
+            drzava_koda="SI",
+            identificiran_za_ddv=True,
+            email=f"tenant{index}@example.com",
+        )
+        lease = Lease.objects.create(
+            unit=unit,
+            tenant=tenant,
+            oznaka_pogodbe=f"P-{index}",
+            tip_trajanja=Lease.TipTrajanja.NEDOLOCEN_CAS,
+            datum_zacetka=date(2030, 1, 1),
+            rok_placila_dni=15,
+        )
+        fingerprint = str(index) * 64
+        previous = options.get("previous", "100.00")
+        exceptions = options.get("exceptions", [])
+        will_issue = options.get("will_issue", True)
+        candidate = {
+            "lease_id": lease.pk,
+            "candidate_fingerprint": fingerprint,
+            "contract_reference": f"P-{index}",
+            "property_label": f"Objekt {index}",
+            "unit_label": f"E-{index}",
+            "tenant": {"name": tenant.naziv},
+            "totals": {"total": options.get("current", "125.00")},
+            "previous_invoice": None if previous is None else {"total": previous},
+            "first_issue": previous is None,
+            "will_issue": will_issue,
+            "non_issue_reason": options.get("system_reason", ""),
+            "exceptions": [
+                {"code": f"IZJEMA_{position}", "message": message}
+                for position, message in enumerate(exceptions)
+            ],
+        }
+        batch = MonthlyBatch.objects.create(
+            cycle=cycle,
+            company=company,
+            preflight_status=MonthlyBatch.PreflightStatus.PASSED,
+            calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
+            calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
+            calculation_snapshot={
+                "schema_version": CALCULATION_SNAPSHOT_VERSION,
+                "company": {"name": company.naziv},
+                "candidates": [candidate],
+            },
+            calculated_at=timezone.now(),
+        )
+        reviews.append(
+            MonthlyCandidateReview.objects.create(
+                batch=batch,
+                lease=lease,
+                candidate_fingerprint=fingerprint,
+                selected=will_issue,
+                requires_confirmation=bool(exceptions) and will_issue,
+            )
+        )
+    return cycle, reviews
 
 
 @pytest.mark.django_db
@@ -376,3 +465,178 @@ def test_stara_shema_zahteva_ponovni_izracun_brez_veljavnega_casa(client):
     assert "Potreben ponovni izračun" in content
     assert "Izračunano " not in content
     assert 'class="status-badge">Potreben ponovni izračun</span>' in content
+
+
+@pytest.mark.django_db
+def test_step4_prikaze_eno_skupno_tabelo_in_povzetek_samo_trenutnih(client):
+    _cycle, reviews = _review_cycle(
+        {"company": "Alfa d.o.o.", "tenant": "Ana", "current": "125.00"},
+        {"company": "Beta d.o.o.", "tenant": "Berta", "previous": "200.00", "current": "150.00", "exceptions": ["Sprememba."]},
+        {"company": "Gama d.o.o.", "tenant": "Cene", "will_issue": False, "system_reason": "Ni postavk."},
+    )
+    MonthlyCandidateReview.objects.create(
+        batch=reviews[0].batch, lease=reviews[0].lease,
+        candidate_fingerprint="f" * 64, selected=False,
+        requires_confirmation=False, non_issue_reason="Stara odločitev",
+    )
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    assert content.count('class="review-table"') == 1
+    assert all(value in content for value in ("Alfa d.o.o.", "Beta d.o.o.", "Gama d.o.o."))
+    assert "Stara odločitev" not in content
+    assert response.context["review_summary"] == {
+        "total": 3, "selected": 2, "requiring_confirmation": 1,
+        "confirmed": 0, "user_deselected": 0, "system_non_issuable": 1,
+    }
+
+
+@pytest.mark.django_db
+def test_step4_prikaze_decimalne_delte_in_posebna_izhodišča(client):
+    _review_cycle(
+        {"company": "Plus", "previous": "100.00", "current": "125.00"},
+        {"company": "Minus", "previous": "200.00", "current": "150.00"},
+        {"company": "Nova", "previous": None, "current": "80.00"},
+    )
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    rows = response.context["review_rows"]
+    for value in ("100,00", "125,00", "+25,00", "+25,00 %", "-50,00", "-25,00 %"):
+        assert value in content
+    assert rows[2]["previous_display"] == "Nova"
+    assert rows[2]["delta_percent_display"] == "—"
+
+
+@pytest.mark.django_db
+def test_step4_nicelna_osnova_prikaze_crtico_in_eur_delta(client):
+    _review_cycle({"previous": "0.00", "current": "50.00"})
+    row = client.get("/mesecni-obracun/").context["review_rows"][0]
+    assert row["previous_display"] == "0,00 €"
+    assert row["delta_eur_display"] == "+50,00 €"
+    assert row["delta_percent_display"] == "—"
+
+
+@pytest.mark.django_db
+def test_step4_izbira_razlog_in_ponovna_izbira_so_trajni(client):
+    _cycle, (review,) = _review_cycle({})
+    identity = {"lease_id": review.lease_id, "candidate_fingerprint": review.candidate_fingerprint}
+    response = client.post("/mesecni-obracun/", {"action": "deselect_candidate", "non_issue_reason": "  Po dogovoru  ", **identity})
+    assert response.status_code == 302
+    review.refresh_from_db()
+    assert (review.selected, review.non_issue_reason) == (False, "Po dogovoru")
+    assert "Po dogovoru" in client.get("/mesecni-obracun/").content.decode()
+    response = client.post("/mesecni-obracun/", {"action": "select_candidate", **identity})
+    assert response.status_code == 302
+    review.refresh_from_db()
+    assert (review.selected, review.non_issue_reason) == (True, "")
+
+
+@pytest.mark.django_db
+def test_step4_napake_so_vrsticne_in_ne_spremenijo_stanja(client):
+    _cycle, (review,) = _review_cycle({})
+    response = client.post("/mesecni-obracun/", {
+        "action": "deselect_candidate", "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint, "non_issue_reason": "   ",
+    })
+    assert response.status_code == 200
+    assert "Za neizdajo kandidata je potreben razlog." in response.content.decode()
+    review.refresh_from_db()
+    assert review.selected is True
+    response = client.post("/mesecni-obracun/", {
+        "action": "select_candidate", "lease_id": review.lease_id,
+        "candidate_fingerprint": "f" * 64,
+    })
+    assert response.status_code == 200
+    assert "Kandidat ni več trenutni kandidat. Osvežite paketni pregled." in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_step4_posamicna_potrditev_izjeme_prezivi_reload(client):
+    _cycle, (review,) = _review_cycle({"exceptions": ["Indeksacija."]})
+    identity = {"lease_id": review.lease_id, "candidate_fingerprint": review.candidate_fingerprint}
+    assert "Potrditev potrebna" in client.get("/mesecni-obracun/").content.decode()
+    response = client.post("/mesecni-obracun/", {"action": "confirm_candidate", **identity})
+    assert response.status_code == 302
+    review.refresh_from_db()
+    assert review.confirmed_at is not None
+    assert "Potrjeno" in client.get("/mesecni-obracun/").content.decode()
+    client.post("/mesecni-obracun/", {"action": "deselect_candidate", "non_issue_reason": "Ne", **identity})
+    response = client.post("/mesecni-obracun/", {"action": "confirm_candidate", **identity})
+    assert response.status_code == 200
+    assert "Neizbranega kandidata ni mogoče potrditi." in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_step4_neizbrana_izjema_ni_pending_in_ponovna_izbira_jo_obnovi(client):
+    _cycle, (review,) = _review_cycle({"exceptions": ["Indeksacija."]})
+    identity = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+    client.post(
+        "/mesecni-obracun/",
+        {
+            "action": "deselect_candidate",
+            "non_issue_reason": "Ne izdaj ta mesec",
+            **identity,
+        },
+    )
+
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    assert response.context["review_summary"]["requiring_confirmation"] == 0
+    assert "review-row-attention" not in content
+    assert 'class="attention-state">Potrditev potrebna' not in content
+    assert "Ročno neizdano" in content
+    assert "Ne izdaj ta mesec" in content
+    assert "Ponovno izberi" in content
+
+    client.post("/mesecni-obracun/", {"action": "select_candidate", **identity})
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    assert response.context["review_summary"]["requiring_confirmation"] == 1
+    assert "review-row-attention" in content
+    assert 'class="attention-state">Potrditev potrebna' in content
+
+
+@pytest.mark.django_db
+def test_step4_sistemsko_neizdajnega_ni_mogoce_izbrati(client):
+    _cycle, (review,) = _review_cycle({"will_issue": False, "system_reason": "Ni obračunljivih postavk."})
+    response = client.post("/mesecni-obracun/", {
+        "action": "select_candidate", "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    })
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Ni obračunljivih postavk." in content
+    assert "Sistemsko neizdajno" in content
+    review.refresh_from_db()
+    assert review.selected is False
+
+
+@pytest.mark.django_db
+def test_step4_mutacije_izven_koraka4_ne_ustvarjajo_dokumentov(client):
+    cycle, (review,) = _review_cycle({})
+    identity = {"lease_id": review.lease_id, "candidate_fingerprint": review.candidate_fingerprint}
+    initial = (Invoice.objects.count(), InvoiceLine.objects.count(), NumberSequence.objects.count())
+    for step in (MonthlyCycle.Korak.IZRACUN_OSNUTKOV, MonthlyCycle.Korak.POTRDITEV_PAKETA):
+        cycle.trenutni_korak = step
+        cycle.save(update_fields=["trenutni_korak"])
+        assert client.post("/mesecni-obracun/", {"action": "deselect_candidate", "non_issue_reason": "Ne", **identity}).status_code == 200
+    review.refresh_from_db()
+    assert review.selected is True
+    assert (Invoice.objects.count(), InvoiceLine.objects.count(), NumberSequence.objects.count()) == initial
+
+
+@pytest.mark.django_db
+def test_step4_ne_zaupa_ponarejenim_poslovnim_podatkom(client):
+    _cycle, (review,) = _review_cycle({"company": "Pravo podjetje", "current": "125.00"})
+    response = client.post("/mesecni-obracun/", {
+        "action": "deselect_candidate", "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint, "non_issue_reason": "Ne",
+        "company": "Ponarejeno podjetje", "amount": "999999.99", "status": "false",
+    }, follow=True)
+    content = response.content.decode()
+    assert "Pravo podjetje" in content
+    assert "Ponarejeno podjetje" not in content
+    assert "125,00" in content
+    assert "999999" not in content

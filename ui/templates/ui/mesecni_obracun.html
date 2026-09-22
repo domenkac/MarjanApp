@@ -8,6 +8,7 @@
 {% if sporocilo_napake %}
 <div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">error</span>{{ sporocilo_napake }}</div>
 {% endif %}
+{% if review_error and trenutni_korak != 4 %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">error</span>{{ review_error }}</div>{% endif %}
 
 {% if nadaljevanje and trenutni_korak == 2 %}
 <header class="page-heading billing-heading">
@@ -39,8 +40,45 @@
 </div>
 <form method="post" class="form-actions">{% csrf_token %}<button class="button-secondary" name="action" value="rerun_preflight" type="submit">Ponovno preveri predhodno kontrolo</button><button class="button-secondary" name="action" value="rerun_calculation" type="submit">Ponovno izračunaj</button><button class="button-primary" name="action" value="continue_step4" type="submit"{% if not step3_can_continue %} disabled{% endif %}>Nadaljuj na paketni pregled</button></form>
 {% elif nadaljevanje and trenutni_korak == 4 %}
-<header class="page-heading billing-heading"><p class="eyebrow">Mesečni obračunski postopek</p><h1>Paketni pregled</h1><p>Izračun je trajno shranjen. Podrobna pregledna tabela sledi v naslednji fazi.</p></header>
-<section class="continuation-state"><span class="material-symbols-outlined" aria-hidden="true">check_circle</span><div><strong>Izračunana podjetja: {% for batch in batches %}{% if batch.is_active_calculation %}{{ batch.company.naziv }} {% endif %}{% endfor %}</strong><p>Do potrditve paketa se lahko popravljeno podjetje pridruži istemu paketu.</p></div></section>
+<header class="page-heading billing-heading"><p class="eyebrow">Mesečni obračunski postopek</p><h1>Paketni pregled</h1><p>Skupni pregled kandidatov za {{ nadaljevanje.mesec|stringformat:"02d" }}/{{ nadaljevanje.leto }}.</p></header>
+<section class="review-summary" aria-label="Povzetek paketnega pregleda">
+  <span>Vsi <strong>{{ review_summary.total }}</strong></span><span>Izbrani <strong>{{ review_summary.selected }}</strong></span><span>Potrditev potrebna <strong>{{ review_summary.requiring_confirmation }}</strong></span><span>Potrjene izjeme <strong>{{ review_summary.confirmed }}</strong></span><span>Ročno neizdani <strong>{{ review_summary.user_deselected }}</strong></span><span>Sistemsko neizdajni <strong>{{ review_summary.system_non_issuable }}</strong></span>
+</section>
+{% if review_error %}<div class="review-global-error" role="alert">{{ review_error }}</div>{% endif %}
+<div class="review-table-wrap">
+<table class="review-table">
+  <thead><tr><th>Izbor</th><th>Podjetje</th><th>Najemnik</th><th>Enota / objekt</th><th class="numeric">Prejšnji znesek</th><th class="numeric">Ta mesec</th><th class="numeric">Δ</th><th>Status / izjeme</th><th>Pregled</th></tr></thead>
+  <tbody>
+  {% for row in review_rows %}
+    <tr{% if row.selected and row.requires_confirmation and not row.confirmed_at %} class="review-row-attention"{% elif not row.will_issue %} class="review-row-disabled"{% endif %}>
+      <td class="review-selection">{% if not row.will_issue %}<span class="status-badge">Neizdajno</span>{% elif row.selected %}<span aria-label="Izbrano">✓</span>{% else %}<span aria-label="Ni izbrano">—</span>{% endif %}</td>
+      <td><strong>{{ row.company_name }}</strong></td>
+      <td>{{ row.tenant_name }}</td>
+      <td>{{ row.property_unit_label }}{% if row.contract_reference %}<small>{{ row.contract_reference }}</small>{% endif %}</td>
+      <td class="numeric">{{ row.previous_display }}</td>
+      <td class="numeric">{{ row.current_display }}</td>
+      <td class="numeric delta"><strong>{{ row.delta_eur_display }}</strong><small>{{ row.delta_percent_display }}</small></td>
+      <td class="review-status">
+        {% if not row.will_issue %}<strong>Sistemsko neizdajno</strong><span>{{ row.system_non_issue_reason }}</span>
+        {% elif row.exceptions %}<ul>{% for exception in row.exceptions %}<li>{{ exception.message }}</li>{% endfor %}</ul>{% if not row.selected %}<span>Ročno neizdano</span>{% elif row.confirmed_at %}<span class="confirmed-state">Potrjeno</span>{% else %}<span class="attention-state">Potrditev potrebna</span>{% endif %}
+        {% else %}<span class="calm-state">Brez izjem</span>{% endif %}
+      </td>
+      <td class="review-actions">
+        {% if row.will_issue %}
+          {% if row.selected %}
+            {% if row.requires_confirmation and not row.confirmed_at %}<form method="post">{% csrf_token %}<input type="hidden" name="lease_id" value="{{ row.lease_id }}"><input type="hidden" name="candidate_fingerprint" value="{{ row.candidate_fingerprint }}"><button class="button-secondary compact" name="action" value="confirm_candidate" type="submit">Potrdi izjemo</button></form>{% endif %}
+            <form method="post" class="deselect-form">{% csrf_token %}<input type="hidden" name="lease_id" value="{{ row.lease_id }}"><input type="hidden" name="candidate_fingerprint" value="{{ row.candidate_fingerprint }}"><label>Razlog neizdaje<input name="non_issue_reason" value="{{ row.user_non_issue_reason }}" required></label><button class="button-secondary compact" name="action" value="deselect_candidate" type="submit">Ne izdaj</button></form>
+          {% else %}
+            <p class="user-non-issue">{{ row.user_non_issue_reason }}</p><form method="post">{% csrf_token %}<input type="hidden" name="lease_id" value="{{ row.lease_id }}"><input type="hidden" name="candidate_fingerprint" value="{{ row.candidate_fingerprint }}"><button class="button-secondary compact" name="action" value="select_candidate" type="submit">Ponovno izberi</button></form>
+          {% endif %}
+        {% endif %}
+        {% if row.error %}<p class="review-row-error" role="alert">{{ row.error }}</p>{% endif %}
+      </td>
+    </tr>
+  {% empty %}<tr><td colspan="9" class="review-empty">Ni trenutnih kandidatov.</td></tr>{% endfor %}
+  </tbody>
+</table>
+</div>
 <form method="post" class="form-actions">{% csrf_token %}<button class="button-secondary" name="action" value="refresh_review" type="submit">Ponovno preveri in osveži izračun</button></form>
 {% else %}
 <header class="page-heading billing-heading">
