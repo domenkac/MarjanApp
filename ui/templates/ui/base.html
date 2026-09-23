@@ -15,6 +15,7 @@
   <div class="app-shell">
     {% include "ui/partials/topbar.html" %}
     <main class="page-content">
+      {% if active_page == "nastavitve" %}{% include "ui/partials/settings_nav.html" %}{% endif %}
       {% block content %}{% endblock %}
     </main>
   </div>

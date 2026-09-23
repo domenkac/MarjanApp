@@ -146,6 +146,9 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .user-non-issue { margin: 0 0 6px; color: var(--muted); }
 .review-empty { padding: 24px !important; text-align: center; color: var(--muted); }
 .settings-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.settings-nav { display: flex; gap: 2px; margin: -12px 0 28px; border-bottom: 1px solid var(--outline); }
+.settings-nav a { padding: 10px 14px; color: var(--muted); font-size: 13px; font-weight: 600; text-decoration: none; border-bottom: 2px solid transparent; }
+.settings-nav a:hover, .settings-nav a:focus { color: var(--primary); border-bottom-color: var(--primary); }
 .settings-table-wrap, .settings-card { margin-bottom: 20px; background: var(--surface); border: 1px solid var(--outline); }
 .settings-table { width: 100%; border-collapse: collapse; font-size: 12px; }
 .settings-table th, .settings-table td { padding: 10px 12px; border-bottom: 1px solid var(--outline); text-align: left; vertical-align: middle; }
@@ -157,6 +160,8 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .settings-card > form { padding: 22px; }
 .settings-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
 .settings-form-grid .field input:not([type="checkbox"]), .settings-form-grid .field select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--outline); border-radius: 0; font: 14px Inter, sans-serif; }
+.settings-form-grid .field textarea { width: 100%; padding: 8px 10px; border: 1px solid var(--outline); border-radius: 0; font: 14px Inter, sans-serif; resize: vertical; }
+.settings-form-grid .field small { display: block; margin-top: 5px; color: var(--muted); font-size: 12px; }
 .settings-form-grid .field input[type="file"] { padding: 7px; }
 .checkbox-field { align-self: end; padding: 10px 0; }
 .checkbox-field label { display: inline; margin-right: 8px; }

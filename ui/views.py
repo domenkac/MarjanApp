@@ -6,6 +6,13 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from catalogs.models import ServiceCatalogItem, VatRegime
+from catalogs.services import (
+    deaktiviraj_ddv_rezim,
+    deaktiviraj_storitev,
+    ponovno_aktiviraj_ddv_rezim,
+    ponovno_aktiviraj_storitev,
+)
 from companies.models import Company, Signatory
 from companies.services import (
     arhiviraj_poslovni_zapis,
@@ -32,7 +39,14 @@ from invoicing.services import (
 from rendering.contexts import PdfRenderNapaka
 from rendering.services import generiraj_mesecni_predogled_pdf
 
-from .forms import CompanyForm, IzbiraMesecaForm, SignatoryForm, obdobje_za_mesec
+from .forms import (
+    CompanyForm,
+    IzbiraMesecaForm,
+    ServiceCatalogItemForm,
+    SignatoryForm,
+    VatRegimeForm,
+    obdobje_za_mesec,
+)
 
 
 def _settings_context(**extra):
@@ -47,6 +61,127 @@ def nastavitve(request):
         "ui/nastavitve.html",
         _settings_context(companies=companies),
     )
+
+
+@require_GET
+def ddv_rezimi(request):
+    regimes = VatRegime.objects.order_by("-aktiven", "sifra", "pk")
+    return render(
+        request, "ui/ddv_rezimi.html", _settings_context(regimes=regimes)
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def ddv_rezim_nov(request):
+    return _ddv_rezim_form(request)
+
+
+@require_http_methods(["GET", "POST"])
+def ddv_rezim_detail(request, regime_id):
+    return _ddv_rezim_form(request, get_object_or_404(VatRegime, pk=regime_id))
+
+
+def _ddv_rezim_form(request, regime=None):
+    form = VatRegimeForm(request.POST or None, instance=regime)
+    if request.method == "POST" and form.is_valid():
+        regime = form.save()
+        return redirect("ui:ddv_rezim_detail", regime_id=regime.pk)
+    return render(
+        request,
+        "ui/catalog_form.html",
+        _settings_context(
+            form=form,
+            object=regime,
+            section="DDV režimi",
+            title=regime.naziv if regime else "Nov DDV režim",
+            description="Davčna pravila in prikaz na računu.",
+            back_url="ui:ddv_rezimi",
+            save_label="Shrani DDV režim",
+            state_field="aktiven",
+            deactivate_url="ui:ddv_rezim_deaktiviraj",
+            activate_url="ui:ddv_rezim_aktiviraj",
+        ),
+    )
+
+
+def _catalog_state(request, model, object_id, service, detail_name, form_view):
+    obj = get_object_or_404(model, pk=object_id)
+    result = service(obj.pk)
+    if result.uspesno:
+        return redirect(detail_name, obj.pk)
+    return form_view(request, obj, [reason.sporocilo for reason in result.razlogi])
+
+
+def _render_ddv_with_errors(request, regime, errors):
+    form = VatRegimeForm(instance=regime)
+    return render(
+        request,
+        "ui/catalog_form.html",
+        _settings_context(
+            form=form, object=regime, section="DDV režimi", title=regime.naziv,
+            description="Davčna pravila in prikaz na računu.", back_url="ui:ddv_rezimi",
+            save_label="Shrani DDV režim", state_field="aktiven",
+            deactivate_url="ui:ddv_rezim_deaktiviraj", activate_url="ui:ddv_rezim_aktiviraj",
+            action_errors=errors,
+        ),
+    )
+
+
+@require_POST
+def ddv_rezim_deaktiviraj(request, regime_id):
+    return _catalog_state(request, VatRegime, regime_id, deaktiviraj_ddv_rezim, "ui:ddv_rezim_detail", _render_ddv_with_errors)
+
+
+@require_POST
+def ddv_rezim_aktiviraj(request, regime_id):
+    return _catalog_state(request, VatRegime, regime_id, ponovno_aktiviraj_ddv_rezim, "ui:ddv_rezim_detail", _render_ddv_with_errors)
+
+
+@require_GET
+def storitve(request):
+    items = ServiceCatalogItem.objects.select_related("privzeti_ddv_rezim").order_by(
+        "-aktivna", "naziv", "pk"
+    )
+    return render(request, "ui/storitve.html", _settings_context(items=items))
+
+
+@require_http_methods(["GET", "POST"])
+def storitev_nova(request):
+    return _storitev_form(request)
+
+
+@require_http_methods(["GET", "POST"])
+def storitev_detail(request, item_id):
+    return _storitev_form(request, get_object_or_404(ServiceCatalogItem, pk=item_id))
+
+
+def _storitev_form(request, item=None, action_errors=None):
+    form = ServiceCatalogItemForm(request.POST or None, instance=item)
+    if request.method == "POST" and form.is_valid():
+        item = form.save()
+        return redirect("ui:storitev_detail", item_id=item.pk)
+    return render(
+        request,
+        "ui/catalog_form.html",
+        _settings_context(
+            form=form, object=item, section="Storitve",
+            title=item.naziv if item else "Nova storitev",
+            description="Privzete vrednosti za hitrejši vnos storitev.",
+            back_url="ui:storitve", save_label="Shrani storitev",
+            state_field="aktivna", deactivate_url="ui:storitev_deaktiviraj",
+            activate_url="ui:storitev_aktiviraj", action_errors=action_errors,
+        ),
+    )
+
+
+@require_POST
+def storitev_deaktiviraj(request, item_id):
+    return _catalog_state(request, ServiceCatalogItem, item_id, deaktiviraj_storitev, "ui:storitev_detail", _storitev_form)
+
+
+@require_POST
+def storitev_aktiviraj(request, item_id):
+    return _catalog_state(request, ServiceCatalogItem, item_id, ponovno_aktiviraj_storitev, "ui:storitev_detail", _storitev_form)
 
 
 @require_http_methods(["GET", "POST"])

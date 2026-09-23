@@ -1,0 +1,8 @@
+{% extends "ui/base.html" %}
+{% block title %}{{ title }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading settings-heading"><div><p class="eyebrow">Nastavitve · {{ section }}</p><h1>{{ title }}</h1><p>{{ description }}</p></div><a class="button-secondary" href="{% url back_url %}">Nazaj na seznam</a></header>
+{% if action_errors %}<div class="form-errors" role="alert">{% for error in action_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
+<section class="settings-card"><form method="post">{% csrf_token %}{% include "ui/partials/form_fields.html" %}<div class="form-actions"><a class="button-secondary" href="{% url back_url %}">Prekliči</a><button class="button-primary" type="submit">{{ save_label }}</button></div></form></section>
+{% if object %}<section class="settings-card status-panel"><div><h2>Status</h2><span class="status-badge{% if state_field == 'aktiven' and object.aktiven or state_field == 'aktivna' and object.aktivna %} is-passed{% else %} is-archived{% endif %}">{% if state_field == 'aktiven' %}{% if object.aktiven %}Aktivno{% else %}Neaktivno{% endif %}{% else %}{% if object.aktivna %}Aktivna{% else %}Neaktivna{% endif %}{% endif %}</span></div>{% if state_field == 'aktiven' and object.aktiven or state_field == 'aktivna' and object.aktivna %}<form method="post" action="{% url deactivate_url object.pk %}">{% csrf_token %}<button class="button-secondary" type="submit">Deaktiviraj</button></form>{% else %}<form method="post" action="{% url activate_url object.pk %}">{% csrf_token %}<button class="button-primary" type="submit">Ponovno aktiviraj</button></form>{% endif %}</section>{% endif %}
+{% endblock %}

@@ -4,7 +4,77 @@ from datetime import date
 from django import forms
 from django.utils import timezone
 
+from catalogs.models import ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
+
+
+class VatRegimeChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return f"{obj.sifra} — {obj.naziv}"
+
+
+class VatRegimeForm(forms.ModelForm):
+    class Meta:
+        model = VatRegime
+        fields = (
+            "sifra",
+            "naziv",
+            "nacin_obracuna",
+            "stopnja",
+            "klavzula",
+            "rekapitulacijska_skupina",
+            "zahteva_referenco",
+            "velja_od",
+            "velja_do",
+        )
+        labels = {  # noqa: RUF012
+            "sifra": "Šifra",
+            "naziv": "Naziv",
+            "nacin_obracuna": "Način obračuna",
+            "stopnja": "Stopnja",
+            "klavzula": "Klavzula",
+            "rekapitulacijska_skupina": "Skupina za rekapitulacijo DDV",
+            "zahteva_referenco": "Zahteva referenco",
+            "velja_od": "Velja od",
+            "velja_do": "Velja do",
+        }
+        help_texts = {  # noqa: RUF012
+            "klavzula": "To je besedilo, ki se po potrebi izpiše na računu.",
+            "rekapitulacijska_skupina": (
+                "Postavke z isto skupino se na računu seštejejo v eno vrstico."
+            ),
+            "zahteva_referenco": (
+                "Pri uporabi režima bodo zahtevani podatki reference oziroma listine."
+            ),
+        }
+        widgets = {  # noqa: RUF012
+            "velja_od": forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+            "velja_do": forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+            "klavzula": forms.Textarea(attrs={"rows": 3}),
+        }
+
+
+class ServiceCatalogItemForm(forms.ModelForm):
+    privzeti_ddv_rezim = VatRegimeChoiceField(
+        queryset=VatRegime.objects.all(),
+        required=False,
+        label="Privzeti DDV režim",
+    )
+
+    class Meta:
+        model = ServiceCatalogItem
+        fields = ("naziv", "privzeta_cena", "privzeti_ddv_rezim", "enota_mere")
+        labels = {  # noqa: RUF012
+            "naziv": "Naziv",
+            "privzeta_cena": "Privzeta cena",
+            "enota_mere": "Enota mere",
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["privzeti_ddv_rezim"].queryset = VatRegime.objects.order_by(
+            "-aktiven", "sifra", "pk"
+        )
 
 
 class _KeepExistingFileMixin:
