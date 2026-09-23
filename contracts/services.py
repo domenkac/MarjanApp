@@ -71,6 +71,54 @@ def efektivna_veljavnost_postavke(postavka: LeaseItem) -> tuple[date, date | Non
     return zacetek, konec
 
 
+def hierarhija_pogodbe_je_uporabna(lease: Lease) -> bool:
+    return bool(
+        not lease.arhivirana
+        and lease.unit.aktivna
+        and lease.unit.property.aktivna
+        and lease.unit.property.company.aktivno
+        and lease.tenant.aktiven
+    )
+
+
+def deaktiviraj_prejemnika(prejemnik: RecipientContact) -> StanjeRezultat:
+    with transaction.atomic():
+        svezi = RecipientContact.objects.filter(pk=prejemnik.pk).first()
+        if svezi is None:
+            return StanjeRezultat(False, (StanjeRazlog("ZAPIS_NE_OBSTAJA", "Prejemnik ne obstaja."),))
+        if not svezi.aktiven:
+            return StanjeRezultat(False, (StanjeRazlog("ZE_NEAKTIVEN", "Prejemnik je že neaktiven."),))
+        svezi.aktiven = False
+        svezi.save(update_fields=["aktiven"])
+        return StanjeRezultat(True)
+
+
+def ponovno_aktiviraj_prejemnika(prejemnik: RecipientContact) -> StanjeRezultat:
+    with transaction.atomic():
+        svezi = RecipientContact.objects.select_related(
+            "lease__unit__property__company", "lease__tenant"
+        ).filter(pk=prejemnik.pk).first()
+        if svezi is None:
+            return StanjeRezultat(False, (StanjeRazlog("ZAPIS_NE_OBSTAJA", "Prejemnik ne obstaja."),))
+        if svezi.aktiven:
+            return StanjeRezultat(False, (StanjeRazlog("ZE_AKTIVEN", "Prejemnik je že aktiven."),))
+        if not hierarhija_pogodbe_je_uporabna(svezi.lease):
+            return StanjeRezultat(False, (StanjeRazlog(
+                "NEAKTIVNA_HIERARHIJA",
+                "Prejemnika ni mogoče aktivirati, ker pogodba ali njen nadrejeni zapis ni aktiven.",
+            ),))
+        svezi.aktiven = True
+        try:
+            svezi.full_clean()
+        except ValidationError as error:
+            return StanjeRezultat(False, tuple(
+                StanjeRazlog("NEVELJAVEN_PREJEMNIK", message)
+                for message in error.messages
+            ))
+        svezi.save(update_fields=["aktiven"])
+        return StanjeRezultat(True)
+
+
 def izracunaj_osnovo(
     znesek_neto_mesecno: Decimal,
     dnevi_najema: int,

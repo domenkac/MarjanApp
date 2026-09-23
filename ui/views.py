@@ -19,13 +19,16 @@ from companies.services import (
     arhiviraj_poslovni_zapis,
     ponovno_aktiviraj_poslovni_zapis,
 )
-from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from contracts.services import (
     arhiviraj_poslovni_zapis as arhiviraj_pogodbeni_zapis,
 )
 from contracts.services import (
+    deaktiviraj_prejemnika,
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
+    hierarhija_pogodbe_je_uporabna,
+    ponovno_aktiviraj_prejemnika,
     rocno_popravi_postavko,
 )
 from contracts.services import (
@@ -58,6 +61,7 @@ from .forms import (
     LeaseItemCreateForm,
     LeaseItemDetailsForm,
     PropertyForm,
+    RecipientContactForm,
     ServiceCatalogItemForm,
     SignatoryForm,
     TenantForm,
@@ -105,8 +109,16 @@ def _lease_form(request, lease=None, action_errors=None, *, bind_post=True):
         if lease
         else ()
     )
+    contacts = (
+        RecipientContact.objects.filter(lease=lease).order_by(
+            "-aktiven", "vloga", "email", "pk"
+        )
+        if lease
+        else ()
+    )
     return render(request, "ui/pogodba_form.html", _contracts_context(
-        form=form, lease=lease, items=items, action_errors=action_errors,
+        form=form, lease=lease, items=items, contacts=contacts,
+        action_errors=action_errors,
         hierarchy_usable=_lease_hierarchy_usable(lease) if lease else False,
     ))
 
@@ -138,14 +150,78 @@ def pogodba_reaktiviraj(request, lease_id):
 
 
 def _lease_hierarchy_usable(lease):
-    return bool(
-        lease
-        and not lease.arhivirana
-        and lease.unit.aktivna
-        and lease.unit.property.aktivna
-        and lease.unit.property.company.aktivno
-        and lease.tenant.aktiven
+    return bool(lease and hierarhija_pogodbe_je_uporabna(lease))
+
+
+@require_http_methods(["GET", "POST"])
+def prejemnik_nov(request, lease_id):
+    lease = get_object_or_404(
+        Lease.objects.select_related("unit__property__company", "tenant"), pk=lease_id
     )
+    form = RecipientContactForm(
+        request.POST or None,
+        initial={"email": lease.tenant.email} if request.method == "GET" else None,
+    )
+    form.instance.lease = lease
+    form.instance.kanal = RecipientContact.Kanal.PDF
+    usable = hierarhija_pogodbe_je_uporabna(lease)
+    if request.method == "POST" and usable and form.is_valid():
+        contact = form.save()
+        return redirect("ui:prejemnik_detail", contact_id=contact.pk)
+    return render(request, "ui/prejemnik_form.html", _contracts_context(
+        form=form, contact=None, lease=lease,
+        action_errors=None if usable else [
+            "Prejemnika ni mogoče dodati, ker pogodba ali njen nadrejeni zapis ni aktiven."
+        ],
+    ))
+
+
+@require_http_methods(["GET", "POST"])
+def prejemnik_detail(request, contact_id):
+    contact = get_object_or_404(
+        RecipientContact.objects.select_related(
+            "lease__unit__property__company", "lease__tenant"
+        ), pk=contact_id
+    )
+    return _recipient_form(request, contact)
+
+
+def _recipient_form(request, contact, action_errors=None, *, bind_post=True):
+    form = RecipientContactForm(
+        request.POST if bind_post and request.method == "POST" else None,
+        instance=contact,
+    )
+    if bind_post and request.method == "POST" and form.is_valid():
+        form.save()
+        return redirect("ui:prejemnik_detail", contact_id=contact.pk)
+    return render(request, "ui/prejemnik_form.html", _contracts_context(
+        form=form, contact=contact, lease=contact.lease, action_errors=action_errors,
+    ))
+
+
+def _recipient_state(request, contact_id, service):
+    contact = get_object_or_404(
+        RecipientContact.objects.select_related(
+            "lease__unit__property__company", "lease__tenant"
+        ), pk=contact_id
+    )
+    result = service(contact)
+    if result.uspesno:
+        return redirect("ui:prejemnik_detail", contact_id=contact.pk)
+    contact.refresh_from_db()
+    return _recipient_form(
+        request, contact, [reason.sporocilo for reason in result.razlogi], bind_post=False
+    )
+
+
+@require_POST
+def prejemnik_deaktiviraj(request, contact_id):
+    return _recipient_state(request, contact_id, deaktiviraj_prejemnika)
+
+
+@require_POST
+def prejemnik_reaktiviraj(request, contact_id):
+    return _recipient_state(request, contact_id, ponovno_aktiviraj_prejemnika)
 
 
 @require_http_methods(["GET", "POST"])

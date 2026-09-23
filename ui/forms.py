@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from catalogs.models import ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
-from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 
 
 class CompanyChoiceField(forms.ModelChoiceField):
@@ -162,6 +162,16 @@ class LeaseForm(forms.ModelForm):
                 "Rok plačila je obvezen pri urejanju obstoječe pogodbe."
             )
         return value
+
+
+class RecipientContactForm(forms.ModelForm):
+    class Meta:
+        model = RecipientContact
+        fields = ("email", "vloga")
+        labels = {"email": "E-pošta", "vloga": "Vloga"}  # noqa: RUF012
+        error_messages = {  # noqa: RUF012
+            "email": {"invalid": "Vnesite veljaven e-poštni naslov."},
+        }
 
 
 LEASE_ITEM_CREATE_FIELDS = (
