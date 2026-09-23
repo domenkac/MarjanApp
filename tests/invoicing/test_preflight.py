@@ -29,6 +29,7 @@ from invoicing.services import (
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
 )
+from rendering.contexts import pripravi_mesecni_pdf_context
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -215,6 +216,25 @@ def _calculate(data):
 
 def _candidate_codes(candidate):
     return {item["code"] for item in candidate["exceptions"]}
+
+
+def test_mesecni_pdf_context_se_po_spremembah_zivih_podatkov_ne_spremeni(
+    ready_company,
+):
+    data = ready_company
+    candidate = _calculate(data)[0]
+    snapshot = data["batch"].calculation_snapshot
+    before = pripravi_mesecni_pdf_context(snapshot, candidate)
+
+    Company.objects.filter(pk=data["company"].pk).update(naziv="Novo podjetje")
+    Tenant.objects.filter(pk=data["tenant"].pk).update(naziv="Nov najemnik")
+    Lease.objects.filter(pk=data["lease"].pk).update(oznaka_pogodbe="NOVA")
+    LeaseItem.objects.filter(pk=data["item"].pk).update(
+        naziv_postavke="Nova postavka", znesek_neto_mesecno=Decimal("999.00")
+    )
+    VatRegime.objects.filter(pk=data["regime"].pk).update(stopnja=Decimal("9.50"))
+
+    assert pripravi_mesecni_pdf_context(snapshot, candidate) == before
 
 
 def _enter_step4_with_reviews(data, *, will_issue=True, exceptions=None):

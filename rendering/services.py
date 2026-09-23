@@ -30,6 +30,7 @@ from .contexts import (
     EslogRenderNapaka,
     PdfContext,
     PdfRenderNapaka,
+    pripravi_mesecni_pdf_context,
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
 )
@@ -59,6 +60,7 @@ class DdvRekapitulacija:
 
 
 _PREDLOGA = Path(__file__).parent / "templates" / "rendering" / "racun.html"
+_PREDLOGE = {"1": _PREDLOGA}
 _ENGINE = Engine(dirs=[str(_PREDLOGA.parent)])
 
 
@@ -137,7 +139,13 @@ def _klavzule(context: PdfContext) -> tuple[str, ...]:
 
 
 def pripravi_html(context: PdfContext) -> str:
-    predloga = _ENGINE.get_template(_PREDLOGA.name)
+    try:
+        predloga_pot = _PREDLOGE[context.pdf_template_version]
+    except KeyError as napaka:
+        raise PdfRenderNapaka(
+            "PREDLOGA_NEPODPRTA", "Shranjene različice PDF predloge ni mogoče prikazati."
+        ) from napaka
+    predloga = _ENGINE.get_template(predloga_pot.name)
     return predloga.render(Context({
         "context": context,
         "logo": _data_uri(context.izdajatelj_logotip_slika_pot),
@@ -164,6 +172,10 @@ def _generiraj_pdf_bytes(context: PdfContext) -> bytes:
     if not pdf_bytes.startswith(b"%PDF-"):
         raise PdfRenderNapaka("PDF_NEVELJAVEN", "Renderer ni vrnil PDF dokumenta.")
     return pdf_bytes
+
+
+def generiraj_mesecni_predogled_pdf(snapshot: dict, candidate: dict) -> bytes:
+    return _generiraj_pdf_bytes(pripravi_mesecni_pdf_context(snapshot, candidate))
 
 
 def _preveri_obstojeci_artifact(invoice: Invoice) -> PdfRenderRezultat | None:

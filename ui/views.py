@@ -2,6 +2,7 @@ from calendar import monthrange
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.http import HttpResponse
 from django.shortcuts import redirect, render
 from django.views.decorators.http import require_GET, require_http_methods
 
@@ -20,9 +21,12 @@ from invoicing.services import (
     preveri_predhodno_kontrolo,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
 )
+from rendering.contexts import PdfRenderNapaka
+from rendering.services import generiraj_mesecni_predogled_pdf
 
 from .forms import IzbiraMesecaForm, obdobje_za_mesec
 
@@ -51,6 +55,46 @@ def dashboard(request):
             "aktivni_cikel": aktivni_cikel,
         },
     )
+
+
+@require_GET
+def mesecni_obracun_predogled_pdf(request):
+    try:
+        lease_id = int(request.GET.get("lease_id", ""))
+        fingerprint = request.GET.get("candidate_fingerprint", "").strip()
+        if not fingerprint:
+            raise ValidationError("Manjka identiteta kandidata.")
+        cycle = nalozi_aktivni_mesecni_cikel()
+        if cycle is None:
+            raise ValidationError("Aktivni mesečni obračun ne obstaja.")
+        batch, candidate = trenutni_mesecni_kandidat(
+            cycle, lease_id=lease_id, candidate_fingerprint=fingerprint
+        )
+        pdf_bytes = generiraj_mesecni_predogled_pdf(
+            batch.calculation_snapshot, candidate
+        )
+    except PdfRenderNapaka as napaka:
+        status = 422 if napaka.koda != "PDF_GENERIRANJE_NI_USPELO" else 500
+        sporocilo = (
+            "Predogleda PDF ni bilo mogoče ustvariti."
+            if status == 500
+            else str(napaka)
+        )
+        return HttpResponse(sporocilo, status=status, content_type="text/plain")
+    except (TypeError, ValueError):
+        return HttpResponse("ID pogodbe ni veljaven.", status=400, content_type="text/plain")
+    except MesecniCikelNapaka as napaka:
+        return HttpResponse(str(napaka), status=409, content_type="text/plain")
+    except ValidationError as napaka:
+        sporocilo = napaka.messages[0]
+        status = 404 if sporocilo == "Kandidat ni trenutni aktivni kandidat." else 409
+        if status == 404:
+            sporocilo = "Predogled za tega kandidata ni več na voljo."
+        return HttpResponse(sporocilo, status=status, content_type="text/plain")
+    response = HttpResponse(pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = 'inline; filename="predogled-racuna.pdf"'
+    response["Cache-Control"] = "no-store"
+    return response
 
 
 @require_http_methods(["GET", "POST"])

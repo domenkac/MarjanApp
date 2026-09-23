@@ -64,6 +64,7 @@
         {% else %}<span class="calm-state">Brez izjem</span>{% endif %}
       </td>
       <td class="review-actions">
+        {% if row.will_issue %}<a class="button-secondary compact" href="{% url 'ui:mesecni_obracun_predogled_pdf' %}?lease_id={{ row.lease_id }}&amp;candidate_fingerprint={{ row.candidate_fingerprint|urlencode }}" target="_blank" rel="noopener">Predogled PDF</a>{% endif %}
         {% if row.will_issue %}
           {% if row.selected %}
             {% if row.requires_confirmation and not row.confirmed_at %}<form method="post">{% csrf_token %}<input type="hidden" name="lease_id" value="{{ row.lease_id }}"><input type="hidden" name="candidate_fingerprint" value="{{ row.candidate_fingerprint }}"><button class="button-secondary compact" name="action" value="confirm_candidate" type="submit">Potrdi izjemo</button></form>{% endif %}

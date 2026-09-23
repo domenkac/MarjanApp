@@ -1,3 +1,5 @@
+import re
+from copy import deepcopy
 from datetime import date
 
 import pytest
@@ -13,6 +15,7 @@ from invoicing.models import (
     MonthlyCycle,
 )
 from invoicing.services import CALCULATION_SNAPSHOT_VERSION
+from rendering.contexts import PdfRenderNapaka
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -640,3 +643,199 @@ def test_step4_ne_zaupa_ponarejenim_poslovnim_podatkom(client):
     assert "Ponarejeno podjetje" not in content
     assert "125,00" in content
     assert "999999" not in content
+
+
+@pytest.mark.django_db
+def test_step4_pdf_preview_uses_exact_current_identity_without_side_effects(
+    client, monkeypatch, tmp_path
+):
+    _cycle, (first, second) = _review_cycle({}, {})
+    NumberSequence.objects.create(
+        company=first.batch.company,
+        tip=NumberSequence.Tip.NP,
+        leto=0,
+        zadnja_stevilka=7,
+    )
+    before_reviews = list(MonthlyCandidateReview.objects.values())
+    before_snapshots = {
+        batch.pk: deepcopy(batch.calculation_snapshot)
+        for batch in MonthlyBatch.objects.all()
+    }
+    before_counts = (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        NumberSequence.objects.count(),
+    )
+    before_sequences = list(
+        NumberSequence.objects.values_list("pk", "zadnja_stevilka")
+    )
+    before_artifacts = list(
+        Invoice.objects.values_list("pk", "rendered_pdf_path", "checksum")
+    )
+    monkeypatch.setattr(
+        "ui.views.generiraj_mesecni_predogled_pdf", lambda snapshot, candidate: b"%PDF-test"
+    )
+
+    response = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": first.lease_id,
+        "candidate_fingerprint": first.candidate_fingerprint,
+    })
+
+    assert response.status_code == 200
+    assert response["Content-Type"] == "application/pdf"
+    assert response["Content-Disposition"].startswith("inline;")
+    assert response.content == b"%PDF-test"
+    assert list(MonthlyCandidateReview.objects.values()) == before_reviews
+    assert {
+        batch.pk: batch.calculation_snapshot for batch in MonthlyBatch.objects.all()
+    } == before_snapshots
+    assert (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        NumberSequence.objects.count(),
+    ) == before_counts
+    assert list(
+        NumberSequence.objects.values_list("pk", "zadnja_stevilka")
+    ) == before_sequences
+    assert list(
+        Invoice.objects.values_list("pk", "rendered_pdf_path", "checksum")
+    ) == before_artifacts
+    assert list(tmp_path.iterdir()) == []
+
+    wrong_pair = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": first.lease_id,
+        "candidate_fingerprint": second.candidate_fingerprint,
+    })
+    stale = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": first.lease_id,
+        "candidate_fingerprint": "f" * 64,
+    })
+    assert wrong_pair.status_code == 404
+    assert stale.status_code == 404
+    assert "ni več na voljo" in stale.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    "step", [MonthlyCycle.Korak.IZRACUN_OSNUTKOV, MonthlyCycle.Korak.POTRDITEV_PAKETA]
+)
+def test_pdf_preview_is_rejected_outside_step4(client, step):
+    cycle, (review,) = _review_cycle({})
+    cycle.trenutni_korak = step
+    cycle.save(update_fields=["trenutni_korak"])
+
+    response = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    })
+
+    assert response.status_code == 409
+    assert "samo v koraku 4" in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_pdf_preview_renderer_error_is_not_misclassified_as_bad_lease_id(
+    client, monkeypatch
+):
+    _cycle, (review,) = _review_cycle({})
+    def fail(_snapshot, _candidate):
+        raise PdfRenderNapaka("PDF_GENERIRANJE_NI_USPELO", "Renderer odpovedal.")
+    monkeypatch.setattr("ui.views.generiraj_mesecni_predogled_pdf", fail)
+
+    response = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    })
+
+    assert response.status_code == 500
+    assert response.content.decode() == "Predogleda PDF ni bilo mogoče ustvariti."
+
+
+@pytest.mark.django_db
+def test_pdf_preview_unsupported_template_returns_controlled_error(
+    client, monkeypatch
+):
+    _cycle, (review,) = _review_cycle({})
+
+    def fail(_snapshot, _candidate):
+        raise PdfRenderNapaka(
+            "PREDLOGA_NEPODPRTA",
+            "Shranjene različice PDF predloge ni mogoče prikazati.",
+        )
+
+    monkeypatch.setattr("ui.views.generiraj_mesecni_predogled_pdf", fail)
+    response = client.get("/mesecni-obracun/predogled-pdf/", {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    })
+
+    assert response.status_code == 422
+    assert "Shranjene različice PDF predloge" in response.content.decode()
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("params", "message"),
+    [
+        ({"lease_id": "abc", "candidate_fingerprint": "a" * 64}, "ID pogodbe ni veljaven."),
+        ({"lease_id": "1"}, "Manjka identiteta kandidata."),
+        ({"candidate_fingerprint": "a" * 64}, "ID pogodbe ni veljaven."),
+    ],
+)
+def test_pdf_preview_rejects_malformed_or_missing_identity(client, params, message):
+    response = client.get("/mesecni-obracun/predogled-pdf/", params)
+
+    assert response.status_code < 500
+    assert message in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_pdf_preview_rejects_real_stale_fingerprint_after_snapshot_replacement(
+    client, monkeypatch
+):
+    _cycle, (review,) = _review_cycle({})
+    monkeypatch.setattr(
+        "ui.views.generiraj_mesecni_predogled_pdf",
+        lambda snapshot, candidate: b"%PDF-test",
+    )
+    before = (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values_list("pk", "zadnja_stevilka")),
+    )
+    url = "/mesecni-obracun/predogled-pdf/"
+    identity_a = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+
+    assert client.get(url, identity_a).status_code == 200
+
+    batch = review.batch
+    snapshot = batch.calculation_snapshot
+    fingerprint_b = "b" * 64
+    snapshot["candidates"][0]["candidate_fingerprint"] = fingerprint_b
+    batch.calculation_snapshot = snapshot
+    batch.save(update_fields=["calculation_snapshot"])
+
+    assert client.get(url, identity_a).status_code == 404
+    assert client.get(url, {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": fingerprint_b,
+    }).status_code == 200
+    assert (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values_list("pk", "zadnja_stevilka")),
+    ) == before
+
+
+@pytest.mark.django_db
+def test_step4_issuable_candidate_shows_preview_without_visible_fingerprint(client):
+    _cycle, (review,) = _review_cycle({})
+
+    content = client.get("/mesecni-obracun/").content.decode()
+    visible_text = " ".join(re.findall(r">([^<]+)<", content))
+
+    assert ">Predogled PDF</a>" in content
+    assert review.candidate_fingerprint not in visible_text

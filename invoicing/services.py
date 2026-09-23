@@ -2296,19 +2296,28 @@ def trenutni_pregledi_mesecnega_cikla(cycle: MonthlyCycle) -> list[MonthlyCandid
     ]
 
 
-def _trenutni_pregled_in_kandidat(cycle, lease_id, candidate_fingerprint):
+def trenutni_mesecni_kandidat(cycle, *, lease_id, candidate_fingerprint):
     cycle = _zahtevaj_cetrti_korak(cycle)
     for batch, candidate, current_lease_id, fingerprint in _aktivni_kandidati(cycle):
         if current_lease_id == lease_id and fingerprint == candidate_fingerprint:
-            return (
-                MonthlyCandidateReview.objects.get(
-                    batch=batch,
-                    lease_id=lease_id,
-                    candidate_fingerprint=candidate_fingerprint,
-                ),
-                candidate,
-            )
+            return batch, candidate
     raise ValidationError("Kandidat ni trenutni aktivni kandidat.")
+
+
+def _trenutni_pregled_in_kandidat(cycle, lease_id, candidate_fingerprint):
+    batch, candidate = trenutni_mesecni_kandidat(
+        cycle,
+        lease_id=lease_id,
+        candidate_fingerprint=candidate_fingerprint,
+    )
+    return (
+        MonthlyCandidateReview.objects.get(
+            batch=batch,
+            lease_id=lease_id,
+            candidate_fingerprint=candidate_fingerprint,
+        ),
+        candidate,
+    )
 
 
 def nastavi_izbiro_kandidata(

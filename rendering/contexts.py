@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
@@ -157,6 +158,106 @@ def _preveri_sliko(pot: str):
         ) from napaka
     if not obstaja:
         raise PdfRenderNapaka("ASSET_MANJKA", f"Slika ne obstaja: {pot}.")
+
+
+def _snapshot_asset(checksum: str) -> str:
+    if len(checksum or "") != 64 or any(c not in "0123456789abcdef" for c in checksum):
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Nespremenljiv asset ni veljaven.")
+    pot = f"nespremenljivi-asseti/{checksum}"
+    _preveri_sliko(pot)
+    try:
+        with default_storage.open(pot, "rb") as datoteka:
+            dejanski = hashlib.sha256(datoteka.read()).hexdigest()
+    except (OSError, SuspiciousFileOperation, ValueError) as napaka:
+        raise PdfRenderNapaka("ASSET_MANJKA", "Nespremenljiv asset ni dostopen.") from napaka
+    if dejanski != checksum:
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Nespremenljiv asset je poškodovan.")
+    return pot
+
+
+def _snapshot_vrednost(zapis, kljuc):
+    vrednost = zapis.get(kljuc) if isinstance(zapis, dict) else None
+    if vrednost is None or (isinstance(vrednost, str) and not vrednost.strip()):
+        raise PdfRenderNapaka("SNAPSHOT_MANJKA", "Manjka obvezen podatek v posnetku.")
+    return vrednost
+
+
+def pripravi_mesecni_pdf_context(snapshot: dict, candidate: dict) -> PdfContext:
+    try:
+        company = _snapshot_vrednost(snapshot, "company")
+        tenant = _snapshot_vrednost(candidate, "tenant")
+        signatory = _snapshot_vrednost(company, "signatory")
+        lines = _snapshot_vrednost(candidate, "lines")
+        totals = _snapshot_vrednost(candidate, "totals")
+        if not candidate.get("will_issue") or not lines:
+            raise PdfRenderNapaka(
+                "SNAPSHOT_MANJKA", "Kandidat nima vsebine za predogled PDF."
+            )
+        vrstice = tuple(
+            PdfVrstica(
+                opis=str(_snapshot_vrednost(line, "description")),
+                osnova=Decimal(str(_snapshot_vrednost(line, "net"))),
+                ddv_stopnja=Decimal(str(_snapshot_vrednost(line, "vat_rate"))),
+                ddv_znesek=Decimal(str(_snapshot_vrednost(line, "vat"))),
+                skupaj=Decimal(str(_snapshot_vrednost(line, "total"))),
+                ddv_nacin_obracuna=str(_snapshot_vrednost(line, "vat_method")),
+                ddv_klavzula=str(line.get("vat_clause") or ""),
+                ddv_rekap_skupina=str(_snapshot_vrednost(line, "vat_summary_group")),
+                je_sorazmerno=bool(line.get("proportional")),
+            )
+            for line in lines
+        )
+        osnova = Decimal(str(_snapshot_vrednost(totals, "net")))
+        ddv = Decimal(str(_snapshot_vrednost(totals, "vat")))
+        skupaj = Decimal(str(_snapshot_vrednost(totals, "total")))
+        if (
+            sum((line.osnova for line in vrstice), Decimal("0.00")) != osnova
+            or sum((line.ddv_znesek for line in vrstice), Decimal("0.00")) != ddv
+            or sum((line.skupaj for line in vrstice), Decimal("0.00")) != skupaj
+            or osnova + ddv != skupaj
+        ):
+            raise PdfRenderNapaka("VSOTE_NESKLADNE", "Vsote v posnetku niso skladne.")
+        return PdfContext(
+            document_type=Invoice.DocumentType.NP,
+            stevilka="PREDOGLED",
+            datum_izdaje=date.fromisoformat(str(_snapshot_vrednost(snapshot, "issue_date"))),
+            obdobje_od=date.fromisoformat(str(_snapshot_vrednost(snapshot, "period_start"))),
+            obdobje_do=date.fromisoformat(str(_snapshot_vrednost(snapshot, "period_end"))),
+            rok_placila=date.fromisoformat(str(_snapshot_vrednost(candidate, "due_date"))),
+            prejemnik_naziv=str(_snapshot_vrednost(tenant, "name")),
+            prejemnik_naslov=str(_snapshot_vrednost(tenant, "address")),
+            prejemnik_davcna_stevilka=str(tenant.get("tax_number") or ""),
+            prejemnik_maticna_stevilka=str(tenant.get("registration_number") or ""),
+            izdajatelj_naziv=str(_snapshot_vrednost(company, "name")),
+            izdajatelj_naslov=str(_snapshot_vrednost(company, "address")),
+            izdajatelj_davcna_stevilka=str(_snapshot_vrednost(company, "tax_number")),
+            izdajatelj_maticna_stevilka=str(_snapshot_vrednost(company, "registration_number")),
+            izdajatelj_trr=str(_snapshot_vrednost(company, "iban")),
+            izdajatelj_logotip_slika_pot=_snapshot_asset(
+                str(_snapshot_vrednost(company, "logo_checksum"))
+            ),
+            izdajatelj_podpisnik_ime=str(_snapshot_vrednost(signatory, "name")),
+            izdajatelj_podpisnik_funkcija=str(signatory.get("function") or ""),
+            izdajatelj_podpisnik_slika_pot=_snapshot_asset(
+                str(_snapshot_vrednost(signatory, "signature_checksum"))
+            ),
+            oznaka_pogodbe=str(_snapshot_vrednost(candidate, "contract_reference")),
+            objekt_naziv=str(_snapshot_vrednost(candidate, "property_label")),
+            povezan_racun_stevilka=None,
+            razlog="",
+            osnova_skupaj=osnova,
+            ddv_skupaj=ddv,
+            skupaj_z_ddv=skupaj,
+            vrstice=vrstice,
+            pdf_template_version=str(_snapshot_vrednost(candidate, "pdf_template_version")),
+            oznaka_vzorca="PREDOGLED – NI RAČUN",
+        )
+    except PdfRenderNapaka:
+        raise
+    except (ArithmeticError, TypeError, ValueError) as napaka:
+        raise PdfRenderNapaka(
+            "SNAPSHOT_NEVELJAVEN", "Podatki posnetka za PDF niso veljavni."
+        ) from napaka
 
 
 def _vrstica_context(vrstica: InvoiceLine) -> PdfVrstica:

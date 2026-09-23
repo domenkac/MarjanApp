@@ -1,4 +1,5 @@
 import base64
+import hashlib
 from datetime import date
 from decimal import Decimal
 
@@ -19,6 +20,7 @@ from invoicing.services import (
 )
 from rendering.contexts import (
     PdfRenderNapaka,
+    pripravi_mesecni_pdf_context,
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
 )
@@ -32,6 +34,159 @@ VALID_PNG_PODPIS = base64.b64decode(
 VALID_PNG_NOV_ASSET = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNg+M/wHwAEAQH/cetH5QAAAABJRU5ErkJggg=="
 )
+
+
+def _mesecni_snapshot(tmp_path):
+    logo_checksum = hashlib.sha256(VALID_PNG_LOGO).hexdigest()
+    podpis_checksum = hashlib.sha256(VALID_PNG_PODPIS).hexdigest()
+    assets = tmp_path / "nespremenljivi-asseti"
+    assets.mkdir()
+    (assets / logo_checksum).write_bytes(VALID_PNG_LOGO)
+    (assets / podpis_checksum).write_bytes(VALID_PNG_PODPIS)
+    candidate = {
+        "lease_id": 1,
+        "candidate_fingerprint": "a" * 64,
+        "contract_reference": "P-1",
+        "property_label": "Objekt A",
+        "tenant": {
+            "name": "Najemnik snapshot",
+            "address": "Trg 1",
+            "tax_number": "15012557",
+            "registration_number": "1234567000",
+        },
+        "due_date": "2031-02-27",
+        "will_issue": True,
+        "pdf_template_version": "1",
+        "lines": [{
+            "description": "Najemnina snapshot",
+            "net": "100.00",
+            "vat_rate": "22.00",
+            "vat": "22.00",
+            "total": "122.00",
+            "vat_method": "OBDAVCENO",
+            "vat_clause": "",
+            "vat_summary_group": "DDV 22 %",
+            "proportional": False,
+        }],
+        "totals": {"net": "100.00", "vat": "22.00", "total": "122.00"},
+    }
+    snapshot = {
+        "issue_date": "2031-02-12",
+        "period_start": "2031-02-01",
+        "period_end": "2031-02-28",
+        "company": {
+            "name": "Podjetje snapshot",
+            "address": "Glavna 1",
+            "tax_number": "15012557",
+            "registration_number": "1234567000",
+            "iban": "SI56191000000123438",
+            "logo_checksum": logo_checksum,
+            "signatory": {
+                "name": "Ana Snapshot",
+                "function": "Direktorica",
+                "signature_checksum": podpis_checksum,
+            },
+        },
+    }
+    return snapshot, candidate
+
+
+def test_mesecni_pdf_context_uporabi_samo_snapshot(tmp_path, settings):
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+
+    context = pripravi_mesecni_pdf_context(snapshot, candidate)
+
+    assert context.stevilka == "PREDOGLED"
+    assert context.oznaka_vzorca == "PREDOGLED – NI RAČUN"
+    assert context.izdajatelj_naziv == "Podjetje snapshot"
+    assert context.prejemnik_naziv == "Najemnik snapshot"
+    assert context.vrstice[0].opis == "Najemnina snapshot"
+    assert context.pdf_template_version == "1"
+    assert context.izdajatelj_logotip_slika_pot.endswith(
+        snapshot["company"]["logo_checksum"]
+    )
+    assert context.izdajatelj_podpisnik_slika_pot.endswith(
+        snapshot["company"]["signatory"]["signature_checksum"]
+    )
+
+
+def test_mesecni_predogled_renderira_samo_v_pomnilnik(tmp_path, settings):
+    from rendering.services import generiraj_mesecni_predogled_pdf
+
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+    before = {path.relative_to(tmp_path) for path in tmp_path.rglob("*")}
+
+    pdf = generiraj_mesecni_predogled_pdf(snapshot, candidate)
+
+    assert pdf.startswith(b"%PDF-")
+    assert {path.relative_to(tmp_path) for path in tmp_path.rglob("*")} == before
+
+
+def test_mesecni_predogled_zavrne_nepodprto_shranjeno_predlogo(
+    tmp_path, settings
+):
+    from rendering.services import generiraj_mesecni_predogled_pdf
+
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+    candidate["pdf_template_version"] = "unsupported-version"
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        generiraj_mesecni_predogled_pdf(snapshot, candidate)
+
+    assert error.value.koda == "PREDLOGA_NEPODPRTA"
+
+
+def test_mesecni_pdf_context_zavrne_manjkajoci_nespremenljiv_asset(
+    tmp_path, settings
+):
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+    logo = tmp_path / "nespremenljivi-asseti" / snapshot["company"]["logo_checksum"]
+    logo.unlink()
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        pripravi_mesecni_pdf_context(snapshot, candidate)
+
+    assert error.value.koda == "ASSET_MANJKA"
+
+
+def test_mesecni_pdf_context_zavrne_poskodovan_nespremenljiv_asset(
+    tmp_path, settings
+):
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+    checksum = snapshot["company"]["logo_checksum"]
+    logo = tmp_path / "nespremenljivi-asseti" / checksum
+    logo.write_bytes(b"corrupt")
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        pripravi_mesecni_pdf_context(snapshot, candidate)
+
+    assert snapshot["company"]["logo_checksum"] == checksum
+    assert error.value.koda == "ASSET_NEVELJAVEN"
+
+
+@pytest.mark.parametrize(
+    ("container", "field"),
+    [("company", "name"), ("tenant", "address"), ("candidate", "pdf_template_version")],
+)
+def test_mesecni_pdf_context_brez_obveznega_snapshota_fail_closed(
+    tmp_path, settings, container, field
+):
+    settings.MEDIA_ROOT = tmp_path
+    snapshot, candidate = _mesecni_snapshot(tmp_path)
+    target = snapshot["company"] if container == "company" else candidate
+    if container == "tenant":
+        target = candidate["tenant"]
+    target[field] = ""
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        pripravi_mesecni_pdf_context(snapshot, candidate)
+
+    assert error.value.koda == "SNAPSHOT_MANJKA"
 
 
 @pytest.fixture
