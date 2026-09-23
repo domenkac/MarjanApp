@@ -1,0 +1,3 @@
+{% extends "ui/base.html" %}
+{% block title %}Ročni popravek · Marjan{% endblock %}
+{% block content %}<header class="page-heading settings-heading"><div><p class="eyebrow">{{ item.lease.oznaka_pogodbe }} · {{ item.naziv_postavke }}</p><h1>Spremeni znesek / veljavnost</h1><p>Razlog je obvezen, ker se sprememba zapiše v revizijsko zgodovino.</p></div><a class="button-secondary" href="{% url 'ui:postavka_detail' item.pk %}">Nazaj na postavko</a></header><section class="settings-card"><form method="post">{% csrf_token %}{% include "ui/partials/form_fields.html" %}<div class="form-actions"><button class="button-primary" type="submit">Shrani ročni popravek</button></div></form></section>{% endblock %}

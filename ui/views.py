@@ -19,13 +19,14 @@ from companies.services import (
     arhiviraj_poslovni_zapis,
     ponovno_aktiviraj_poslovni_zapis,
 )
-from contracts.models import Lease, Property, Tenant, Unit
+from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.services import (
     arhiviraj_poslovni_zapis as arhiviraj_pogodbeni_zapis,
 )
 from contracts.services import (
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
+    rocno_popravi_postavko,
 )
 from contracts.services import (
     ponovno_aktiviraj_poslovni_zapis as ponovno_aktiviraj_pogodbeni_zapis,
@@ -52,6 +53,10 @@ from rendering.services import generiraj_mesecni_predogled_pdf
 from .forms import (
     CompanyForm,
     IzbiraMesecaForm,
+    LeaseForm,
+    LeaseItemCorrectionForm,
+    LeaseItemCreateForm,
+    LeaseItemDetailsForm,
     PropertyForm,
     ServiceCatalogItemForm,
     SignatoryForm,
@@ -68,7 +73,182 @@ def _contracts_context(**extra):
 
 @require_GET
 def pogodbe(request):
-    return render(request, "ui/pogodbe.html", _contracts_context())
+    leases = Lease.objects.select_related(
+        "unit__property__company", "tenant"
+    ).order_by("arhivirana", "oznaka_pogodbe", "pk")
+    return render(request, "ui/pogodbe.html", _contracts_context(leases=leases))
+
+
+@require_http_methods(["GET", "POST"])
+def pogodba_nova(request):
+    return _lease_form(request)
+
+
+@require_http_methods(["GET", "POST"])
+def pogodba_detail(request, lease_id):
+    lease = get_object_or_404(
+        Lease.objects.select_related("unit__property__company", "tenant"),
+        pk=lease_id,
+    )
+    return _lease_form(request, lease)
+
+
+def _lease_form(request, lease=None, action_errors=None, *, bind_post=True):
+    form = LeaseForm(request.POST if bind_post and request.method == "POST" else None, instance=lease)
+    if bind_post and request.method == "POST" and form.is_valid():
+        lease = form.save()
+        return redirect("ui:pogodba_detail", lease_id=lease.pk)
+    items = (
+        LeaseItem.objects.filter(lease=lease).select_related("vat_regime").order_by(
+            "arhivirana", "naziv_postavke", "pk"
+        )
+        if lease
+        else ()
+    )
+    return render(request, "ui/pogodba_form.html", _contracts_context(
+        form=form, lease=lease, items=items, action_errors=action_errors,
+        hierarchy_usable=_lease_hierarchy_usable(lease) if lease else False,
+    ))
+
+
+def _lease_state(request, lease_id, service):
+    lease = get_object_or_404(
+        Lease.objects.select_related("unit__property__company", "tenant"),
+        pk=lease_id,
+    )
+    result = service(lease)
+    if result.uspesno:
+        return redirect("ui:pogodba_detail", lease_id=lease.pk)
+    return _lease_form(
+        request,
+        lease,
+        [r.sporocilo for r in result.razlogi],
+        bind_post=False,
+    )
+
+
+@require_POST
+def pogodba_arhiviraj(request, lease_id):
+    return _lease_state(request, lease_id, arhiviraj_pogodbeni_zapis)
+
+
+@require_POST
+def pogodba_reaktiviraj(request, lease_id):
+    return _lease_state(request, lease_id, ponovno_aktiviraj_pogodbeni_zapis)
+
+
+def _lease_hierarchy_usable(lease):
+    return bool(
+        lease
+        and not lease.arhivirana
+        and lease.unit.aktivna
+        and lease.unit.property.aktivna
+        and lease.unit.property.company.aktivno
+        and lease.tenant.aktiven
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def postavka_nova(request, lease_id):
+    lease = get_object_or_404(
+        Lease.objects.select_related("unit__property__company", "tenant"),
+        pk=lease_id,
+    )
+    form = LeaseItemCreateForm(request.POST or None, lease=lease)
+    usable = _lease_hierarchy_usable(lease)
+    if request.method == "POST" and usable and form.is_valid():
+        item = form.save()
+        return redirect("ui:postavka_detail", item_id=item.pk)
+    return render(request, "ui/postavka_form.html", _contracts_context(
+        form=form, item=None, lease=lease,
+        action_errors=None if usable else [
+            "Postavke ni mogoče dodati, ker pogodba ali njen nadrejeni zapis ni aktiven."
+        ],
+    ))
+
+
+@require_http_methods(["GET", "POST"])
+def postavka_detail(request, item_id):
+    item = get_object_or_404(
+        LeaseItem.objects.select_related(
+            "lease__unit__property__company", "lease__tenant", "vat_regime"
+        ),
+        pk=item_id,
+    )
+    return _item_form(request, item)
+
+
+def _item_form(request, item, action_errors=None, *, bind_post=True):
+    form = LeaseItemDetailsForm(
+        request.POST if bind_post and request.method == "POST" else None,
+        instance=item,
+    )
+    if bind_post and request.method == "POST" and form.is_valid():
+        form.save()
+        return redirect("ui:postavka_detail", item_id=item.pk)
+    return render(request, "ui/postavka_form.html", _contracts_context(
+        form=form, item=item, lease=item.lease, action_errors=action_errors,
+    ))
+
+
+@require_http_methods(["GET", "POST"])
+def postavka_popravek(request, item_id):
+    item = get_object_or_404(
+        LeaseItem.objects.select_related("lease"), pk=item_id
+    )
+    initial = {
+        "znesek_neto_mesecno": item.znesek_neto_mesecno,
+        "datum_zacetka_postavke": item.datum_zacetka_postavke,
+        "datum_prenehanja_postavke": item.datum_prenehanja_postavke,
+    }
+    form = LeaseItemCorrectionForm(request.POST or None, initial=initial)
+    if request.method == "POST" and form.is_valid():
+        try:
+            rocno_popravi_postavko(
+                item,
+                razlog=form.cleaned_data["razlog"],
+                znesek_neto_mesecno=form.cleaned_data["znesek_neto_mesecno"],
+                datum_zacetka_postavke=form.cleaned_data["datum_zacetka_postavke"],
+                datum_prenehanja_postavke=form.cleaned_data[
+                    "datum_prenehanja_postavke"
+                ],
+            )
+        except ValidationError as error:
+            for field, messages in getattr(
+                error, "message_dict", {None: error.messages}
+            ).items():
+                form.add_error(field if field in form.fields else None, messages)
+        else:
+            return redirect("ui:postavka_detail", item_id=item.pk)
+    return render(request, "ui/postavka_popravek.html", _contracts_context(
+        form=form, item=item,
+    ))
+
+
+def _item_state(request, item_id, service):
+    item = get_object_or_404(
+        LeaseItem.objects.select_related("lease__unit__property__company", "lease__tenant"),
+        pk=item_id,
+    )
+    result = service(item)
+    if result.uspesno:
+        return redirect("ui:postavka_detail", item_id=item.pk)
+    return _item_form(
+        request,
+        item,
+        [r.sporocilo for r in result.razlogi],
+        bind_post=False,
+    )
+
+
+@require_POST
+def postavka_arhiviraj(request, item_id):
+    return _item_state(request, item_id, arhiviraj_pogodbeni_zapis)
+
+
+@require_POST
+def postavka_reaktiviraj(request, item_id):
+    return _item_state(request, item_id, ponovno_aktiviraj_pogodbeni_zapis)
 
 
 @require_GET

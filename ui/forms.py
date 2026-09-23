@@ -6,7 +6,7 @@ from django.utils import timezone
 
 from catalogs.models import ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
-from contracts.models import Property, Tenant, Unit
+from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 
 
 class CompanyChoiceField(forms.ModelChoiceField):
@@ -75,9 +75,182 @@ class TenantForm(forms.ModelForm):
         }
 
 
+class UnitChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return f"{obj.property.company.naziv} — {obj.property.naziv} — {obj.oznaka}"
+
+
+class TenantChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return obj.naziv
+
+
 class VatRegimeChoiceField(forms.ModelChoiceField):
     def label_from_instance(self, obj):
         return f"{obj.sifra} — {obj.naziv}"
+
+
+class LeaseForm(forms.ModelForm):
+    unit = UnitChoiceField(queryset=Unit.objects.none(), label="Enota")
+    tenant = TenantChoiceField(queryset=Tenant.objects.none(), label="Najemnik")
+    rok_placila_dni = forms.IntegerField(
+        required=False,
+        label="Rok plačila (dni)",
+        help_text="Pri novi pogodbi prazno polje uporabi privzeti rok podjetja.",
+    )
+
+    class Meta:
+        model = Lease
+        fields = (
+            "unit", "tenant", "oznaka_pogodbe", "tip_trajanja",
+            "datum_zacetka", "datum_konca", "samodejno_podaljsanje",
+            "obdobje_podaljsanja_mesecev", "odpovedni_rok_mesecev",
+            "datum_odpovedi", "datum_prenehanja", "status",
+            "rok_placila_dni", "ima_klavzulo_indeksacije",
+            "opis_pogoja_indeksacije", "tip_pogoja_indeksacije",
+            "prag_spremembe_odstotek",
+        )
+        labels = {  # noqa: RUF012
+            "oznaka_pogodbe": "Številka pogodbe",
+            "tip_trajanja": "Tip trajanja",
+            "datum_zacetka": "Datum začetka",
+            "datum_konca": "Datum konca",
+            "samodejno_podaljsanje": "Samodejno podaljšanje",
+            "obdobje_podaljsanja_mesecev": "Obdobje podaljšanja (mesecev)",
+            "odpovedni_rok_mesecev": "Odpovedni rok (mesecev)",
+            "datum_odpovedi": "Datum odpovedi",
+            "datum_prenehanja": "Datum prenehanja",
+            "status": "Pogodbeni status",
+            "ima_klavzulo_indeksacije": "Ima klavzulo indeksacije",
+            "opis_pogoja_indeksacije": "Opis pogoja indeksacije",
+            "tip_pogoja_indeksacije": "Tip pogoja indeksacije",
+            "prag_spremembe_odstotek": "Prag spremembe (%)",
+        }
+        help_texts = {  # noqa: RUF012
+            "oznaka_pogodbe": (
+                "Iz podpisanega izvoda pogodbe. Izpiše se na računu kot sklic."
+            ),
+            "datum_prenehanja": "Zadnji dan zaračunavanja pogodbe.",
+            "opis_pogoja_indeksacije": "Dokumentarni opis za uporabnika.",
+        }
+        widgets = {
+            name: forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"})
+            for name in (
+                "datum_zacetka", "datum_konca", "datum_odpovedi",
+                "datum_prenehanja",
+            )
+        } | {"opis_pogoja_indeksacije": forms.Textarea(attrs={"rows": 3})}
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        units = Unit.objects.filter(
+            aktivna=True, property__aktivna=True, property__company__aktivno=True
+        )
+        tenants = Tenant.objects.filter(aktiven=True)
+        if self.instance.pk:
+            units = units | Unit.objects.filter(pk=self.instance.unit_id)
+            tenants = tenants | Tenant.objects.filter(pk=self.instance.tenant_id)
+        self.fields["unit"].queryset = units.select_related(
+            "property__company"
+        ).order_by("property__company__naziv", "property__naziv", "oznaka", "pk")
+        self.fields["tenant"].queryset = tenants.order_by("naziv", "pk")
+
+    def clean_rok_placila_dni(self):
+        value = self.cleaned_data["rok_placila_dni"]
+        if self.instance.pk and value is None:
+            raise forms.ValidationError(
+                "Rok plačila je obvezen pri urejanju obstoječe pogodbe."
+            )
+        return value
+
+
+LEASE_ITEM_CREATE_FIELDS = (
+    "naziv_postavke", "znesek_neto_mesecno", "vat_regime",
+    "referenca_listine", "datum_reference", "datum_zacetka_postavke",
+    "datum_prenehanja_postavke", "indeks_ob_osnovi",
+    "datum_osnove_indeksacije", "osnovna_najemnina_ob_sklenitvi",
+)
+LEASE_ITEM_METADATA_FIELDS = (
+    "naziv_postavke", "vat_regime", "referenca_listine", "datum_reference",
+    "indeks_ob_osnovi", "datum_osnove_indeksacije",
+    "osnovna_najemnina_ob_sklenitvi",
+)
+LEASE_ITEM_LABELS = {
+    "naziv_postavke": "Naziv postavke",
+    "znesek_neto_mesecno": "Neto mesečni znesek",
+    "vat_regime": "DDV režim",
+    "referenca_listine": "Referenca listine",
+    "datum_reference": "Datum reference",
+    "datum_zacetka_postavke": "Začetek veljavnosti",
+    "datum_prenehanja_postavke": "Konec veljavnosti",
+    "indeks_ob_osnovi": "Izhodiščni indeks",
+    "datum_osnove_indeksacije": "Datum osnove indeksacije",
+    "osnovna_najemnina_ob_sklenitvi": "Osnovna najemnina ob sklenitvi",
+}
+LEASE_ITEM_DATE_WIDGETS = {
+    name: forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"})
+    for name in (
+        "datum_reference", "datum_zacetka_postavke",
+        "datum_prenehanja_postavke", "datum_osnove_indeksacije",
+    )
+}
+
+
+class LeaseItemCreateForm(forms.ModelForm):
+    vat_regime = VatRegimeChoiceField(
+        queryset=VatRegime.objects.none(), label="DDV režim"
+    )
+
+    class Meta:
+        model = LeaseItem
+        fields = LEASE_ITEM_CREATE_FIELDS
+        labels = LEASE_ITEM_LABELS
+        widgets = LEASE_ITEM_DATE_WIDGETS
+
+    def __init__(self, *args, lease, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.instance.lease = lease
+        self.fields["vat_regime"].queryset = VatRegime.objects.filter(
+            aktiven=True
+        ).order_by("sifra", "pk")
+
+
+class LeaseItemDetailsForm(forms.ModelForm):
+    vat_regime = VatRegimeChoiceField(
+        queryset=VatRegime.objects.none(), label="DDV režim"
+    )
+
+    class Meta:
+        model = LeaseItem
+        fields = LEASE_ITEM_METADATA_FIELDS
+        labels = LEASE_ITEM_LABELS
+        widgets = LEASE_ITEM_DATE_WIDGETS
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        regimes = VatRegime.objects.filter(aktiven=True)
+        if self.instance.pk:
+            regimes = regimes | VatRegime.objects.filter(pk=self.instance.vat_regime_id)
+        self.fields["vat_regime"].queryset = regimes.order_by("sifra", "pk")
+
+
+class LeaseItemCorrectionForm(forms.Form):
+    znesek_neto_mesecno = forms.DecimalField(
+        max_digits=10, decimal_places=2, label="Neto mesečni znesek"
+    )
+    datum_zacetka_postavke = forms.DateField(
+        required=False, label="Začetek veljavnosti",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+    )
+    datum_prenehanja_postavke = forms.DateField(
+        required=False, label="Konec veljavnosti",
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+    )
+    razlog = forms.CharField(
+        label="Razlog spremembe",
+        widget=forms.Textarea(attrs={"rows": 3}),
+        help_text="Razlog je obvezen, ker se sprememba zapiše v revizijsko sled.",
+    )
 
 
 class VatRegimeForm(forms.ModelForm):
