@@ -1,0 +1,15 @@
+{% extends "ui/base.html" %}
+{% block title %}Nastavitve · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading settings-heading">
+  <div><p class="eyebrow">Nastavitve</p><h1>Podjetja</h1><p>Matični podatki izdajateljev in podpisnikov.</p></div>
+  <a class="button-primary" href="{% url 'ui:podjetje_novo' %}">+ Dodaj podjetje</a>
+</header>
+<p class="form-note"><span class="material-symbols-outlined" aria-hidden="true">info</span>Spremembe podjetij ne spreminjajo že začetega mesečnega obračuna.</p>
+<section class="settings-table-wrap">
+{% if companies %}
+<table class="settings-table"><thead><tr><th>Naziv</th><th>Davčna številka</th><th>Matična številka</th><th>Država</th><th>TRR</th><th>DDV</th><th>Status</th><th></th></tr></thead>
+<tbody>{% for company in companies %}<tr{% if not company.aktivno %} class="is-archived"{% endif %}><td><strong>{{ company.naziv }}</strong></td><td>{{ company.davcna_stevilka }}</td><td>{{ company.maticna_stevilka }}</td><td>{{ company.drzava_koda }}</td><td class="numeric">{{ company.trr }}</td><td>{% if company.ddv_zavezanec %}Da{% else %}Ne{% endif %}</td><td><span class="status-badge{% if company.aktivno %} is-passed{% else %} is-archived{% endif %}">{% if company.aktivno %}Aktivno{% else %}Arhivirano{% endif %}</span></td><td><a class="button-secondary compact" href="{% url 'ui:podjetje_detail' company.pk %}">Odpri / uredi</a></td></tr>{% endfor %}</tbody></table>
+{% else %}<div class="empty-state"><h3>Ni še nobenega podjetja</h3><p>Dodajte prvo podjetje za začetek nastavitev.</p></div>{% endif %}
+</section>
+{% endblock %}

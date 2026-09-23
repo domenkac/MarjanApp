@@ -1,0 +1,6 @@
+{% extends "ui/base.html" %}
+{% block title %}{% if signatory %}Uredi podpisnika{% else %}Nov podpisnik{% endif %} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><p class="eyebrow">Nastavitve · {{ company.naziv }}</p><h1>{% if signatory %}Uredi podpisnika{% else %}Dodaj podpisnika{% endif %}</h1></header>
+<section class="settings-card"><form method="post" enctype="multipart/form-data">{% csrf_token %}{% include "ui/partials/form_fields.html" %}<div class="form-actions"><a class="button-secondary" href="{% url 'ui:podjetje_detail' company.pk %}">Prekliči</a><button class="button-primary" type="submit">Shrani podpisnika</button></div></form></section>
+{% endblock %}

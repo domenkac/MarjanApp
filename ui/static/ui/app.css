@@ -145,6 +145,30 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .review-global-error { margin-bottom: 10px; padding: 9px 11px; }
 .user-non-issue { margin: 0 0 6px; color: var(--muted); }
 .review-empty { padding: 24px !important; text-align: center; color: var(--muted); }
+.settings-heading { display: flex; align-items: flex-end; justify-content: space-between; gap: 20px; }
+.settings-table-wrap, .settings-card { margin-bottom: 20px; background: var(--surface); border: 1px solid var(--outline); }
+.settings-table { width: 100%; border-collapse: collapse; font-size: 12px; }
+.settings-table th, .settings-table td { padding: 10px 12px; border-bottom: 1px solid var(--outline); text-align: left; vertical-align: middle; }
+.settings-table th { color: var(--muted); background: var(--surface-low); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; }
+.settings-table tr:last-child td { border-bottom: 0; }
+.settings-table .numeric { font-family: "JetBrains Mono", monospace; font-variant-numeric: tabular-nums; }
+.settings-table tr.is-archived { color: var(--muted); background: var(--surface-low); }
+.status-badge.is-archived { color: #5f6368; background: #e6e8ea; }
+.settings-card > form { padding: 22px; }
+.settings-form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 16px; }
+.settings-form-grid .field input:not([type="checkbox"]), .settings-form-grid .field select { width: 100%; min-height: 40px; padding: 8px 10px; border: 1px solid var(--outline); border-radius: 0; font: 14px Inter, sans-serif; }
+.settings-form-grid .field input[type="file"] { padding: 7px; }
+.checkbox-field { align-self: end; padding: 10px 0; }
+.checkbox-field label { display: inline; margin-right: 8px; }
+.form-errors { margin-bottom: 16px; padding: 10px 12px; color: #8d1010; background: #ffdad6; border-left: 3px solid #ba1a1a; font-size: 12px; }
+.form-errors p { margin: 3px 0; }
+.settings-card .card-heading { justify-content: flex-start; }
+.settings-card .card-heading .button-primary { margin-left: auto; }
+.status-panel { display: flex; align-items: center; justify-content: space-between; padding: 18px; }
+.status-panel > div { display: flex; align-items: center; gap: 12px; }
+.status-panel h2 { margin: 0; font-size: 18px; }
+.status-panel form { padding: 0; }
+.compact-empty { min-height: 100px; }
 
 @media (max-width: 1100px) {
   .page-content { padding: 24px; }

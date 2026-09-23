@@ -3,10 +3,14 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.http import HttpResponse
-from django.shortcuts import redirect, render
-from django.views.decorators.http import require_GET, require_http_methods
+from django.shortcuts import get_object_or_404, redirect, render
+from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
-from companies.models import Company
+from companies.models import Company, Signatory
+from companies.services import (
+    arhiviraj_poslovni_zapis,
+    ponovno_aktiviraj_poslovni_zapis,
+)
 from contracts.models import Lease, Tenant
 from contracts.services import dnevi_v_obdobju, efektivna_veljavnost_pogodbe
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
@@ -28,7 +32,112 @@ from invoicing.services import (
 from rendering.contexts import PdfRenderNapaka
 from rendering.services import generiraj_mesecni_predogled_pdf
 
-from .forms import IzbiraMesecaForm, obdobje_za_mesec
+from .forms import CompanyForm, IzbiraMesecaForm, SignatoryForm, obdobje_za_mesec
+
+
+def _settings_context(**extra):
+    return {"active_page": "nastavitve", "active_section": "nastavitve"} | extra
+
+
+@require_GET
+def nastavitve(request):
+    companies = Company.objects.order_by("-aktivno", "naziv", "pk")
+    return render(
+        request,
+        "ui/nastavitve.html",
+        _settings_context(companies=companies),
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def podjetje_novo(request):
+    form = CompanyForm(request.POST or None, request.FILES or None)
+    if request.method == "POST" and form.is_valid():
+        company = form.save()
+        return redirect("ui:podjetje_detail", company_id=company.pk)
+    return render(
+        request,
+        "ui/podjetje_form.html",
+        _settings_context(form=form, company=None),
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def podjetje_detail(request, company_id):
+    company = get_object_or_404(Company, pk=company_id)
+    form = CompanyForm(request.POST or None, request.FILES or None, instance=company)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        return redirect("ui:podjetje_detail", company_id=company.pk)
+    signatories = company.signatory_set.order_by("-velja_od", "-pk")
+    return render(
+        request,
+        "ui/podjetje_detail.html",
+        _settings_context(company=company, form=form, signatories=signatories),
+    )
+
+
+def _stanje_podjetja(request, company_id, service):
+    company = get_object_or_404(Company, pk=company_id)
+    rezultat = service(company)
+    if rezultat.uspesno:
+        return redirect("ui:podjetje_detail", company_id=company.pk)
+    form = CompanyForm(instance=company)
+    return render(
+        request,
+        "ui/podjetje_detail.html",
+        _settings_context(
+            company=company,
+            form=form,
+            signatories=company.signatory_set.order_by("-velja_od", "-pk"),
+            action_errors=[razlog.sporocilo for razlog in rezultat.razlogi],
+        ),
+    )
+
+
+@require_POST
+def podjetje_arhiviraj(request, company_id):
+    return _stanje_podjetja(request, company_id, arhiviraj_poslovni_zapis)
+
+
+@require_POST
+def podjetje_reaktiviraj(request, company_id):
+    return _stanje_podjetja(request, company_id, ponovno_aktiviraj_poslovni_zapis)
+
+
+@require_http_methods(["GET", "POST"])
+def podpisnik_nov(request, company_id):
+    company = get_object_or_404(Company, pk=company_id)
+    form = SignatoryForm(request.POST or None, request.FILES or None)
+    if request.method == "POST" and form.is_valid():
+        signatory = form.save(commit=False)
+        signatory.company = company
+        try:
+            signatory.full_clean()
+        except ValidationError as error:
+            form.add_error(None, error)
+        else:
+            signatory.save()
+            return redirect("ui:podjetje_detail", company_id=company.pk)
+    return render(
+        request,
+        "ui/podpisnik_form.html",
+        _settings_context(form=form, company=company, signatory=None),
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def podpisnik_detail(request, signatory_id):
+    signatory = get_object_or_404(Signatory.objects.select_related("company"), pk=signatory_id)
+    form = SignatoryForm(request.POST or None, request.FILES or None, instance=signatory)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        return redirect("ui:podjetje_detail", company_id=signatory.company_id)
+    return render(
+        request,
+        "ui/podpisnik_form.html",
+        _settings_context(form=form, company=signatory.company, signatory=signatory),
+    )
 
 
 @require_GET

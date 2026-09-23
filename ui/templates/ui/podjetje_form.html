@@ -1,0 +1,6 @@
+{% extends "ui/base.html" %}
+{% block title %}Novo podjetje · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><p class="eyebrow">Nastavitve · Podjetja</p><h1>Dodaj podjetje</h1></header>
+<section class="settings-card"><form method="post" enctype="multipart/form-data">{% csrf_token %}{% include "ui/partials/form_fields.html" %}<div class="form-actions"><a class="button-secondary" href="{% url 'ui:nastavitve' %}">Prekliči</a><button class="button-primary" type="submit">Shrani podjetje</button></div></form></section>
+{% endblock %}
