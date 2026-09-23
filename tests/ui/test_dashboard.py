@@ -56,7 +56,10 @@ def test_sidebar_lahko_aktivira_drugo_prvoravensko_sekcijo():
     )
 
     assert 'class="nav-item" href="/"' in vsebina
-    assert 'class="nav-item is-disabled is-active" aria-current="page"' in vsebina
+    assert (
+        'class="nav-item is-active" href="/pogodbe/" aria-current="page"'
+        in vsebina
+    )
 
 
 def test_osnovna_predloga_ne_potrebuje_dashboard_contexta():

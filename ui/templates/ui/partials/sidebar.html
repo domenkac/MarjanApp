@@ -7,7 +7,7 @@
     <p class="nav-label">Glavni meni</p>
     <nav class="nav-list">
       <a class="nav-item{% if active_section == 'dashboard' %} is-active{% endif %}" href="{% url 'ui:dashboard' %}"{% if active_section == 'dashboard' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">dashboard</span>Nadzorna plošča</a>
-      <span class="nav-item is-disabled{% if active_section == 'pogodbe' %} is-active{% endif %}"{% if active_section == 'pogodbe' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">contract</span>Pogodbe</span>
+      <a class="nav-item{% if active_section == 'pogodbe' %} is-active{% endif %}" href="{% url 'ui:pogodbe' %}"{% if active_section == 'pogodbe' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">contract</span>Pogodbe</a>
       <span class="nav-item is-disabled{% if active_section == 'arhiv' %} is-active{% endif %}"{% if active_section == 'arhiv' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">archive</span>Arhiv</span>
       <a class="nav-item{% if active_section == 'nastavitve' %} is-active{% endif %}" href="{% url 'ui:nastavitve' %}"{% if active_section == 'nastavitve' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">settings</span>Nastavitve</a>
     </nav>

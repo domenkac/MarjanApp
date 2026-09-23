@@ -2,6 +2,7 @@ from calendar import monthrange
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
+from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
@@ -18,8 +19,17 @@ from companies.services import (
     arhiviraj_poslovni_zapis,
     ponovno_aktiviraj_poslovni_zapis,
 )
-from contracts.models import Lease, Tenant
-from contracts.services import dnevi_v_obdobju, efektivna_veljavnost_pogodbe
+from contracts.models import Lease, Property, Tenant, Unit
+from contracts.services import (
+    arhiviraj_poslovni_zapis as arhiviraj_pogodbeni_zapis,
+)
+from contracts.services import (
+    dnevi_v_obdobju,
+    efektivna_veljavnost_pogodbe,
+)
+from contracts.services import (
+    ponovno_aktiviraj_poslovni_zapis as ponovno_aktiviraj_pogodbeni_zapis,
+)
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
@@ -42,11 +52,171 @@ from rendering.services import generiraj_mesecni_predogled_pdf
 from .forms import (
     CompanyForm,
     IzbiraMesecaForm,
+    PropertyForm,
     ServiceCatalogItemForm,
     SignatoryForm,
+    TenantForm,
+    UnitForm,
     VatRegimeForm,
     obdobje_za_mesec,
 )
+
+
+def _contracts_context(**extra):
+    return {"active_page": "pogodbe", "active_section": "pogodbe"} | extra
+
+
+@require_GET
+def pogodbe(request):
+    return render(request, "ui/pogodbe.html", _contracts_context())
+
+
+@require_GET
+def nepremicnine(request):
+    properties = Property.objects.select_related("company").order_by(
+        "-aktivna", "naziv", "pk"
+    )
+    unit_counts = {
+        row["property_id"]: row["count"]
+        for row in Unit.objects.values("property_id").annotate(count=Count("pk"))
+    }
+    for property_ in properties:
+        property_.unit_count = unit_counts.get(property_.pk, 0)
+    return render(request, "ui/nepremicnine.html", _contracts_context(properties=properties))
+
+
+@require_http_methods(["GET", "POST"])
+def nepremicnina_nova(request):
+    return _property_form(request)
+
+
+@require_http_methods(["GET", "POST"])
+def nepremicnina_detail(request, property_id):
+    return _property_form(request, get_object_or_404(Property, pk=property_id))
+
+
+def _property_form(request, property_=None, action_errors=None):
+    form = PropertyForm(request.POST or None, instance=property_)
+    if request.method == "POST" and form.is_valid():
+        property_ = form.save()
+        return redirect("ui:nepremicnina_detail", property_id=property_.pk)
+    units = Unit.objects.filter(property=property_).order_by("-aktivna", "oznaka", "pk") if property_ else ()
+    return render(request, "ui/nepremicnina_form.html", _contracts_context(
+        form=form, property=property_, units=units, action_errors=action_errors,
+    ))
+
+
+def _property_state(request, property_id, service):
+    property_ = get_object_or_404(Property, pk=property_id)
+    result = service(property_)
+    if result.uspesno:
+        return redirect("ui:nepremicnina_detail", property_id=property_.pk)
+    return _property_form(request, property_, [r.sporocilo for r in result.razlogi])
+
+
+@require_POST
+def nepremicnina_arhiviraj(request, property_id):
+    return _property_state(request, property_id, arhiviraj_pogodbeni_zapis)
+
+
+@require_POST
+def nepremicnina_reaktiviraj(request, property_id):
+    return _property_state(request, property_id, ponovno_aktiviraj_pogodbeni_zapis)
+
+
+@require_http_methods(["GET", "POST"])
+def enota_nova(request, property_id):
+    property_ = get_object_or_404(
+        Property.objects.select_related("company"), pk=property_id,
+        aktivna=True, company__aktivno=True,
+    )
+    form = UnitForm(request.POST or None)
+    if request.method == "POST" and form.is_valid():
+        unit = form.save(commit=False)
+        unit.property = property_
+        unit.save()
+        return redirect("ui:enota_detail", unit_id=unit.pk)
+    return render(request, "ui/enota_form.html", _contracts_context(
+        form=form, unit=None, property=property_,
+    ))
+
+
+@require_http_methods(["GET", "POST"])
+def enota_detail(request, unit_id):
+    unit = get_object_or_404(Unit.objects.select_related("property"), pk=unit_id)
+    return _unit_form(request, unit)
+
+
+def _unit_form(request, unit, action_errors=None):
+    form = UnitForm(request.POST or None, instance=unit)
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        return redirect("ui:enota_detail", unit_id=unit.pk)
+    return render(request, "ui/enota_form.html", _contracts_context(
+        form=form, unit=unit, property=unit.property, action_errors=action_errors,
+    ))
+
+
+def _unit_state(request, unit_id, service):
+    unit = get_object_or_404(Unit.objects.select_related("property"), pk=unit_id)
+    result = service(unit)
+    if result.uspesno:
+        return redirect("ui:enota_detail", unit_id=unit.pk)
+    return _unit_form(request, unit, [r.sporocilo for r in result.razlogi])
+
+
+@require_POST
+def enota_arhiviraj(request, unit_id):
+    return _unit_state(request, unit_id, arhiviraj_pogodbeni_zapis)
+
+
+@require_POST
+def enota_reaktiviraj(request, unit_id):
+    return _unit_state(request, unit_id, ponovno_aktiviraj_pogodbeni_zapis)
+
+
+@require_GET
+def najemniki(request):
+    tenants = Tenant.objects.order_by("-aktiven", "naziv", "pk")
+    return render(request, "ui/najemniki.html", _contracts_context(tenants=tenants))
+
+
+@require_http_methods(["GET", "POST"])
+def najemnik_nov(request):
+    return _tenant_form(request)
+
+
+@require_http_methods(["GET", "POST"])
+def najemnik_detail(request, tenant_id):
+    return _tenant_form(request, get_object_or_404(Tenant, pk=tenant_id))
+
+
+def _tenant_form(request, tenant=None, action_errors=None):
+    form = TenantForm(request.POST or None, instance=tenant)
+    if request.method == "POST" and form.is_valid():
+        tenant = form.save()
+        return redirect("ui:najemnik_detail", tenant_id=tenant.pk)
+    return render(request, "ui/najemnik_form.html", _contracts_context(
+        form=form, tenant=tenant, action_errors=action_errors,
+    ))
+
+
+def _tenant_state(request, tenant_id, service):
+    tenant = get_object_or_404(Tenant, pk=tenant_id)
+    result = service(tenant)
+    if result.uspesno:
+        return redirect("ui:najemnik_detail", tenant_id=tenant.pk)
+    return _tenant_form(request, tenant, [r.sporocilo for r in result.razlogi])
+
+
+@require_POST
+def najemnik_arhiviraj(request, tenant_id):
+    return _tenant_state(request, tenant_id, arhiviraj_pogodbeni_zapis)
+
+
+@require_POST
+def najemnik_reaktiviraj(request, tenant_id):
+    return _tenant_state(request, tenant_id, ponovno_aktiviraj_pogodbeni_zapis)
 
 
 def _settings_context(**extra):

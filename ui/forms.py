@@ -6,6 +6,73 @@ from django.utils import timezone
 
 from catalogs.models import ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
+from contracts.models import Property, Tenant, Unit
+
+
+class CompanyChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return obj.naziv
+
+
+class PropertyForm(forms.ModelForm):
+    company = CompanyChoiceField(queryset=Company.objects.none(), label="Podjetje")
+
+    class Meta:
+        model = Property
+        fields = ("company", "naziv", "naslov")
+        labels = {"company": "Podjetje", "naziv": "Naziv", "naslov": "Naslov"}  # noqa: RUF012
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        company_ids = Company.objects.filter(aktivno=True).values("pk")
+        if self.instance.pk:
+            company_ids = company_ids.union(
+                Company.objects.filter(pk=self.instance.company_id).values("pk")
+            )
+        self.fields["company"].queryset = Company.objects.filter(
+            pk__in=company_ids
+        ).order_by("naziv", "pk")
+
+
+class UnitForm(forms.ModelForm):
+    class Meta:
+        model = Unit
+        fields = ("oznaka", "tip_enote", "povrsina_m2")
+        labels = {  # noqa: RUF012
+            "oznaka": "Oznaka",
+            "tip_enote": "Tip enote",
+            "povrsina_m2": "Površina (m²)",
+        }
+
+
+class TenantForm(forms.ModelForm):
+    class Meta:
+        model = Tenant
+        fields = (
+            "tip", "naziv", "davcna_stevilka",
+            "ddv_identifikacijska_stevilka", "maticna_stevilka", "naslov",
+            "drzava_koda", "identificiran_za_ddv",
+            "ddv_zavezanec_s_polnim_odbitkom", "email",
+        )
+        labels = {  # noqa: RUF012
+            "tip": "Tip", "naziv": "Naziv",
+            "davcna_stevilka": "Davčna številka",
+            "ddv_identifikacijska_stevilka": "DDV identifikacijska številka",
+            "maticna_stevilka": "Matična številka", "naslov": "Naslov",
+            "drzava_koda": "Koda države",
+            "identificiran_za_ddv": "Identificiran za DDV",
+            "ddv_zavezanec_s_polnim_odbitkom": "DDV zavezanec s polnim odbitkom",
+            "email": "E-pošta",
+        }
+        help_texts = {  # noqa: RUF012
+            "drzava_koda": "Dvočrkovna koda države, na primer SI.",
+            "ddv_identifikacijska_stevilka": (
+                "Za tujega prejemnika, identificiranega za DDV, vnesite polni VAT ID."
+            ),
+        }
+        error_messages = {  # noqa: RUF012
+            "email": {"invalid": "Vnesite veljaven e-poštni naslov."},
+        }
 
 
 class VatRegimeChoiceField(forms.ModelChoiceField):
