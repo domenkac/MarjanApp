@@ -80,7 +80,13 @@
   </tbody>
 </table>
 </div>
-<form method="post" class="form-actions">{% csrf_token %}<button class="button-secondary" name="action" value="refresh_review" type="submit">Ponovno preveri in osveži izračun</button></form>
+<form method="post" class="form-actions">{% csrf_token %}<button class="button-secondary" name="action" value="refresh_review" type="submit">Ponovno preveri in osveži izračun</button><button class="button-primary" name="action" value="freeze_package" type="submit"{% if review_summary.requiring_confirmation %} disabled{% endif %}>Nadaljuj na potrditev</button></form>
+{% elif nadaljevanje and trenutni_korak == 5 %}
+<header class="page-heading billing-heading"><p class="eyebrow">Mesečni obračunski postopek</p><h1>Potrditev paketa</h1><p>Paket je zaklenjen za potrditev. Izbire in izračuni se od tega koraka ne spreminjajo.</p></header>
+<section class="review-summary" aria-label="Povzetek zamrznjenega paketa"><span>Za izdajo <strong>{{ review_summary.selected }}</strong></span><span>Neizdani po odločitvi uporabnika <strong>{{ review_summary.user_deselected }}</strong></span><span>Sistemsko neizdani <strong>{{ review_summary.system_non_issuable }}</strong></span></section>
+<div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje</th><th>Najemnik</th><th>Pogodba</th><th class="numeric">Skupaj</th><th>Rezultat</th><th>Potrditev izjeme</th></tr></thead><tbody>
+{% for row in review_rows %}<tr><td><strong>{{ row.company_name }}</strong></td><td>{{ row.tenant_name }}</td><td>{{ row.contract_reference }}</td><td class="numeric">{{ row.current_display }}</td><td>{% if row.selected %}<strong>Za izdajo</strong>{% else %}<strong>Ne bo izdan</strong><span>{% if row.will_issue %}{{ row.user_non_issue_reason }}{% else %}{{ row.system_non_issue_reason }}{% endif %}</span>{% endif %}</td><td>{% if row.requires_confirmation %}{% if row.confirmed_at %}Potrjeno{% else %}Ni potrjeno{% endif %}{% else %}Ni potrebna{% endif %}</td></tr>{% endfor %}
+</tbody></table></div>
 {% else %}
 <header class="page-heading billing-heading">
   <p class="eyebrow">Mesečni obračunski postopek</p>

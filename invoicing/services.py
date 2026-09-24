@@ -188,6 +188,13 @@ def premakni_mesecni_cikel(cycle: MonthlyCycle, korak: int) -> MonthlyCycle:
             )
         if korak == svezi.trenutni_korak:
             return svezi
+        if (
+            svezi.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
+            and korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+        ):
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Korak 5 zahteva potrditev in zamrznitev paketa."
+            )
         if korak != svezi.trenutni_korak + 1:
             raise NeveljavenPrehodMesecnegaCikla(
                 "Mesečni cikel se lahko premakne samo na naslednji korak."
@@ -2294,6 +2301,73 @@ def trenutni_pregledi_mesecnega_cikla(cycle: MonthlyCycle) -> list[MonthlyCandid
         for review in reviews
         if (review.batch_id, review.lease_id, review.candidate_fingerprint) in identities
     ]
+
+
+def _preveri_izdajni_snapshot(candidate: dict) -> None:
+    lines = candidate.get("lines")
+    totals = candidate.get("totals")
+    if not isinstance(lines, list) or not lines or not isinstance(totals, dict):
+        raise ValidationError("Posnetek izbranega kandidata je nepopoln.")
+    try:
+        net = Decimal(str(totals["net"]))
+        vat = Decimal(str(totals["vat"]))
+        total = Decimal(str(totals["total"]))
+        line_net = sum((Decimal(str(line["net"])) for line in lines), Decimal("0.00"))
+        line_vat = sum((Decimal(str(line["vat"])) for line in lines), Decimal("0.00"))
+        line_total = sum(
+            (Decimal(str(line["total"])) for line in lines), Decimal("0.00")
+        )
+    except (InvalidOperation, KeyError, TypeError, ValueError) as exc:
+        raise ValidationError("Posnetek izbranega kandidata ni veljaven.") from exc
+    if line_net != net or line_vat != vat or line_total != total or net + vat != total:
+        raise ValidationError("Vsote v posnetku izbranega kandidata niso skladne.")
+
+
+def zamrzni_paket_za_potrditev(cycle: MonthlyCycle) -> MonthlyCycle:
+    with transaction.atomic():
+        cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+        if cycle.trenutni_korak != MonthlyCycle.Korak.PAKETNI_PREGLED:
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Paket je mogoče zamrzniti samo v koraku 4."
+            )
+        if not so_vsi_uspesni_izracuni_aktivni(cycle):
+            raise ValidationError(
+                "Paket nima veljavnega aktivnega izračuna. "
+                "Vrnite se na pregled in osvežite izračun."
+            )
+        for batch, candidate, lease_id, fingerprint in _aktivni_kandidati(cycle):
+            reviews = MonthlyCandidateReview.objects.filter(
+                batch=batch, lease_id=lease_id
+            )
+            try:
+                review = reviews.get(candidate_fingerprint=fingerprint)
+            except MonthlyCandidateReview.DoesNotExist as exc:
+                message = (
+                    "Prstni odtis pregleda se ne ujema s trenutnim kandidatom."
+                    if reviews.exists()
+                    else "Manjka trenutni pregled kandidata."
+                )
+                raise ValidationError(message) from exc
+            will_issue = candidate.get("will_issue") is True
+            if review.selected:
+                if not will_issue:
+                    raise ValidationError(
+                        "Izbrani pregled je v neskladju s sistemsko neizdajnim kandidatom."
+                    )
+                if review.non_issue_reason.strip():
+                    raise ValidationError("Izbrani kandidat ne sme imeti razloga neizdaje.")
+                if review.requires_confirmation and review.confirmed_at is None:
+                    raise ValidationError("Izjema izbranega kandidata ni potrjena.")
+                _preveri_izdajni_snapshot(candidate)
+            elif will_issue and not review.non_issue_reason.strip():
+                raise ValidationError("Manjka razlog neizdaje kandidata.")
+            elif not will_issue and not str(
+                candidate.get("non_issue_reason") or ""
+            ).strip():
+                raise ValidationError("Sistemsko neizdan kandidat nima razloga.")
+        cycle.trenutni_korak = MonthlyCycle.Korak.POTRDITEV_PAKETA
+        cycle.save(update_fields=["trenutni_korak", "updated_at"])
+        return cycle
 
 
 def trenutni_mesecni_kandidat(cycle, *, lease_id, candidate_fingerprint):

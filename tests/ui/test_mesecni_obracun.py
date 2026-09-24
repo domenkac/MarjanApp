@@ -3,6 +3,8 @@ from copy import deepcopy
 from datetime import date
 
 import pytest
+from django.core.exceptions import ValidationError
+from django.test import Client
 from django.utils import timezone
 
 from companies.models import Company, NumberSequence
@@ -14,7 +16,13 @@ from invoicing.models import (
     MonthlyCandidateReview,
     MonthlyCycle,
 )
-from invoicing.services import CALCULATION_SNAPSHOT_VERSION
+from invoicing.services import (
+    CALCULATION_SNAPSHOT_VERSION,
+    MesecniCikelNapaka,
+    NeveljavenPrehodMesecnegaCikla,
+    premakni_mesecni_cikel,
+    zamrzni_paket_za_potrditev,
+)
 from rendering.contexts import PdfRenderNapaka
 
 
@@ -108,7 +116,18 @@ def _review_cycle(*candidates):
             "property_label": f"Objekt {index}",
             "unit_label": f"E-{index}",
             "tenant": {"name": tenant.naziv},
-            "totals": {"total": options.get("current", "125.00")},
+            "lines": [
+                {
+                    "net": options.get("current", "125.00"),
+                    "vat": "0.00",
+                    "total": options.get("current", "125.00"),
+                }
+            ],
+            "totals": {
+                "net": options.get("current", "125.00"),
+                "vat": "0.00",
+                "total": options.get("current", "125.00"),
+            },
             "previous_invoice": None if previous is None else {"total": previous},
             "first_issue": previous is None,
             "will_issue": will_issue,
@@ -839,3 +858,235 @@ def test_step4_issuable_candidate_shows_preview_without_visible_fingerprint(clie
 
     assert ">Predogled PDF</a>" in content
     assert review.candidate_fingerprint not in visible_text
+
+
+@pytest.mark.django_db
+def test_zamrznitev_veljavnega_paketa_ne_ustvari_dokumentov():
+    cycle, (review,) = _review_cycle({})
+    review.requires_confirmation = False
+    review.save(update_fields=["requires_confirmation"])
+    before = (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values()),
+        deepcopy(review.batch.calculation_snapshot),
+        list(MonthlyCandidateReview.objects.values()),
+    )
+
+    with pytest.raises(
+        NeveljavenPrehodMesecnegaCikla, match="potrditev in zamrznitev paketa"
+    ):
+        premakni_mesecni_cikel(cycle, MonthlyCycle.Korak.POTRDITEV_PAKETA)
+    cycle.refresh_from_db()
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
+
+    frozen = zamrzni_paket_za_potrditev(cycle)
+
+    assert frozen.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+    review.batch.refresh_from_db()
+    assert (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values()),
+        review.batch.calculation_snapshot,
+        list(MonthlyCandidateReview.objects.values()),
+    ) == before
+
+
+@pytest.mark.django_db
+def test_zamrznitev_zavrne_paket_brez_aktivnega_izracuna_in_dokumentov():
+    cycle, (review,) = _review_cycle({})
+    review.batch.preflight_status = MonthlyBatch.PreflightStatus.BLOCKED
+    review.batch.calculation_status = MonthlyBatch.CalculationStatus.BLOCKED
+    review.batch.save(update_fields=["preflight_status", "calculation_status"])
+    before = (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values()),
+    )
+
+    with pytest.raises(ValidationError, match="nima veljavnega aktivnega izračuna"):
+        zamrzni_paket_za_potrditev(cycle)
+
+    cycle.refresh_from_db()
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
+    assert (
+        Invoice.objects.count(),
+        InvoiceLine.objects.count(),
+        list(NumberSequence.objects.values()),
+    ) == before
+
+
+@pytest.mark.django_db
+def test_blokirano_podjetje_ne_blokira_veljavnega_aktivnega_paketa():
+    cycle, reviews = _review_cycle({}, {})
+    blocked = reviews[1].batch
+    blocked.preflight_status = MonthlyBatch.PreflightStatus.BLOCKED
+    blocked.calculation_status = MonthlyBatch.CalculationStatus.BLOCKED
+    blocked.save(update_fields=["preflight_status", "calculation_status"])
+
+    frozen = zamrzni_paket_za_potrditev(cycle)
+
+    assert frozen.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+
+
+@pytest.mark.django_db
+def test_zamrznitev_zavrne_napacen_korak_in_manjkajoc_ali_stari_pregled():
+    cycle, (review,) = _review_cycle({})
+    cycle.trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
+    cycle.save(update_fields=["trenutni_korak"])
+    with pytest.raises(MesecniCikelNapaka, match="samo v koraku 4"):
+        zamrzni_paket_za_potrditev(cycle)
+    cycle.trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    cycle.save(update_fields=["trenutni_korak"])
+    review.delete()
+    with pytest.raises(ValidationError, match="Manjka trenutni pregled"):
+        zamrzni_paket_za_potrditev(cycle)
+    MonthlyCandidateReview.objects.create(
+        batch=review.batch,
+        lease=review.lease,
+        candidate_fingerprint="f" * 64,
+        selected=True,
+        requires_confirmation=False,
+    )
+    with pytest.raises(ValidationError, match="Prstni odtis"):
+        zamrzni_paket_za_potrditev(cycle)
+
+
+@pytest.mark.django_db
+def test_zamrznitev_zahteva_samo_potrditev_oznacene_izjeme():
+    cycle, (review,) = _review_cycle({"exceptions": ["Indeksacija."]})
+    assert review.reviewed_at is None
+    with pytest.raises(ValidationError, match="ni potrjena"):
+        zamrzni_paket_za_potrditev(cycle)
+    review.confirmed_at = timezone.now()
+    review.save(update_fields=["confirmed_at"])
+    assert zamrzni_paket_za_potrditev(cycle).trenutni_korak == 5
+
+
+@pytest.mark.django_db
+def test_zamrznitev_normalnega_izbranega_ne_zahteva_reviewed_at():
+    cycle, (review,) = _review_cycle({})
+    assert review.reviewed_at is None
+    assert zamrzni_paket_za_potrditev(cycle).trenutni_korak == 5
+
+
+@pytest.mark.django_db
+def test_zamrznitev_neizbranega_zahteva_razlog_in_dovoli_nic_izbranih():
+    cycle, (review,) = _review_cycle({})
+    review.selected = False
+    review.save(update_fields=["selected"])
+    with pytest.raises(ValidationError, match="Manjka razlog neizdaje"):
+        zamrzni_paket_za_potrditev(cycle)
+    review.non_issue_reason = "Po odločitvi uporabnika"
+    review.save(update_fields=["non_issue_reason"])
+    assert zamrzni_paket_za_potrditev(cycle).trenutni_korak == 5
+
+
+@pytest.mark.django_db
+def test_sistemsko_neizdajni_ne_zahteva_potrditve_a_zahteva_razlog():
+    cycle, (review,) = _review_cycle({"will_issue": False})
+    review.requires_confirmation = True
+    review.save(update_fields=["requires_confirmation"])
+    with pytest.raises(ValidationError, match="nima razloga"):
+        zamrzni_paket_za_potrditev(cycle)
+    snapshot = review.batch.calculation_snapshot
+    snapshot["candidates"][0]["non_issue_reason"] = "Ni obračunljivih postavk."
+    review.batch.calculation_snapshot = snapshot
+    review.batch.save(update_fields=["calculation_snapshot"])
+    assert zamrzni_paket_za_potrditev(cycle).trenutni_korak == 5
+
+
+@pytest.mark.django_db
+def test_zamrznitev_zavrne_nepopoln_ali_neskladen_izdajni_snapshot():
+    cycle, (review,) = _review_cycle({})
+    snapshot = review.batch.calculation_snapshot
+    snapshot["candidates"][0]["lines"] = []
+    review.batch.calculation_snapshot = snapshot
+    review.batch.save(update_fields=["calculation_snapshot"])
+    with pytest.raises(ValidationError, match="nepopoln"):
+        zamrzni_paket_za_potrditev(cycle)
+    snapshot["candidates"][0]["lines"] = [
+        {"net": "1.00", "vat": "0.00", "total": "1.00"}
+    ]
+    review.batch.calculation_snapshot = snapshot
+    review.batch.save(update_fields=["calculation_snapshot"])
+    with pytest.raises(ValidationError, match="niso skladne"):
+        zamrzni_paket_za_potrditev(cycle)
+
+
+@pytest.mark.django_db
+def test_step4_action_in_step5_reload_prikazeta_zamrznjen_snapshot(client):
+    _cycle, reviews = _review_cycle(
+        {"company": "Snapshot podjetje", "tenant": "Snapshot najemnik"},
+        {"will_issue": False, "system_reason": "Sistemski razlog"},
+    )
+    first, _second = reviews
+    first.selected = False
+    first.non_issue_reason = "Uporabnikov razlog"
+    first.save(update_fields=["selected", "non_issue_reason"])
+    before_counts = (
+        Invoice.objects.count(), InvoiceLine.objects.count(), NumberSequence.objects.count()
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "freeze_package"})
+    assert response.status_code == 302
+    first.batch.company.naziv = "Spremenjeno podjetje"
+    first.batch.company.save(update_fields=["naziv"])
+    first.lease.tenant.naziv = "Spremenjen najemnik"
+    first.lease.tenant.save(update_fields=["naziv"])
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert "Potrditev paketa" in content
+    assert "Paket je zaklenjen" in content
+    assert "Snapshot podjetje" in content and "Snapshot najemnik" in content
+    assert "Spremenjeno podjetje" not in content and "Spremenjen najemnik" not in content
+    assert "Uporabnikov razlog" in content and "Sistemski razlog" in content
+    assert 'class="wizard-step is-active" aria-current="step"><span>5</span>' in content
+    assert '<div class="wizard-step"><span>6</span>' in content
+    assert (
+        Invoice.objects.count(), InvoiceLine.objects.count(), NumberSequence.objects.count()
+    ) == before_counts
+
+
+@pytest.mark.django_db
+def test_step4_gumb_in_nepotrjena_izjema_vidno_blokira(client):
+    _review_cycle({"exceptions": ["Indeksacija."]})
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+    assert "Nadaljuj na potrditev" in content
+    assert "Potrditev potrebna <strong>1</strong>" in content
+    assert 'value="freeze_package" type="submit" disabled' in content
+    response = client.post("/mesecni-obracun/", {"action": "freeze_package"})
+    assert response.status_code == 200
+    assert "Izjema izbranega kandidata ni potrjena." in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
+    cycle, (review,) = _review_cycle({})
+    zamrzni_paket_za_potrditev(cycle)
+    identity = {
+        "lease_id": review.lease_id,
+        "candidate_fingerprint": review.candidate_fingerprint,
+    }
+    before = (deepcopy(review.batch.calculation_snapshot), list(MonthlyCandidateReview.objects.values()))
+    for action in (
+        "deselect_candidate", "confirm_candidate", "rerun_preflight",
+        "rerun_calculation", "refresh_review", "freeze_package",
+    ):
+        response = client.post("/mesecni-obracun/", {"action": action, **identity})
+        assert response.status_code < 500
+    review.batch.refresh_from_db()
+    assert (review.batch.calculation_snapshot, list(MonthlyCandidateReview.objects.values())) == before
+    assert MonthlyCycle.objects.get(pk=cycle.pk).trenutni_korak == 5
+
+
+@pytest.mark.django_db
+def test_zamrznitev_post_je_csrf_zasciten():
+    _review_cycle({})
+    response = Client(enforce_csrf_checks=True).post(
+        "/mesecni-obracun/", {"action": "freeze_package"}
+    )
+    assert response.status_code == 403

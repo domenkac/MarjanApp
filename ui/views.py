@@ -56,6 +56,7 @@ from invoicing.services import (
     trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
+    zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import PdfRenderNapaka
 from rendering.services import generiraj_mesecni_predogled_pdf, render_sample_pdf
@@ -979,6 +980,13 @@ def mesecni_obracun(request):
             )
             uskladi_preglede_mesecnega_cikla(cycle)
         return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "freeze_package" and cycle:
+        try:
+            cycle = zamrzni_paket_za_potrditev(cycle)
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
+        else:
+            return redirect("ui:mesecni_obracun")
 
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
@@ -1054,7 +1062,10 @@ def mesecni_obracun(request):
     step3_complete = bool(cycle and so_vsi_uspesni_izracuni_aktivni(cycle))
     review_rows = []
     review_summary = None
-    if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED:
+    if cycle and cycle.trenutni_korak in (
+        MonthlyCycle.Korak.PAKETNI_PREGLED,
+        MonthlyCycle.Korak.POTRDITEV_PAKETA,
+    ):
         review_rows = _review_rows(cycle, review_error_identity, review_error)
         review_summary = {
             "total": len(review_rows),
@@ -1098,6 +1109,10 @@ def mesecni_obracun(request):
             "review_rows": review_rows,
             "review_summary": review_summary,
             "review_error": review_error,
+            "step4_complete": bool(
+                cycle
+                and cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA
+            ),
         },
     )
 
