@@ -45,6 +45,7 @@ from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
     aktivni_izracuni_mesecnega_cikla,
+    izdaj_zamrznjeni_mesecni_paket,
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
     nastavi_izbiro_kandidata,
@@ -53,6 +54,7 @@ from invoicing.services import (
     preveri_predhodno_kontrolo,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
@@ -987,6 +989,12 @@ def mesecni_obracun(request):
             review_error = _review_error_message(exc)
         else:
             return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "issue_frozen_package" and cycle:
+        try:
+            izdaj_zamrznjeni_mesecni_paket(cycle)
+        except MesecniCikelNapaka as exc:
+            review_error = _review_error_message(exc)
+        return redirect("ui:mesecni_obracun")
 
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
@@ -1184,6 +1192,12 @@ def _review_rows(cycle, error_identity=None, error=None):
                     "error": (
                         error if error_identity == (lease_id, fingerprint) else None
                     ),
+                    "materialization": stanje_zamrznjenega_mesecnega_kandidata(
+                        batch.pk,
+                        lease_id,
+                        fingerprint,
+                    ) if cycle.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+                    else {"state": "PENDING", "invoice": None, "error": None},
                 }
             )
     return rows

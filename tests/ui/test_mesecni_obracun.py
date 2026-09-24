@@ -1084,9 +1084,10 @@ def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
 
 
 @pytest.mark.django_db
-def test_zamrznitev_post_je_csrf_zasciten():
+@pytest.mark.parametrize("action", ["freeze_package", "issue_frozen_package"])
+def test_zamrznitev_in_izdaja_post_sta_csrf_zascitena(action):
     _review_cycle({})
     response = Client(enforce_csrf_checks=True).post(
-        "/mesecni-obracun/", {"action": "freeze_package"}
+        "/mesecni-obracun/", {"action": action}
     )
     assert response.status_code == 403

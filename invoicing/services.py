@@ -1,5 +1,6 @@
 import hashlib
 import json
+import re
 from calendar import monthrange
 from collections import Counter
 from dataclasses import dataclass
@@ -2490,4 +2491,346 @@ def izracunaj_mesecne_kandidate(
             )
         batch.refresh_from_db()
         results.append(batch)
+    return results
+
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+
+
+def _datum_iz_posnetka(value, label):
+    try:
+        return date.fromisoformat(value)
+    except (TypeError, ValueError) as exc:
+        raise ValidationError(f"{label} v zamrznjenem posnetku ni veljaven.") from exc
+
+
+def _decimal_iz_posnetka(value, label, *, max_digits=10, decimal_places=2):
+    try:
+        number = Decimal(value)
+    except (InvalidOperation, TypeError, ValueError) as exc:
+        raise ValidationError(f"{label} v zamrznjenem posnetku ni veljaven.") from exc
+    if not number.is_finite():
+        raise ValidationError(f"{label} v zamrznjenem posnetku ni kon\u010dno \u0161tevilo.")
+    _sign, digits, exponent = number.as_tuple()
+    decimals = max(-exponent, 0)
+    integers = max(len(digits) + exponent, 0)
+    if decimals > decimal_places or integers + decimals > max_digits:
+        raise ValidationError(f"{label} presega dovoljeno natan\u010dnost.")
+    return number
+
+
+def _preveri_in_pripravi_zamrznjenega_kandidata(snapshot, candidate, review):
+    if snapshot.get("schema_version") != CALCULATION_SNAPSHOT_VERSION:
+        raise ValidationError("Razli\u010dica zamrznjenega posnetka ni podprta.")
+    company = snapshot.get("company")
+    tenant = candidate.get("tenant")
+    signatory = company.get("signatory") if isinstance(company, dict) else None
+    if not isinstance(company, dict) or not isinstance(tenant, dict) or not isinstance(signatory, dict):
+        raise ValidationError("Zamrznjeni posnetek glave je nepopoln.")
+    required = (
+        (snapshot, ("period_start", "period_end", "issue_date", "pdf_template_version")),
+        (company, ("id", "name", "address", "country", "vat_registered", "tax_number", "registration_number", "iban", "logo_checksum")),
+        (signatory, ("name", "function", "signature_checksum")),
+        (candidate, ("lease_id", "contract_reference", "property_label", "due_date", "lines", "totals", "delivery_contacts", "pdf_template_version", "candidate_fingerprint", "will_issue")),
+        (tenant, ("name", "type", "address", "country", "vat_registered", "tax_number", "vat_id", "registration_number")),
+    )
+    if any(key not in source for source, keys in required for key in keys):
+        raise ValidationError("Zamrznjeni posnetek glave je nepopoln.")
+    if company["id"] != review.batch.company_id or candidate["lease_id"] != review.lease_id:
+        raise ValidationError("Pregled in zamrznjeni kandidat se ne ujemata.")
+    if candidate["candidate_fingerprint"] != review.candidate_fingerprint:
+        raise ValidationError("Prstni odtis pregleda se ne ujema z zamrznjenim kandidatom.")
+    fingerprint_source = dict(candidate)
+    fingerprint_source.pop("candidate_fingerprint", None)
+    expected_fingerprint = _candidate_fingerprint(
+        fingerprint_source,
+        company=company,
+        period_start=snapshot["period_start"],
+        period_end=snapshot["period_end"],
+        issue_date=snapshot["issue_date"],
+    )
+    if candidate["candidate_fingerprint"] != expected_fingerprint:
+        raise ValidationError("Prstni odtis zamrznjenega kandidata ni veljaven.")
+    if candidate["pdf_template_version"] != snapshot["pdf_template_version"]:
+        raise ValidationError("Razli\u010dica PDF-predloge kandidata ni skladna s paketom.")
+    for checksum in (company["logo_checksum"], signatory["signature_checksum"]):
+        if not isinstance(checksum, str) or not _SHA256_RE.fullmatch(checksum):
+            raise ValidationError("Kontrolni odtis nespremenljivega sredstva ni veljaven.")
+
+    period_start = _datum_iz_posnetka(snapshot["period_start"], "Za\u010detek obdobja")
+    period_end = _datum_iz_posnetka(snapshot["period_end"], "Konec obdobja")
+    issue_date = _datum_iz_posnetka(snapshot["issue_date"], "Datum izdaje")
+    due_date = _datum_iz_posnetka(candidate["due_date"], "Rok pla\u010dila")
+    if period_start > period_end:
+        raise ValidationError("Obra\u010dunsko obdobje v zamrznjenem posnetku ni veljavno.")
+
+    lines = candidate["lines"]
+    totals = candidate["totals"]
+    if not isinstance(lines, list) or not isinstance(totals, dict):
+        raise ValidationError("Vrstice ali vsote zamrznjenega kandidata niso veljavne.")
+    parsed_lines = []
+    for index, line in enumerate(lines, 1):
+        try:
+            parsed = {
+                "lease_item_id": int(line["lease_item_id"]),
+                "opis": line["description"],
+                "osnova": _decimal_iz_posnetka(line["net"], f"Osnova vrstice {index}"),
+                "ddv_stopnja": _decimal_iz_posnetka(line["vat_rate"], f"Stopnja DDV vrstice {index}", max_digits=5),
+                "ddv_znesek": _decimal_iz_posnetka(line["vat"], f"DDV vrstice {index}"),
+                "skupaj": _decimal_iz_posnetka(line["total"], f"Skupaj vrstice {index}"),
+                "ddv_nacin_obracuna": line["vat_method"],
+                "ddv_klavzula": line["vat_clause"],
+                "ddv_rekap_skupina": line["vat_summary_group"],
+                "je_sorazmerno": line["proportional"],
+            }
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValidationError(f"Vrstica {index} v zamrznjenem posnetku ni veljavna.") from exc
+        if parsed["osnova"] + parsed["ddv_znesek"] != parsed["skupaj"]:
+            raise ValidationError(f"Vsota vrstice {index} v zamrznjenem posnetku ni skladna.")
+        parsed_lines.append(parsed)
+    parsed_totals = {
+        key: _decimal_iz_posnetka(totals.get(key), f"Skupna vrednost {key}")
+        for key in ("net", "vat", "total")
+    }
+    if (
+        sum((line["osnova"] for line in parsed_lines), Decimal("0.00")) != parsed_totals["net"]
+        or sum((line["ddv_znesek"] for line in parsed_lines), Decimal("0.00")) != parsed_totals["vat"]
+        or sum((line["skupaj"] for line in parsed_lines), Decimal("0.00")) != parsed_totals["total"]
+        or parsed_totals["net"] + parsed_totals["vat"] != parsed_totals["total"]
+    ):
+        raise ValidationError("Vsote v zamrznjenem posnetku niso skladne.")
+    if review.selected and not parsed_lines:
+        raise ValidationError("Izbrani kandidat nima vrstic.")
+    if review.selected and candidate["will_issue"] is not True:
+        raise ValidationError("Izbrani pregled je v neskladju s sistemsko neizdajnim kandidatom.")
+    if review.selected and review.non_issue_reason.strip():
+        raise ValidationError("Izbrani kandidat ne sme imeti razloga neizdaje.")
+    if review.selected and review.requires_confirmation and review.confirmed_at is None:
+        raise ValidationError("Izjema izbranega kandidata ni potrjena.")
+    reason = review.non_issue_reason.strip() if candidate["will_issue"] is True else str(candidate.get("non_issue_reason") or "").strip()
+    if not review.selected and not reason:
+        raise ValidationError("Neizdani kandidat nima razloga neizdaje.")
+    return {
+        "period_start": period_start, "period_end": period_end,
+        "issue_date": issue_date, "due_date": due_date,
+        "company": company, "tenant": tenant, "signatory": signatory,
+        "lines": parsed_lines, "totals": parsed_totals, "reason": reason,
+    }
+
+
+def _polja_racuna_iz_zamrznjenega_posnetka(batch, candidate, prepared, review):
+    company, tenant, signatory = prepared["company"], prepared["tenant"], prepared["signatory"]
+    return {
+        "company_id": batch.company_id,
+        "lease_id": candidate["lease_id"],
+        "document_type": Invoice.DocumentType.NP,
+        "datum_izdaje": prepared["issue_date"],
+        "obdobje_od": prepared["period_start"],
+        "obdobje_do": prepared["period_end"],
+        "rok_placila": prepared["due_date"],
+        "prejemnik_naziv": tenant["name"], "prejemnik_tip": tenant["type"],
+        "prejemnik_naslov": tenant["address"], "prejemnik_drzava_koda": tenant["country"],
+        "prejemnik_identificiran_za_ddv": tenant["vat_registered"],
+        "prejemnik_davcna_stevilka": tenant["tax_number"],
+        "prejemnik_ddv_identifikacijska_stevilka": tenant["vat_id"],
+        "prejemnik_maticna_stevilka": tenant["registration_number"],
+        "izdajatelj_naziv": company["name"], "izdajatelj_naslov": company["address"],
+        "izdajatelj_drzava_koda": company["country"],
+        "izdajatelj_identificiran_za_ddv": company["vat_registered"],
+        "izdajatelj_davcna_stevilka": company["tax_number"],
+        "izdajatelj_maticna_stevilka": company["registration_number"],
+        "izdajatelj_trr": company["iban"],
+        "izdajatelj_logotip_slika_pot": f"nespremenljivi-asseti/{company['logo_checksum']}",
+        "pdf_template_version": candidate["pdf_template_version"],
+        "izdajatelj_podpisnik_ime": signatory["name"],
+        "izdajatelj_podpisnik_funkcija": signatory["function"],
+        "izdajatelj_podpisnik_slika_pot": f"nespremenljivi-asseti/{signatory['signature_checksum']}",
+        "oznaka_pogodbe": candidate["contract_reference"], "objekt_naziv": candidate["property_label"],
+        "status": Invoice.Status.IZBRAN_ZA_POSILJANJE if review.selected else Invoice.Status.ARHIVIRAN_NI_IZDAN,
+        "razlog_arhiviranja": None if review.selected else prepared["reason"],
+        "osnova_skupaj": prepared["totals"]["net"], "ddv_skupaj": prepared["totals"]["vat"],
+        "skupaj_z_ddv": prepared["totals"]["total"],
+        "dostavni_kontakti_snapshot": candidate["delivery_contacts"],
+        "eslog_konfiguracija_snapshot": None,
+        "povezan_racun_id": None,
+        "razlog": "",
+    }
+
+
+def _racun_se_natancno_ujema(invoice, fields, lines):
+    if any(getattr(invoice, name) != value for name, value in fields.items()):
+        return False
+    expected = [
+        (
+            invoice.lease_id, line["lease_item_id"], line["opis"],
+            line["osnova"], line["ddv_stopnja"], line["ddv_znesek"],
+            line["skupaj"], line["ddv_nacin_obracuna"],
+            line["ddv_klavzula"], line["ddv_rekap_skupina"], "",
+            line["je_sorazmerno"], None, None,
+        )
+        for line in lines
+    ]
+    actual = list(InvoiceLine.objects.filter(invoice=invoice).order_by("pk").values_list(
+        "lease_id", "lease_item_id", "opis", "osnova", "ddv_stopnja",
+        "ddv_znesek", "skupaj", "ddv_nacin_obracuna", "ddv_klavzula",
+        "ddv_rekap_skupina", "ddv_eslog_koda", "je_sorazmerno",
+        "razlog_rocnega_popravka", "izvirno_izracunana_vrednost",
+    ))
+    return actual == expected
+
+
+def _sporocilo_validacijske_napake(exc):
+    return exc.messages[0] if isinstance(exc, ValidationError) else str(exc)
+
+
+def _preveri_aktivno_zamrznjeno_clanstvo(batch):
+    if not aktivni_izracuni_mesecnega_cikla(batch.cycle).filter(pk=batch.pk).exists():
+        raise ValidationError(
+            "Kandidat ne pripada aktivnemu zamrznjenemu mesečnemu paketu."
+        )
+
+
+def _nalozi_podatke_materializacije(batch_id, lease_id, candidate_fingerprint):
+    batch = MonthlyBatch.objects.select_related("cycle").get(pk=batch_id)
+    if batch.cycle.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Izdaja zamrznjenega paketa je dovoljena samo v koraku 5."
+        )
+    _preveri_aktivno_zamrznjeno_clanstvo(batch)
+    snapshot = batch.calculation_snapshot
+    candidates = [
+        item
+        for item in snapshot.get("candidates", [])
+        if item.get("lease_id") == lease_id
+        and item.get("candidate_fingerprint") == candidate_fingerprint
+    ]
+    if len(candidates) != 1:
+        raise ValidationError("Zamrznjeni kandidat ni enolično določen.")
+    candidate = candidates[0]
+    try:
+        review = MonthlyCandidateReview.objects.get(
+            batch_id=batch_id,
+            lease_id=lease_id,
+            candidate_fingerprint=candidate_fingerprint,
+        )
+    except MonthlyCandidateReview.DoesNotExist as exc:
+        raise ValidationError("Manjka pregled zamrznjenega kandidata.") from exc
+    prepared = _preveri_in_pripravi_zamrznjenega_kandidata(
+        snapshot, candidate, review
+    )
+    if not Lease.objects.filter(pk=lease_id).exists():
+        raise ValidationError("Pogodba zamrznjenega kandidata ne obstaja več.")
+    item_ids = [line["lease_item_id"] for line in prepared["lines"]]
+    if LeaseItem.objects.filter(pk__in=item_ids).count() != len(set(item_ids)):
+        raise ValidationError("Postavka zamrznjenega kandidata ne obstaja več.")
+    fields = _polja_racuna_iz_zamrznjenega_posnetka(
+        batch, candidate, prepared, review
+    )
+    Invoice(**fields).full_clean(validate_unique=False, validate_constraints=False)
+    for line in prepared["lines"]:
+        InvoiceLine(lease_id=lease_id, **line).full_clean(
+            exclude=["invoice"], validate_unique=False, validate_constraints=False
+        )
+    return batch, candidate, review, prepared, fields
+
+
+def _obstojece_stanje_materializacije(batch, review, prepared, fields):
+    existing = list(
+        Invoice.objects.filter(
+            company_id=batch.company_id,
+            lease_id=review.lease_id,
+            document_type=Invoice.DocumentType.NP,
+            obdobje_od=prepared["period_start"],
+            obdobje_do=prepared["period_end"],
+        )
+    )
+    if not existing:
+        return "PENDING", None, None
+    if len(existing) > 1:
+        return (
+            "CONFLICT",
+            None,
+            "Za zamrznjenega kandidata obstaja več mesečnih računov.",
+        )
+    invoice = existing[0]
+    expected = fields | {"stevilka": invoice.stevilka if review.selected else None}
+    if review.selected and not re.fullmatch(r"NP-\d{5,}", invoice.stevilka or ""):
+        return (
+            "CONFLICT",
+            None,
+            "Obstoječi mesečni račun nima veljavne uradne NP številke.",
+        )
+    if not _racun_se_natancno_ujema(invoice, expected, prepared["lines"]):
+        return (
+            "CONFLICT",
+            None,
+            "Obstoječi mesečni račun je v konfliktu z zamrznjenim kandidatom.",
+        )
+    return "MATERIALIZED", invoice, None
+
+
+def stanje_zamrznjenega_mesecnega_kandidata(
+    batch_id, lease_id, candidate_fingerprint
+):
+    try:
+        batch, _candidate, review, prepared, fields = (
+            _nalozi_podatke_materializacije(
+                batch_id, lease_id, candidate_fingerprint
+            )
+        )
+        state, invoice, error = _obstojece_stanje_materializacije(
+            batch, review, prepared, fields
+        )
+    except (MesecniCikelNapaka, ValidationError) as exc:
+        return {
+            "state": "CONFLICT",
+            "invoice": None,
+            "error": _sporocilo_validacijske_napake(exc),
+        }
+    return {"state": state, "invoice": invoice, "error": error}
+
+
+def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidate_fingerprint):
+    with transaction.atomic():
+        batch, _candidate, review, prepared, fields = (
+            _nalozi_podatke_materializacije(
+                batch_id, lease_id, candidate_fingerprint
+            )
+        )
+        state, invoice, error = _obstojece_stanje_materializacije(
+            batch, review, prepared, fields
+        )
+        if state == "CONFLICT":
+            raise ValidationError(error)
+        if state == "MATERIALIZED":
+            return invoice, True
+        if review.selected:
+            zaporedna = dodeli_naslednjo_stevilko(batch.company, NumberSequence.Tip.NP, prepared["issue_date"])
+            fields["stevilka"] = f"NP-{zaporedna:05d}"
+        else:
+            fields["stevilka"] = None
+        invoice = Invoice.objects.create(**fields)
+        InvoiceLine.objects.bulk_create([
+            InvoiceLine(invoice=invoice, lease_id=lease_id, **line) for line in prepared["lines"]
+        ])
+        return invoice, False
+
+
+def izdaj_zamrznjeni_mesecni_paket(cycle):
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if cycle.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+        raise NeveljavenPrehodMesecnegaCikla("Izdaja zamrznjenega paketa je dovoljena samo v koraku 5.")
+    identities = [
+        (batch.pk, candidate.get("lease_id"), candidate.get("candidate_fingerprint"))
+        for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by("company_id", "pk")
+        for candidate in batch.calculation_snapshot.get("candidates", [])
+    ]
+    results = []
+    for batch_id, lease_id, fingerprint in identities:
+        try:
+            invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, fingerprint)
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            results.append({"batch_id": batch_id, "lease_id": lease_id, "candidate_fingerprint": fingerprint, "ok": False, "error": _sporocilo_validacijske_napake(exc)})
+        else:
+            results.append({"batch_id": batch_id, "lease_id": lease_id, "candidate_fingerprint": fingerprint, "ok": True, "invoice": invoice, "reused": reused})
     return results

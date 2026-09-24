@@ -22,12 +22,17 @@ from invoicing.services import (
     CALCULATION_SNAPSHOT_VERSION,
     MIGRACIJSKI_RAZLOG,
     NeveljavenPrehodMesecnegaCikla,
+    _candidate_fingerprint,
+    izdaj_zamrznjeni_mesecni_paket,
     izracunaj_mesecne_kandidate,
+    materializiraj_zamrznjenega_mesecnega_kandidata,
     nastavi_izbiro_kandidata,
     potrdi_izjemo_kandidata,
     preveri_predhodno_kontrolo,
+    stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
+    zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import pripravi_mesecni_pdf_context
 
@@ -250,6 +255,36 @@ def _enter_step4_with_reviews(data, *, will_issue=True, exceptions=None):
     data["cycle"].save(update_fields=["trenutni_korak"])
     uskladi_preglede_mesecnega_cikla(data["cycle"])
     return candidate, MonthlyCandidateReview.objects.get()
+
+
+def _freeze_ready_package(data):
+    candidate = _calculate(data)[0]
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    review = MonthlyCandidateReview.objects.get()
+    if review.requires_confirmation:
+        potrdi_izjemo_kandidata(
+            data["cycle"], lease_id=review.lease_id,
+            candidate_fingerprint=review.candidate_fingerprint,
+        )
+    zamrzni_paket_za_potrditev(data["cycle"])
+    return candidate, review
+
+
+def _freeze_all_candidates(data):
+    candidates = _calculate(data)
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    for review in MonthlyCandidateReview.objects.filter(selected=True):
+        if review.requires_confirmation:
+            potrdi_izjemo_kandidata(
+                data["cycle"], lease_id=review.lease_id,
+                candidate_fingerprint=review.candidate_fingerprint,
+            )
+    zamrzni_paket_za_potrditev(data["cycle"])
+    return candidates, list(MonthlyCandidateReview.objects.order_by("lease_id"))
 
 
 def test_batch_defaults_to_not_checked(db):
@@ -1568,6 +1603,398 @@ def test_ui_shows_precise_contract_location_and_persists_for_fresh_client(
 
     assert "Pogodbe → P-2026" in content
     assert amount_issue["message"] in content
+
+
+def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
+    ready_company, settings
+):
+    data = ready_company
+    RecipientContact.objects.create(
+        lease=data["lease"], email="kontakt@example.com", vloga="TO"
+    )
+    candidate, _review = _freeze_ready_package(data)
+    frozen = data["batch"].calculation_snapshot
+    Company.objects.filter(pk=data["company"].pk).update(
+        naziv="Changed", naslov="Changed 9", trr="SI56191000000999999"
+    )
+    Tenant.objects.filter(pk=data["tenant"].pk).update(
+        naziv="Changed tenant", naslov="Changed 3"
+    )
+    Lease.objects.filter(pk=data["lease"].pk).update(rok_placila_dni=90)
+    LeaseItem.objects.filter(pk=data["item"].pk).update(
+        naziv_postavke="Changed", znesek_neto_mesecno=Decimal("999.00")
+    )
+    VatRegime.objects.filter(pk=data["regime"].pk).update(
+        stopnja=Decimal("9.50"), nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO
+    )
+    settings.PDF_TEMPLATE_VERSION = "changed-after-freeze"
+    Signatory.objects.filter(pk=data["signatory"].pk).update(
+        ime_priimek="Changed signer"
+    )
+    RecipientContact.objects.filter(lease=data["lease"]).update(
+        email="changed@example.com"
+    )
+
+    first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
+    second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
+    invoice = Invoice.objects.get()
+    line = InvoiceLine.objects.get()
+
+    assert first["ok"] and not first["reused"]
+    assert second["ok"] and second["reused"]
+    assert (Invoice.objects.count(), InvoiceLine.objects.count()) == (1, 1)
+    assert invoice.stevilka == "NP-00001"
+    assert invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert invoice.prejemnik_naziv == candidate["tenant"]["name"]
+    assert invoice.izdajatelj_naziv == frozen["company"]["name"]
+    assert invoice.rok_placila.isoformat() == candidate["due_date"]
+    assert invoice.pdf_template_version == candidate["pdf_template_version"]
+    assert invoice.izdajatelj_podpisnik_ime == frozen["company"]["signatory"]["name"]
+    assert invoice.izdajatelj_logotip_slika_pot == (
+        f"nespremenljivi-asseti/{frozen['company']['logo_checksum']}"
+    )
+    assert invoice.izdajatelj_podpisnik_slika_pot == (
+        "nespremenljivi-asseti/"
+        f"{frozen['company']['signatory']['signature_checksum']}"
+    )
+    assert invoice.dostavni_kontakti_snapshot == candidate["delivery_contacts"]
+    assert line.opis == candidate["lines"][0]["description"]
+    assert line.osnova == Decimal(candidate["lines"][0]["net"])
+    assert line.ddv_eslog_koda == ""
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert invoice.rendered_pdf_path == invoice.checksum == ""
+    assert invoice.rendered_eslog_path == invoice.rendered_eslog_checksum == ""
+    assert MonthlyCycle.objects.get().trenutni_korak == 5
+
+
+def test_frozen_unselected_candidate_archives_without_number(ready_company):
+    data = ready_company
+    candidate = _calculate(data)[0]
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    review = MonthlyCandidateReview.objects.get()
+    nastavi_izbiro_kandidata(
+        data["cycle"], lease_id=review.lease_id,
+        candidate_fingerprint=review.candidate_fingerprint,
+        selected=False, non_issue_reason="User decision",
+    )
+    zamrzni_paket_za_potrditev(data["cycle"])
+
+    assert izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["ok"]
+    invoice = Invoice.objects.get()
+    assert invoice.status == Invoice.Status.ARHIVIRAN_NI_IZDAN
+    assert invoice.stevilka is None
+    assert invoice.razlog_arhiviranja == "User decision"
+    assert not NumberSequence.objects.exists()
+    assert InvoiceLine.objects.count() == len(candidate["lines"])
+
+
+def test_post_allocation_failure_rolls_back_number_and_invoice(
+    ready_company, monkeypatch
+):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+
+    def fail_create(**_kwargs):
+        raise IntegrityError("forced failure")
+
+    monkeypatch.setattr(Invoice.objects, "create", fail_create)
+    with pytest.raises(IntegrityError, match="forced failure"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+    assert not NumberSequence.objects.exists()
+    assert not Invoice.objects.exists()
+    assert not InvoiceLine.objects.exists()
+
+
+def test_retry_reuses_invoice_after_pdf_metadata(ready_company):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+    assert not reused
+    invoice.rendered_pdf_path = "arhiv/NP-00001.pdf"
+    invoice.checksum = "a" * 64
+    invoice.save(update_fields=["rendered_pdf_path", "checksum"])
+
+    same, reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+
+    assert reused and same.pk == invoice.pk
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert (Invoice.objects.count(), InvoiceLine.objects.count()) == (1, 1)
+
+
+def test_six_digit_np_number_is_materialized_and_reused(ready_company):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    NumberSequence.objects.create(
+        company=data["company"],
+        tip=NumberSequence.Tip.NP,
+        leto=0,
+        zadnja_stevilka=99999,
+    )
+
+    invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+    same, reused_again = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+    state = stanje_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+
+    assert invoice.stevilka == "NP-100000"
+    assert not reused and reused_again and same.pk == invoice.pk
+    assert (Invoice.objects.count(), InvoiceLine.objects.count()) == (1, 1)
+    assert NumberSequence.objects.get().zadnja_stevilka == 100000
+    assert state["state"] == "MATERIALIZED" and state["invoice"].pk == invoice.pk
+
+    invoice.stevilka = "NP-1234"
+    invoice.save(update_fields=["stevilka"])
+    assert stanje_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )["state"] == "CONFLICT"
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("lease_id", None),
+        ("razlog_rocnega_popravka", "Unrelated adjustment"),
+        ("izvirno_izracunana_vrednost", Decimal("100.00")),
+    ],
+)
+def test_conflicting_line_trace_or_audit_state_fails_closed(
+    ready_company, field, value
+):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    invoice, _reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+    InvoiceLine.objects.filter(invoice=invoice).update(**{field: value})
+
+    state = stanje_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+
+    assert state["state"] == "CONFLICT"
+    with pytest.raises(ValidationError, match="konfliktu"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+
+
+def test_line_creation_failure_rolls_back_invoice_and_number(
+    ready_company, monkeypatch
+):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+
+    def fail_bulk_create(_lines):
+        raise IntegrityError("forced line failure")
+
+    monkeypatch.setattr(InvoiceLine.objects, "bulk_create", fail_bulk_create)
+    with pytest.raises(IntegrityError, match="forced line failure"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+
+    assert not NumberSequence.objects.exists()
+    assert not Invoice.objects.exists()
+    assert not InvoiceLine.objects.exists()
+
+
+def test_direct_materialization_rejects_blocked_stale_batch(ready_company):
+    data = ready_company
+    _company, stale_batch = _add_ready_company(data)
+    candidates = _calculate(data)
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    stale_review = MonthlyCandidateReview.objects.get(batch=stale_batch)
+    active_review = MonthlyCandidateReview.objects.get(batch=data["batch"])
+    for review in (stale_review, active_review):
+        if review.requires_confirmation:
+            potrdi_izjemo_kandidata(
+                data["cycle"], lease_id=review.lease_id,
+                candidate_fingerprint=review.candidate_fingerprint,
+            )
+    stale_batch.preflight_status = MonthlyBatch.PreflightStatus.BLOCKED
+    stale_batch.calculation_status = MonthlyBatch.CalculationStatus.BLOCKED
+    stale_batch.save(update_fields=["preflight_status", "calculation_status"])
+    zamrzni_paket_za_potrditev(data["cycle"])
+
+    with pytest.raises(ValidationError, match="aktivnemu zamrznjenemu"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            stale_batch.pk,
+            stale_review.lease_id,
+            stale_review.candidate_fingerprint,
+        )
+    active_candidate = next(
+        item for item in candidates if item["lease_id"] == active_review.lease_id
+    )
+    invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk,
+        active_candidate["lease_id"],
+        active_review.candidate_fingerprint,
+    )
+    assert not reused and invoice.stevilka == "NP-00001"
+    assert Invoice.objects.count() == 1
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+
+
+def test_partial_package_continues_and_retry_reuses_resolved_candidates(
+    ready_company,
+):
+    data = ready_company
+    _add_lease(data, "P-B", with_item=True)
+    _add_lease(data, "P-C", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    candidates, _reviews = _freeze_all_candidates(data)
+    snapshot = data["batch"].calculation_snapshot
+    snapshot["candidates"][1]["candidate_fingerprint"] = "0" * 64
+    data["batch"].calculation_snapshot = snapshot
+    data["batch"].save(update_fields=["calculation_snapshot"])
+
+    first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    first_numbers = list(
+        Invoice.objects.order_by("lease_id").values_list("stevilka", flat=True)
+    )
+    second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+
+    assert [result["ok"] for result in first] == [True, False, True]
+    assert [result["ok"] for result in second] == [True, False, True]
+    assert first_numbers == ["NP-00001", "NP-00002"]
+    assert list(
+        Invoice.objects.order_by("lease_id").values_list("stevilka", flat=True)
+    ) == first_numbers
+    assert NumberSequence.objects.get().zadnja_stevilka == 2
+    assert len(candidates) == 3
+
+
+def test_zero_selected_including_system_zero_lines_consumes_no_number(
+    ready_company,
+):
+    data = ready_company
+    _add_lease(data, "P-NO-LINES")
+    candidates = _calculate(data)
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    selected = MonthlyCandidateReview.objects.get(selected=True)
+    nastavi_izbiro_kandidata(
+        data["cycle"], lease_id=selected.lease_id,
+        candidate_fingerprint=selected.candidate_fingerprint,
+        selected=False, non_issue_reason="User decision",
+    )
+    zamrzni_paket_za_potrditev(data["cycle"])
+
+    results = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+
+    assert all(result["ok"] for result in results)
+    assert Invoice.objects.count() == 2
+    assert not NumberSequence.objects.exists()
+    assert set(Invoice.objects.values_list("status", flat=True)) == {
+        Invoice.Status.ARHIVIRAN_NI_IZDAN
+    }
+    no_lines = next(item for item in candidates if not item["lines"])
+    assert not InvoiceLine.objects.filter(lease_id=no_lines["lease_id"]).exists()
+
+
+@pytest.mark.parametrize("step", [MonthlyCycle.Korak.PAKETNI_PREGLED, MonthlyCycle.Korak.ZAKLJUCEK])
+def test_direct_issuance_rejects_step4_and_step6(ready_company, step):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    MonthlyCycle.objects.filter(pk=data["cycle"].pk).update(trenutni_korak=step)
+
+    with pytest.raises(NeveljavenPrehodMesecnegaCikla, match="samo v koraku 5"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+
+
+def test_conflicting_and_multiple_existing_invoices_fail_closed(ready_company):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    invoice, _reused = materializiraj_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+    )
+    invoice.prejemnik_naziv = "Conflicting recipient"
+    invoice.save(update_fields=["prejemnik_naziv"])
+
+    with pytest.raises(ValidationError, match="konfliktu"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+
+    Invoice.objects.create(
+        company_id=invoice.company_id,
+        lease_id=invoice.lease_id,
+        document_type=Invoice.DocumentType.NP,
+        stevilka="NP-99999",
+        datum_izdaje=invoice.datum_izdaje,
+        obdobje_od=invoice.obdobje_od,
+        obdobje_do=invoice.obdobje_do,
+    )
+    with pytest.raises(ValidationError, match="več mesečnih računov"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
+        )
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
+
+
+@pytest.mark.parametrize("invalid", ["NaN", "Infinity", "-Infinity"])
+def test_nonfinite_frozen_money_fails_before_numbering(ready_company, invalid):
+    data = ready_company
+    candidate, review = _freeze_ready_package(data)
+    snapshot = data["batch"].calculation_snapshot
+    candidate = snapshot["candidates"][0]
+    candidate["lines"][0]["net"] = invalid
+    candidate.pop("candidate_fingerprint")
+    fingerprint = _candidate_fingerprint(
+        candidate,
+        company=snapshot["company"],
+        period_start=snapshot["period_start"],
+        period_end=snapshot["period_end"],
+        issue_date=snapshot["issue_date"],
+    )
+    candidate["candidate_fingerprint"] = fingerprint
+    review.candidate_fingerprint = fingerprint
+    review.save(update_fields=["candidate_fingerprint"])
+    data["batch"].calculation_snapshot = snapshot
+    data["batch"].save(update_fields=["calculation_snapshot"])
+
+    with pytest.raises(ValidationError, match="končno število"):
+        materializiraj_zamrznjenega_mesecnega_kandidata(
+            data["batch"].pk, candidate["lease_id"], fingerprint
+        )
+    assert not NumberSequence.objects.exists()
+    assert not Invoice.objects.exists()
+
+
+def test_step5_prg_shows_number_and_conflict_truthfully(ready_company, client):
+    data = ready_company
+    _candidate, _review = _freeze_ready_package(data)
+
+    response = client.post(
+        "/mesecni-obracun/", {"action": "issue_frozen_package"}, follow=True
+    )
+    assert response.redirect_chain
+    assert "Izdano &ndash; NP-00001" in response.content.decode()
+
+    InvoiceLine.objects.update(razlog_rocnega_popravka="Unrelated adjustment")
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert "Obstoječi mesečni račun je v konfliktu" in content
+    assert "Izdano &ndash; NP-00001" not in content
 
 
 def test_step3_rerun_with_zero_passed_is_truthful(ready_company, client):
