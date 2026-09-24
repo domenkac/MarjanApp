@@ -60,10 +60,10 @@ def _kanonicni_fingerprint(podatki: dict) -> str:
     return sha256(zapis.encode("utf-8")).hexdigest()
 
 
-def _ddv_podatki(company: Company) -> dict:
+def pregled_ddv_razporeditve(company: Company):
     from contracts.models import LeaseItem
 
-    postavke = (
+    return (
         LeaseItem.objects.filter(
             lease__unit__property__company=company,
             lease__arhivirana=False,
@@ -71,9 +71,13 @@ def _ddv_podatki(company: Company) -> dict:
             lease__unit__property__aktivna=True,
             arhivirana=False,
         )
-        .select_related("lease__unit", "vat_regime")
+        .select_related("lease__unit__property", "vat_regime")
         .order_by("pk")
     )
+
+
+def _ddv_podatki(company: Company) -> dict:
+    postavke = pregled_ddv_razporeditve(company)
     return {
         "schema_version": FINGERPRINT_DDV_VERSION,
         "company": {"id": company.pk, "ddv_zavezanec": company.ddv_zavezanec},

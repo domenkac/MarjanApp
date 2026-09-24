@@ -19,6 +19,8 @@
   <article class="metric-card"><span>Izdani računi</span><strong>{{ counts.izdani_racuni }}</strong><small>Računi z uradno številko</small></article>
 </section>
 
+{% if confirmation_tasks %}<section class="panel confirmation-tasks"><div class="panel-heading"><div><span class="material-symbols-outlined" aria-hidden="true">verified</span><h2>Potrebne potrditve</h2></div><span class="status-badge is-blocked">{{ confirmation_tasks|length }}</span></div><table class="settings-table"><thead><tr><th>Podjetje</th><th>DDV</th><th>Vzorec</th><th></th></tr></thead><tbody>{% for company, ddv, sample in confirmation_tasks %}<tr><td><strong>{{ company.naziv }}</strong></td><td>{% if ddv.stanje != 'valid' %}<span class="status-badge{% if ddv.stanje == 'stale' %} is-blocked{% endif %}">{% if ddv.stanje == 'stale' %}Zastarela{% else %}Manjka{% endif %}</span>{% else %}Veljavna{% endif %}</td><td>{% if sample.stanje != 'valid' %}<span class="status-badge{% if sample.stanje == 'stale' %} is-blocked{% endif %}">{% if sample.stanje == 'stale' %}Zastarela{% else %}Manjka{% endif %}</span>{% else %}Veljavna{% endif %}</td><td><a class="button-secondary compact" href="{% url 'ui:podjetje_detail' company.pk %}">Odpri</a></td></tr>{% endfor %}</tbody></table></section>{% endif %}
+
 <div class="dashboard-grid">
   <section class="panel">
     <div class="panel-heading">

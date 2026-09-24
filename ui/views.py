@@ -1,4 +1,5 @@
 from calendar import monthrange
+from datetime import date
 from decimal import Decimal
 
 from django.core.exceptions import ValidationError
@@ -16,8 +17,14 @@ from catalogs.services import (
 )
 from companies.models import Company, Signatory
 from companies.services import (
+    AssetPotrditveSpremenjen,
     arhiviraj_poslovni_zapis,
     ponovno_aktiviraj_poslovni_zapis,
+    potrdi_ddv_nastavitve,
+    potrdi_vzorec_podjetja,
+    pregled_ddv_razporeditve,
+    veljavna_potrditev_ddv,
+    veljavna_potrditev_vzorca,
 )
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from contracts.services import (
@@ -51,7 +58,7 @@ from invoicing.services import (
     uskladi_preglede_mesecnega_cikla,
 )
 from rendering.contexts import PdfRenderNapaka
-from rendering.services import generiraj_mesecni_predogled_pdf
+from rendering.services import generiraj_mesecni_predogled_pdf, render_sample_pdf
 
 from .forms import (
     CompanyForm,
@@ -62,6 +69,8 @@ from .forms import (
     LeaseItemDetailsForm,
     PropertyForm,
     RecipientContactForm,
+    SampleConfirmationForm,
+    SampleLeaseSelectionForm,
     ServiceCatalogItemForm,
     SignatoryForm,
     TenantForm,
@@ -626,16 +635,122 @@ def podjetje_novo(request):
 @require_http_methods(["GET", "POST"])
 def podjetje_detail(request, company_id):
     company = get_object_or_404(Company, pk=company_id)
+    selected_sample_lease = None
+    if request.method == "GET" and request.GET.get("vzorec_pogodba"):
+        selected_sample_lease = _sample_lease_or_404(
+            company, request.GET["vzorec_pogodba"]
+        )
     form = CompanyForm(request.POST or None, request.FILES or None, instance=company)
     if request.method == "POST" and form.is_valid():
         form.save()
         return redirect("ui:podjetje_detail", company_id=company.pk)
-    signatories = company.signatory_set.order_by("-velja_od", "-pk")
     return render(
         request,
         "ui/podjetje_detail.html",
-        _settings_context(company=company, form=form, signatories=signatories),
+        _company_detail_context(
+            company,
+            form=form,
+            confirmation_marker=request.GET.get("potrditev"),
+            selected_sample_lease=selected_sample_lease,
+        ),
     )
+
+
+def _confirmation_success(marker, ddv_state, sample_state):
+    if marker == "ddv" and ddv_state.stanje == "valid":
+        return "ddv"
+    if marker == "vzorec" and sample_state.stanje == "valid":
+        return "vzorec"
+    return None
+
+
+def _company_detail_context(
+    company,
+    *,
+    form=None,
+    action_errors=None,
+    confirmation_marker=None,
+    selected_sample_lease=None,
+):
+    ddv_state = veljavna_potrditev_ddv(company)
+    sample_state = veljavna_potrditev_vzorca(company)
+    return _settings_context(
+        company=company,
+        form=form or CompanyForm(instance=company),
+        signatories=company.signatory_set.order_by("-velja_od", "-pk"),
+        ddv_state=ddv_state,
+        sample_state=sample_state,
+        ddv_allocations=pregled_ddv_razporeditve(company),
+        sample_selection_form=SampleLeaseSelectionForm(
+            company=company,
+            initial={"vzorec_pogodba": selected_sample_lease},
+        ),
+        selected_sample_lease=selected_sample_lease,
+        confirmation_success=_confirmation_success(
+            confirmation_marker, ddv_state, sample_state
+        ),
+        action_errors=action_errors,
+    )
+
+
+@require_POST
+def podjetje_potrdi_ddv(request, company_id):
+    company = get_object_or_404(Company, pk=company_id)
+    potrdi_ddv_nastavitve(company)
+    response = redirect("ui:podjetje_detail", company_id=company.pk)
+    response["Location"] += "?potrditev=ddv"
+    return response
+
+
+def _sample_lease_or_404(company, lease_id):
+    form = SampleConfirmationForm({"lease": lease_id}, company=company)
+    if not form.is_valid():
+        from django.http import Http404
+
+        raise Http404("Izbrana pogodba ni na voljo za vzorec.")
+    return form.cleaned_data["lease"]
+
+
+@require_GET
+def podjetje_vzorec_pdf(request, company_id, lease_id):
+    company = get_object_or_404(Company, pk=company_id)
+    lease = _sample_lease_or_404(company, lease_id)
+    danes = date.today()  # noqa: DTZ011
+    try:
+        rezultat = render_sample_pdf(
+            lease,
+            datum_izdaje=danes,
+            obdobje_od=danes.replace(day=1),
+            obdobje_do=danes.replace(day=monthrange(danes.year, danes.month)[1]),
+        )
+    except (PdfRenderNapaka, ValidationError, ValueError, OSError) as napaka:
+        return HttpResponse(str(napaka), status=409, content_type="text/plain")
+    response = HttpResponse(rezultat.pdf_bytes, content_type="application/pdf")
+    response["Content-Disposition"] = 'inline; filename="VZOREC-NI-RACUN.pdf"'
+    response["Cache-Control"] = "no-store"
+    return response
+
+
+@require_POST
+def podjetje_potrdi_vzorec(request, company_id):
+    company = get_object_or_404(Company, pk=company_id)
+    lease = _sample_lease_or_404(company, request.POST.get("lease"))
+    try:
+        potrdi_vzorec_podjetja(company, lease)
+    except (AssetPotrditveSpremenjen, PdfRenderNapaka, ValidationError, ValueError, OSError) as napaka:
+        return render(
+            request,
+            "ui/podjetje_detail.html",
+            _company_detail_context(
+                company,
+                action_errors=[str(napaka)],
+                selected_sample_lease=lease,
+            ),
+            status=409,
+        )
+    response = redirect("ui:podjetje_detail", company_id=company.pk)
+    response["Location"] += "?potrditev=vzorec"
+    return response
 
 
 def _stanje_podjetja(request, company_id, service):
@@ -647,10 +762,9 @@ def _stanje_podjetja(request, company_id, service):
     return render(
         request,
         "ui/podjetje_detail.html",
-        _settings_context(
-            company=company,
+        _company_detail_context(
+            company,
             form=form,
-            signatories=company.signatory_set.order_by("-velja_od", "-pk"),
             action_errors=[razlog.sporocilo for razlog in rezultat.razlogi],
         ),
     )
@@ -715,6 +829,12 @@ def dashboard(request):
         .exclude(stevilka="")
         .count(),
     }
+    confirmation_tasks = []
+    for company in Company.objects.filter(aktivno=True).order_by("naziv", "pk"):
+        ddv_state = veljavna_potrditev_ddv(company)
+        sample_state = veljavna_potrditev_vzorca(company)
+        if ddv_state.stanje != "valid" or sample_state.stanje != "valid":
+            confirmation_tasks.append((company, ddv_state, sample_state))
     return render(
         request,
         "ui/dashboard.html",
@@ -723,6 +843,7 @@ def dashboard(request):
             "active_page": "dashboard",
             "active_section": "dashboard",
             "aktivni_cikel": aktivni_cikel,
+            "confirmation_tasks": confirmation_tasks,
         },
     )
 

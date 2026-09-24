@@ -169,6 +169,12 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .form-errors p { margin: 3px 0; }
 .settings-card .card-heading { justify-content: flex-start; }
 .settings-card .card-heading .button-primary { margin-left: auto; }
+.confirmation-block { padding: 18px 22px; border-top: 1px solid var(--outline); }
+.confirmation-heading { display: flex; justify-content: space-between; gap: 16px; align-items: flex-start; }
+.confirmation-heading h3, .confirmation-heading p { margin: 0 0 6px; }
+.confirmation-meta { color: var(--muted); font-size: 13px; }
+.confirmation-block .settings-table-wrap { margin: 14px 0 0; overflow-x: auto; }
+.confirmation-tasks { margin-bottom: 16px; }
 .status-panel { display: flex; align-items: center; justify-content: space-between; padding: 18px; }
 .status-panel > div { display: flex; align-items: center; gap: 12px; }
 .status-panel h2 { margin: 0; font-size: 18px; }

@@ -14,6 +14,46 @@ class CompanyChoiceField(forms.ModelChoiceField):
         return obj.naziv
 
 
+class SampleLeaseChoiceField(forms.ModelChoiceField):
+    def label_from_instance(self, obj):
+        return (
+            f"{obj.unit.property.naziv} — {obj.unit.oznaka} — "
+            f"{obj.oznaka_pogodbe} — {obj.tenant.naziv}"
+        )
+
+
+class SampleConfirmationForm(forms.Form):
+    lease = SampleLeaseChoiceField(
+        queryset=Lease.objects.none(), label="Pogodba za vzorec"
+    )
+
+    def __init__(self, *args, company, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["lease"].queryset = Lease.objects.filter(
+            unit__property__company=company,
+            arhivirana=False,
+            unit__aktivna=True,
+            unit__property__aktivna=True,
+            unit__property__company__aktivno=True,
+            tenant__aktiven=True,
+            leaseitem__arhivirana=False,
+        ).select_related("unit__property", "tenant").order_by(
+            "unit__property__naziv", "unit__oznaka", "oznaka_pogodbe", "pk"
+        ).distinct()
+
+
+class SampleLeaseSelectionForm(forms.Form):
+    vzorec_pogodba = SampleLeaseChoiceField(
+        queryset=Lease.objects.none(), label="Pogodba za vzorec"
+    )
+
+    def __init__(self, *args, company, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.fields["vzorec_pogodba"].queryset = SampleConfirmationForm(
+            company=company
+        ).fields["lease"].queryset
+
+
 class PropertyForm(forms.ModelForm):
     company = CompanyChoiceField(queryset=Company.objects.none(), label="Podjetje")
 
