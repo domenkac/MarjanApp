@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError
+from django.db import IntegrityError, connection
 from django.utils import timezone
 
 from catalogs.models import VatRegime
@@ -27,14 +27,25 @@ from invoicing.services import (
     izracunaj_mesecne_kandidate,
     materializiraj_zamrznjenega_mesecnega_kandidata,
     nastavi_izbiro_kandidata,
+    odpri_zakljucek_mesecnega_cikla,
     potrdi_izjemo_kandidata,
+    premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
     stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
     zamrzni_paket_za_potrditev,
 )
-from rendering.contexts import pripravi_mesecni_pdf_context
+from rendering.contexts import (
+    PdfRenderNapaka,
+    pripravi_mesecni_pdf_context,
+    pripravi_pdf_context,
+)
+from rendering.services import (
+    pripravi_html,
+    renderiraj_koncne_pdfje_mesecnega_paketa,
+    stanje_koncnega_pdf,
+)
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -268,6 +279,23 @@ def _freeze_ready_package(data):
             data["cycle"], lease_id=review.lease_id,
             candidate_fingerprint=review.candidate_fingerprint,
         )
+    zamrzni_paket_za_potrditev(data["cycle"])
+    return candidate, review
+
+
+def _freeze_unselected_package(data):
+    candidate = _calculate(data)[0]
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    review = MonthlyCandidateReview.objects.get()
+    nastavi_izbiro_kandidata(
+        data["cycle"],
+        lease_id=review.lease_id,
+        candidate_fingerprint=review.candidate_fingerprint,
+        selected=False,
+        non_issue_reason="User decision",
+    )
     zamrzni_paket_za_potrditev(data["cycle"])
     return candidate, review
 
@@ -1908,6 +1936,13 @@ def test_zero_selected_including_system_zero_lines_consumes_no_number(
     }
     no_lines = next(item for item in candidates if not item["lines"])
     assert not InvoiceLine.objects.filter(lease_id=no_lines["lease_id"]).exists()
+    pdf_results = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
+    cycle = odpri_zakljucek_mesecnega_cikla(data["cycle"])
+    assert all(item["ok"] and item["skipped"] for item in pdf_results)
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK
+    assert cycle.status == MonthlyCycle.Status.V_TEKU
+    assert not NumberSequence.objects.exists()
+    assert not Invoice.objects.exclude(rendered_pdf_path="").exists()
 
 
 @pytest.mark.parametrize("step", [MonthlyCycle.Korak.PAKETNI_PREGLED, MonthlyCycle.Korak.ZAKLJUCEK])
@@ -1979,6 +2014,195 @@ def test_nonfinite_frozen_money_fails_before_numbering(ready_company, invalid):
         )
     assert not NumberSequence.objects.exists()
     assert not Invoice.objects.exists()
+
+
+@pytest.mark.django_db(transaction=True)
+def test_koncni_pdf_paketa_nastane_zunaj_transakcije_in_odpre_korak_6(
+    ready_company, settings, tmp_path, monkeypatch, client
+):
+    data = ready_company
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    _freeze_ready_package(data)
+    izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    from rendering import services as rendering_services
+
+    pravi_render = rendering_services.render_pdf
+    atomic_states = []
+
+    def preverjen_render(invoice):
+        atomic_states.append(connection.in_atomic_block)
+        return pravi_render(invoice)
+
+    monkeypatch.setattr(rendering_services, "render_pdf", preverjen_render)
+    results = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
+    invoice = Invoice.objects.get()
+    checksum = invoice.checksum
+    html = pripravi_html(pripravi_pdf_context(invoice))
+    second = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
+    pravi_pdf_state = rendering_services.stanje_koncnega_pdf
+    verification_atomic_states = []
+
+    def preverjeno_stanje(invoice):
+        verification_atomic_states.append(connection.in_atomic_block)
+        return pravi_pdf_state(invoice)
+
+    monkeypatch.setattr(rendering_services, "stanje_koncnega_pdf", preverjeno_stanje)
+    cycle = odpri_zakljucek_mesecnega_cikla(data["cycle"])
+
+    assert atomic_states == [False, False]
+    assert verification_atomic_states == [False]
+    assert results[0]["ok"] and second[0]["ok"]
+    assert invoice.stevilka in html
+    assert "PREDOGLED" not in html and "VZOREC" not in html
+    assert second[0]["artifact"].checksum == checksum
+    assert len(list((settings.RENDERING_ROOT / f"company-{invoice.company_id}").glob("*.pdf"))) == 1
+    assert cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK
+    assert cycle.status == MonthlyCycle.Status.V_TEKU
+    assert not invoice.rendered_eslog_path and not invoice.rendered_eslog_checksum
+    stanje = stanje_zamrznjenega_mesecnega_kandidata(
+        data["batch"].pk,
+        invoice.lease_id,
+        data["batch"].calculation_snapshot["candidates"][0]["candidate_fingerprint"],
+    )
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert stanje["state"] == "MATERIALIZED" and stanje["invoice"].pk == invoice.pk
+    assert f"{invoice.stevilka} · PDF pripravljen" in content
+    assert "CONFLICT" not in content and "Napaka" not in content
+    before = (
+        Invoice.objects.count(),
+        NumberSequence.objects.get().zadnja_stevilka,
+        invoice.checksum,
+    )
+    (settings.RENDERING_ROOT / invoice.rendered_pdf_path).unlink()
+
+    content = client.get("/mesecni-obracun/").content.decode()
+
+    assert f"{invoice.stevilka} · PDF pripravljen" not in content
+    assert f"{invoice.stevilka} · Napaka PDF" in content
+    assert "PDF artifact manjka." in content
+    assert "Pri enem ali več končnih PDF-jih je bila zaznana težava." in content
+    assert MonthlyCycle.objects.get(pk=cycle.pk).trenutni_korak == 6
+    assert (
+        Invoice.objects.count(),
+        NumberSequence.objects.get().zadnja_stevilka,
+        Invoice.objects.get(pk=invoice.pk).checksum,
+    ) == before
+    assert atomic_states == [False, False]
+    assert not invoice.rendered_eslog_path and not invoice.rendered_eslog_checksum
+
+
+def test_korak_5_v_6_zahteva_namenski_preverjen_prehod(ready_company):
+    data = ready_company
+    _freeze_ready_package(data)
+    with pytest.raises(NeveljavenPrehodMesecnegaCikla, match="končne PDF-je"):
+        premakni_mesecni_cikel(data["cycle"], MonthlyCycle.Korak.ZAKLJUCEK)
+    with pytest.raises(ValidationError, match="še ni materializiran"):
+        odpri_zakljucek_mesecnega_cikla(data["cycle"])
+
+
+def test_fake_pdf_metapodatki_brez_dokazila_ne_odprejo_koraka_6(ready_company):
+    data = ready_company
+    _freeze_ready_package(data)
+    invoice = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["invoice"]
+    Invoice.objects.filter(pk=invoice.pk).update(
+        rendered_pdf_path=f"company-{invoice.company_id}/{invoice.stevilka}.pdf",
+        checksum="a" * 64,
+    )
+    with pytest.raises(ValidationError, match="PDF artifact manjka"):
+        odpri_zakljucek_mesecnega_cikla(data["cycle"])
+    assert MonthlyCycle.objects.get(pk=data["cycle"].pk).trenutni_korak == 5
+
+
+@pytest.mark.parametrize("sprememba", ["missing", "corrupt"])
+def test_manjkajoc_ali_poskodovan_pdf_ne_odpre_koraka_6(
+    ready_company, settings, tmp_path, sprememba
+):
+    data = ready_company
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    _freeze_ready_package(data)
+    izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    first = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])[0]
+    invoice = first["invoice"]
+    pot = settings.RENDERING_ROOT / first["artifact"].pot
+    if sprememba == "missing":
+        pot.unlink()
+    else:
+        pot.write_bytes(b"corrupt")
+
+    assert stanje_koncnega_pdf(invoice)["state"] == "ERROR"
+    retry = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])[0]
+    assert not retry["ok"]
+    with pytest.raises(ValidationError, match="PDF (artifact manjka|checksum se ne ujema)"):
+        odpri_zakljucek_mesecnega_cikla(data["cycle"])
+    assert MonthlyCycle.objects.get(pk=data["cycle"].pk).trenutni_korak == 5
+
+
+@pytest.mark.parametrize(
+    "metadata",
+    [
+        {"rendered_pdf_path": "fake.pdf", "checksum": "a" * 64},
+        {"rendered_eslog_path": "fake.xml", "rendered_eslog_checksum": "b" * 64},
+    ],
+)
+def test_neizdani_pdf_in_eslog_metapodatki_blokirajo_korak_6(
+    ready_company, metadata
+):
+    data = ready_company
+    _freeze_unselected_package(data)
+    invoice = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["invoice"]
+    Invoice.objects.filter(pk=invoice.pk).update(**metadata)
+    with pytest.raises(ValidationError):
+        odpri_zakljucek_mesecnega_cikla(data["cycle"])
+    assert MonthlyCycle.objects.get(pk=data["cycle"].pk).trenutni_korak == 5
+
+
+def test_izdani_eslog_metapodatki_blokirajo_korak_6(
+    ready_company, settings, tmp_path
+):
+    data = ready_company
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    _freeze_ready_package(data)
+    izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    result = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])[0]
+    Invoice.objects.filter(pk=result["invoice"].pk).update(
+        rendered_eslog_path="fake.xml", rendered_eslog_checksum="b" * 64
+    )
+    with pytest.raises(ValidationError, match="eSLOG"):
+        odpri_zakljucek_mesecnega_cikla(data["cycle"])
+    assert MonthlyCycle.objects.get(pk=data["cycle"].pk).trenutni_korak == 5
+
+
+def test_paket_nadaljuje_po_pdf_napaki_in_obdrzi_uspesne(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    _add_lease(data, "P-B", with_item=True)
+    _add_lease(data, "P-C", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    _freeze_all_candidates(data)
+    izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    from rendering import services as rendering_services
+
+    pravi_render = rendering_services.render_pdf
+    srednji_id = list(Invoice.objects.order_by("lease_id").values_list("pk", flat=True))[1]
+
+    def delni_render(invoice):
+        if invoice.pk == srednji_id:
+            raise PdfRenderNapaka("TEST", "Nadzorovana napaka PDF.")
+        return pravi_render(invoice)
+
+    monkeypatch.setattr(rendering_services, "render_pdf", delni_render)
+    first = renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
+    assert [item["ok"] for item in first] == [True, False, True]
+    assert MonthlyCycle.objects.get(pk=data["cycle"].pk).trenutni_korak == 5
+    checksums = list(Invoice.objects.order_by("lease_id").values_list("checksum", flat=True))
+    assert checksums[0] and not checksums[1] and checksums[2]
+
+    monkeypatch.setattr(rendering_services, "render_pdf", pravi_render)
+    assert all(item["ok"] for item in renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"]))
+    assert list(Invoice.objects.order_by("lease_id").values_list("checksum", flat=True))[::2] == checksums[::2]
 
 
 def test_step5_prg_shows_number_and_conflict_truthfully(ready_company, client):

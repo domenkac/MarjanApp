@@ -196,6 +196,13 @@ def premakni_mesecni_cikel(cycle: MonthlyCycle, korak: int) -> MonthlyCycle:
             raise NeveljavenPrehodMesecnegaCikla(
                 "Korak 5 zahteva potrditev in zamrznitev paketa."
             )
+        if (
+            svezi.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+            and korak == MonthlyCycle.Korak.ZAKLJUCEK
+        ):
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Korak 6 zahteva pripravljene in preverjene končne PDF-je."
+            )
         if korak != svezi.trenutni_korak + 1:
             raise NeveljavenPrehodMesecnegaCikla(
                 "Mesečni cikel se lahko premakne samo na naslednji korak."
@@ -2690,11 +2697,20 @@ def _preveri_aktivno_zamrznjeno_clanstvo(batch):
         )
 
 
-def _nalozi_podatke_materializacije(batch_id, lease_id, candidate_fingerprint):
+def _nalozi_podatke_materializacije(
+    batch_id, lease_id, candidate_fingerprint, *, samo_branje=False
+):
     batch = MonthlyBatch.objects.select_related("cycle").get(pk=batch_id)
-    if batch.cycle.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+    dovoljeni_koraki = (
+        (MonthlyCycle.Korak.POTRDITEV_PAKETA, MonthlyCycle.Korak.ZAKLJUCEK)
+        if samo_branje
+        else (MonthlyCycle.Korak.POTRDITEV_PAKETA,)
+    )
+    if batch.cycle.trenutni_korak not in dovoljeni_koraki:
         raise NeveljavenPrehodMesecnegaCikla(
-            "Izdaja zamrznjenega paketa je dovoljena samo v koraku 5."
+            "Stanje zamrznjenega paketa je dostopno samo v korakih 5 in 6."
+            if samo_branje
+            else "Izdaja zamrznjenega paketa je dovoljena samo v koraku 5."
         )
     _preveri_aktivno_zamrznjeno_clanstvo(batch)
     snapshot = batch.calculation_snapshot
@@ -2775,7 +2791,7 @@ def stanje_zamrznjenega_mesecnega_kandidata(
     try:
         batch, _candidate, review, prepared, fields = (
             _nalozi_podatke_materializacije(
-                batch_id, lease_id, candidate_fingerprint
+                batch_id, lease_id, candidate_fingerprint, samo_branje=True
             )
         )
         state, invoice, error = _obstojece_stanje_materializacije(
@@ -2834,3 +2850,89 @@ def izdaj_zamrznjeni_mesecni_paket(cycle):
         else:
             results.append({"batch_id": batch_id, "lease_id": lease_id, "candidate_fingerprint": fingerprint, "ok": True, "invoice": invoice, "reused": reused})
     return results
+
+
+def odpri_zakljucek_mesecnega_cikla(cycle):
+    from rendering.services import stanje_koncnega_pdf
+
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if cycle.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Zaključek ciklusa je mogoče odpreti samo iz koraka 5."
+        )
+    preverjeni_pdfji = {}
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by("company_id", "pk"):
+        for candidate in batch.calculation_snapshot.get("candidates", []):
+            identity = (
+                batch.pk,
+                candidate.get("lease_id"),
+                candidate.get("candidate_fingerprint"),
+            )
+            stanje = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+            review = reviews.get(identity)
+            if review and review.selected and stanje["state"] == "MATERIALIZED":
+                pdf_state = stanje_koncnega_pdf(stanje["invoice"])
+                if pdf_state["state"] != "READY":
+                    raise ValidationError(
+                        pdf_state["error"] or "Končni PDF ni pripravljen."
+                    )
+                preverjeni_pdfji[stanje["invoice"].pk] = pdf_state["result"].checksum
+    with transaction.atomic():
+        svezi = MonthlyCycle.objects.get(pk=cycle.pk)
+        if svezi.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Zaključek ciklusa je mogoče odpreti samo iz koraka 5."
+            )
+        izbrani_racuni = set()
+        for batch in aktivni_izracuni_mesecnega_cikla(svezi).order_by("company_id", "pk"):
+            for candidate in batch.calculation_snapshot.get("candidates", []):
+                stanje = stanje_zamrznjenega_mesecnega_kandidata(
+                    batch.pk,
+                    candidate.get("lease_id"),
+                    candidate.get("candidate_fingerprint"),
+                )
+                if stanje["state"] != "MATERIALIZED":
+                    raise ValidationError(
+                        stanje["error"] or "Zamrznjeni kandidat še ni materializiran."
+                    )
+                invoice = stanje["invoice"]
+                review = MonthlyCandidateReview.objects.get(
+                    batch=batch,
+                    lease_id=candidate.get("lease_id"),
+                    candidate_fingerprint=candidate.get("candidate_fingerprint"),
+                )
+                if review.selected:
+                    izbrani_racuni.add(invoice.pk)
+                    if (
+                        invoice.status != Invoice.Status.IZBRAN_ZA_POSILJANJE
+                        or not invoice.stevilka
+                        or not invoice.rendered_pdf_path
+                        or not invoice.checksum
+                    ):
+                        raise ValidationError(
+                            "Izbrani račun nima vseh podatkov končnega PDF-ja."
+                        )
+                    if preverjeni_pdfji.get(invoice.pk) != invoice.checksum:
+                        raise ValidationError(
+                            "Izbrani račun nima veljavnega dokazila preverjenega PDF-ja."
+                        )
+                elif (
+                    invoice.status != Invoice.Status.ARHIVIRAN_NI_IZDAN
+                    or invoice.stevilka
+                    or invoice.rendered_pdf_path
+                    or invoice.checksum
+                ):
+                    raise ValidationError(
+                        "Neizdani kandidat ne sme imeti številke ali končnega PDF-ja."
+                    )
+                if invoice.rendered_eslog_path or invoice.rendered_eslog_checksum:
+                    raise ValidationError("Mesečni kandidat ne sme imeti eSLOG artifacta.")
+        if set(preverjeni_pdfji) != izbrani_racuni:
+            raise ValidationError("Dokazila preverjenih PDF-jev ne ustrezajo paketu.")
+        svezi.trenutni_korak = MonthlyCycle.Korak.ZAKLJUCEK
+        svezi.save(update_fields=["trenutni_korak", "updated_at"])
+        return svezi

@@ -30,6 +30,7 @@ from .contexts import (
     EslogRenderNapaka,
     PdfContext,
     PdfRenderNapaka,
+    preveri_nespremenljiv_asset,
     pripravi_mesecni_pdf_context,
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
@@ -398,6 +399,71 @@ def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
                 "PDF metapodatki niso shranjeni.",
             ) from napaka
         return PdfRenderRezultat(relativna_pot, checksum, koncni_bytes)
+
+
+def stanje_koncnega_pdf(invoice: Invoice) -> dict:
+    svezi = Invoice.objects.get(pk=invoice.pk)
+    if not svezi.rendered_pdf_path and not svezi.checksum:
+        return {"state": "PENDING", "error": None}
+    try:
+        rezultat = _preveri_obstojeci_artifact(svezi)
+    except PdfRenderNapaka as napaka:
+        return {"state": "ERROR", "error": str(napaka)}
+    return {"state": "READY", "error": None, "result": rezultat}
+
+
+def renderiraj_koncne_pdfje_mesecnega_paketa(cycle):
+    from invoicing.models import MonthlyCycle
+    from invoicing.services import (
+        MesecniCikelNapaka,
+        aktivni_izracuni_mesecnega_cikla,
+        stanje_zamrznjenega_mesecnega_kandidata,
+        trenutni_pregledi_mesecnega_cikla,
+    )
+
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if cycle.trenutni_korak != MonthlyCycle.Korak.POTRDITEV_PAKETA:
+        raise MesecniCikelNapaka("Končne PDF-je je mogoče pripraviti samo v koraku 5.")
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    results = []
+    for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by("company_id", "pk"):
+        for candidate in batch.calculation_snapshot.get("candidates", []):
+            identity = (
+                batch.pk,
+                candidate.get("lease_id"),
+                candidate.get("candidate_fingerprint"),
+            )
+            review = reviews.get(identity)
+            stanje = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+            result = {
+                "batch_id": identity[0],
+                "lease_id": identity[1],
+                "candidate_fingerprint": identity[2],
+                "ok": False,
+            }
+            if review is None or stanje["state"] != "MATERIALIZED":
+                result["error"] = stanje["error"] or "Zamrznjeni kandidat še ni materializiran."
+            elif not review.selected:
+                result.update(ok=True, skipped=True, invoice=stanje["invoice"])
+            else:
+                invoice = stanje["invoice"]
+                try:
+                    preveri_nespremenljiv_asset(invoice.izdajatelj_logotip_slika_pot)
+                    preveri_nespremenljiv_asset(invoice.izdajatelj_podpisnik_slika_pot)
+                    artifact = render_pdf(invoice)
+                    svezi = Invoice.objects.get(pk=invoice.pk)
+                    pdf_state = stanje_koncnega_pdf(svezi)
+                    if pdf_state["state"] != "READY":
+                        raise PdfRenderNapaka("PDF_INTEGRITETA", pdf_state["error"] or "PDF ni pripravljen.")
+                except PdfRenderNapaka as napaka:
+                    result["error"] = str(napaka)
+                else:
+                    result.update(ok=True, skipped=False, invoice=svezi, artifact=artifact)
+            results.append(result)
+    return results
 
 
 def render_eslog(invoice: Invoice) -> EslogRenderRezultat:

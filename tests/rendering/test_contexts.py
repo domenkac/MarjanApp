@@ -490,3 +490,38 @@ def test_vzorec_vrne_pdf_napako_za_neveljavnega_podpisnika(izdani_racun, dvoumno
         )
 
     assert error.value.koda in {"VZOREC_NEVELJAVEN", "PODPISNIK_NEVELJAVEN"}
+
+
+@pytest.mark.parametrize("pot", ["logo.png", "nespremenljivi-asseti/ABC", "nespremenljivi-asseti/a" * 64])
+def test_neveljavna_pot_nespremenljivega_asseta_je_zavrnjena(pot):
+    from rendering.contexts import preveri_nespremenljiv_asset
+
+    with pytest.raises(PdfRenderNapaka) as error:
+        preveri_nespremenljiv_asset(pot)
+    assert error.value.koda == "ASSET_NEVELJAVEN"
+
+
+def test_nespremenljiv_asset_preveri_obstoj_in_hash(settings, tmp_path):
+    from hashlib import sha256
+
+    from rendering.contexts import preveri_nespremenljiv_asset
+
+    settings.MEDIA_ROOT = tmp_path
+    vsebina = b"asset"
+    checksum = sha256(vsebina).hexdigest()
+    pot = f"nespremenljivi-asseti/{checksum}"
+    mapa = tmp_path / "nespremenljivi-asseti"
+    mapa.mkdir()
+    datoteka = mapa / checksum
+
+    with pytest.raises(PdfRenderNapaka) as missing:
+        preveri_nespremenljiv_asset(pot)
+    assert missing.value.koda == "ASSET_MANJKA"
+
+    datoteka.write_bytes(b"corrupt")
+    with pytest.raises(PdfRenderNapaka) as corrupt:
+        preveri_nespremenljiv_asset(pot)
+    assert corrupt.value.koda == "ASSET_NEVELJAVEN"
+
+    datoteka.write_bytes(vsebina)
+    assert preveri_nespremenljiv_asset(pot) == pot

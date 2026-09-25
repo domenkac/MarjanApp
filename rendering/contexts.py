@@ -175,6 +175,16 @@ def _snapshot_asset(checksum: str) -> str:
     return pot
 
 
+def preveri_nespremenljiv_asset(pot: str) -> str:
+    predpona = "nespremenljivi-asseti/"
+    if not isinstance(pot, str) or not pot.startswith(predpona):
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot nespremenljivega asseta ni veljavna.")
+    checksum = pot[len(predpona):]
+    if "/" in checksum or _snapshot_asset(checksum) != pot:
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot nespremenljivega asseta ni veljavna.")
+    return pot
+
+
 def _snapshot_vrednost(zapis, kljuc):
     vrednost = zapis.get(kljuc) if isinstance(zapis, dict) else None
     if vrednost is None or (isinstance(vrednost, str) and not vrednost.strip()):

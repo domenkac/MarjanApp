@@ -49,6 +49,7 @@ from invoicing.services import (
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
     nastavi_izbiro_kandidata,
+    odpri_zakljucek_mesecnega_cikla,
     potrdi_izjemo_kandidata,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
@@ -61,7 +62,12 @@ from invoicing.services import (
     zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import PdfRenderNapaka
-from rendering.services import generiraj_mesecni_predogled_pdf, render_sample_pdf
+from rendering.services import (
+    generiraj_mesecni_predogled_pdf,
+    render_sample_pdf,
+    renderiraj_koncne_pdfje_mesecnega_paketa,
+    stanje_koncnega_pdf,
+)
 
 from .forms import (
     CompanyForm,
@@ -995,6 +1001,21 @@ def mesecni_obracun(request):
         except MesecniCikelNapaka as exc:
             review_error = _review_error_message(exc)
         return redirect("ui:mesecni_obracun")
+    if request.method == "POST" and action == "render_final_pdfs" and cycle:
+        try:
+            results = renderiraj_koncne_pdfje_mesecnega_paketa(cycle)
+            failures = [result for result in results if not result["ok"]]
+            if failures:
+                failed = failures[0]
+                review_error_identity = (
+                    failed["lease_id"], failed["candidate_fingerprint"]
+                )
+                review_error = failed["error"]
+            else:
+                odpri_zakljucek_mesecnega_cikla(cycle)
+                return redirect("ui:mesecni_obracun")
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
 
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
@@ -1073,6 +1094,7 @@ def mesecni_obracun(request):
     if cycle and cycle.trenutni_korak in (
         MonthlyCycle.Korak.PAKETNI_PREGLED,
         MonthlyCycle.Korak.POTRDITEV_PAKETA,
+        MonthlyCycle.Korak.ZAKLJUCEK,
     ):
         review_rows = _review_rows(cycle, review_error_identity, review_error)
         review_summary = {
@@ -1095,6 +1117,26 @@ def mesecni_obracun(request):
                 not row["will_issue"] for row in review_rows
             ),
         }
+    final_render_can_attempt = bool(
+        cycle
+        and cycle.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+        and all(
+            row["materialization"]["state"] == "MATERIALIZED"
+            for row in review_rows
+        )
+    )
+    step6_all_pdfs_ready = bool(
+        cycle
+        and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK
+        and all(
+            not row["selected"]
+            or (
+                row["pdf_state"] is not None
+                and row["pdf_state"]["state"] == "READY"
+            )
+            for row in review_rows
+        )
+    )
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -1117,9 +1159,14 @@ def mesecni_obracun(request):
             "review_rows": review_rows,
             "review_summary": review_summary,
             "review_error": review_error,
+            "final_render_can_attempt": final_render_can_attempt,
+            "step6_all_pdfs_ready": step6_all_pdfs_ready,
             "step4_complete": bool(
                 cycle
                 and cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA
+            ),
+            "step5_complete": bool(
+                cycle and cycle.trenutni_korak >= MonthlyCycle.Korak.ZAKLJUCEK
             ),
         },
     )
@@ -1196,10 +1243,15 @@ def _review_rows(cycle, error_identity=None, error=None):
                         batch.pk,
                         lease_id,
                         fingerprint,
-                    ) if cycle.trenutni_korak == MonthlyCycle.Korak.POTRDITEV_PAKETA
+                    ) if cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA
                     else {"state": "PENDING", "invoice": None, "error": None},
                 }
             )
+            materialization = rows[-1]["materialization"]
+            if review.selected and materialization["state"] == "MATERIALIZED":
+                rows[-1]["pdf_state"] = stanje_koncnega_pdf(materialization["invoice"])
+            else:
+                rows[-1]["pdf_state"] = None
     return rows
 
 

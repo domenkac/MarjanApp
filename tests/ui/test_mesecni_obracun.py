@@ -1084,10 +1084,26 @@ def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
 
 
 @pytest.mark.django_db
-@pytest.mark.parametrize("action", ["freeze_package", "issue_frozen_package"])
+@pytest.mark.parametrize(
+    "action", ["freeze_package", "issue_frozen_package", "render_final_pdfs"]
+)
 def test_zamrznitev_in_izdaja_post_sta_csrf_zascitena(action):
     _review_cycle({})
     response = Client(enforce_csrf_checks=True).post(
         "/mesecni-obracun/", {"action": action}
     )
     assert response.status_code == 403
+
+
+@pytest.mark.django_db
+def test_korak_6_je_aktiven_in_ne_zakljucen(client):
+    MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert "Zaključek ciklusa" in content
+    assert "Pošiljanje, preverjanje in arhiviranje še niso izvedeni" in content
+    assert 'is-completed"><span>✓</span><strong>Potrditev paketa' in content
+    assert 'is-active" aria-current="step"><span>6</span><strong>Zaključek ciklusa' in content
