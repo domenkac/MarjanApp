@@ -184,6 +184,60 @@ def prepare_attempt(invoice: Invoice) -> DeliveryAttempt:
         return attempt
 
 
+def prepare_retry_attempt(failed_attempt: DeliveryAttempt) -> DeliveryAttempt:
+    if failed_attempt.pk is None:
+        raise ValidationError("Delivery attempt must be persisted before retry.")
+
+    with transaction.atomic():
+        source = (
+            DeliveryAttempt.objects.select_related("invoice")
+            .filter(pk=failed_attempt.pk)
+            .first()
+        )
+        if source is None:
+            raise ValidationError("Delivery attempt must be persisted before retry.")
+        invoice = source.invoice
+        latest = (
+            DeliveryAttempt.objects.filter(invoice=invoice)
+            .order_by("-sequence")
+            .first()
+        )
+        if source.result != DeliveryAttempt.Result.CONFIRMED_FAILURE:
+            raise ValidationError("Only a confirmed failure can be retried.")
+        if latest is None or latest.pk != source.pk:
+            raise ValidationError("Only the latest delivery attempt can be retried.")
+        if invoice.status != Invoice.Status.NAPAKA:
+            raise ValidationError("Invoice status no longer permits retry.")
+        if not invoice.stevilka:
+            raise ValidationError("Invoice must be issued before retry.")
+        if not source.pdf_path or not _SHA256_RE.fullmatch(source.pdf_checksum or ""):
+            raise ValidationError("Valid PDF snapshot metadata is required for retry.")
+        if (invoice.rendered_pdf_path, invoice.checksum) != (
+            source.pdf_path,
+            source.pdf_checksum,
+        ):
+            raise ValidationError("Invoice PDF metadata differs from the failed attempt.")
+
+        retry = DeliveryAttempt(
+            invoice=invoice,
+            sequence=source.sequence + 1,
+            sender=source.sender,
+            recipients_to=source.recipients_to,
+            recipients_cc=source.recipients_cc,
+            recipients_bcc=source.recipients_bcc,
+            pdf_path=source.pdf_path,
+            pdf_checksum=source.pdf_checksum,
+        )
+        retry.full_clean()
+        retry.save()
+        updated = Invoice.objects.filter(
+            pk=invoice.pk, status=Invoice.Status.NAPAKA
+        ).update(status=Invoice.Status.IZBRAN_ZA_POSILJANJE)
+        if updated != 1:
+            raise ValidationError("Invoice status no longer permits retry.")
+        return retry
+
+
 def mark_submission_started(attempt: DeliveryAttempt) -> DeliveryAttempt:
     return _transition(
         attempt,

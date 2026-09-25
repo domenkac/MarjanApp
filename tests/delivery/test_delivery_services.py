@@ -20,6 +20,7 @@ from delivery.services import (
     mark_result_unknown,
     mark_submission_started,
     prepare_attempt,
+    prepare_retry_attempt,
     send_pdf_email,
 )
 from delivery.transport import (
@@ -297,6 +298,230 @@ def test_confirmed_failure_is_retry_eligible_and_preserves_issue_data(
     assert failed.message == "password=[REDACTED] connection failed"
     assert current == original
     assert DeliveryAttempt.objects.get(pk=attempt.pk).result == failed.result
+
+
+def test_prepare_retry_creates_prepared_attempt_and_reopens_invoice(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    failed_before = DeliveryAttempt.objects.values().get(pk=failed.pk)
+
+    retry = prepare_retry_attempt(failed)
+
+    issued_invoice.refresh_from_db()
+    assert (retry.sequence, retry.result) == (2, DeliveryAttempt.Result.PREPARED)
+    assert retry.prepared_at > failed.prepared_at
+    assert retry.submission_started_at is None
+    assert retry.completed_at is None
+    assert (retry.result_code, retry.message) == ("", "")
+    assert issued_invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert DeliveryAttempt.objects.values().get(pk=failed.pk) == failed_before
+
+
+def test_prepare_retry_clones_failed_snapshot_not_live_contacts(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    Company.objects.filter(pk=issued_invoice.company_id).update(
+        email_posiljatelj="new-sender@example.com",
+        email_racunovodja="new-accountant@example.com",
+    )
+    RecipientContact.objects.filter(lease=issued_invoice.lease).delete()
+    RecipientContact.objects.create(
+        lease=issued_invoice.lease,
+        email="new-to@example.com",
+        vloga=RecipientContact.Vloga.TO,
+        kanal=RecipientContact.Kanal.PDF,
+    )
+
+    retry = prepare_retry_attempt(failed)
+
+    assert (
+        retry.sender,
+        retry.recipients_to,
+        retry.recipients_cc,
+        retry.recipients_bcc,
+        retry.pdf_path,
+        retry.pdf_checksum,
+    ) == (
+        failed.sender,
+        failed.recipients_to,
+        failed.recipients_cc,
+        failed.recipients_bcc,
+        failed.pdf_path,
+        failed.pdf_checksum,
+    )
+
+
+def test_prepare_retry_preserves_issued_document(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    before = (
+        Invoice.objects.values().get(pk=issued_invoice.pk),
+        list(InvoiceLine.objects.filter(invoice=issued_invoice).values()),
+        list(NumberSequence.objects.filter(company=issued_invoice.company).values()),
+        Invoice.objects.count(),
+    )
+
+    prepare_retry_attempt(failed)
+
+    invoice_before = before[0]
+    invoice_before["status"] = Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert (
+        Invoice.objects.values().get(pk=issued_invoice.pk),
+        list(InvoiceLine.objects.filter(invoice=issued_invoice).values()),
+        list(NumberSequence.objects.filter(company=issued_invoice.company).values()),
+        Invoice.objects.count(),
+    ) == before
+
+
+def test_prepare_retry_rejects_duplicate_from_stale_failure(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    prepare_retry_attempt(failed)
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(failed)
+
+    assert list(
+        DeliveryAttempt.objects.filter(invoice=issued_invoice).values_list(
+            "sequence", flat=True
+        )
+    ) == [1, 2]
+
+
+def test_prepare_retry_rejects_confirmed_failure_that_is_not_latest(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    DeliveryAttempt.objects.create(
+        invoice=issued_invoice,
+        sequence=2,
+        sender=failed.sender,
+        recipients_to=failed.recipients_to,
+        recipients_cc=failed.recipients_cc,
+        recipients_bcc=failed.recipients_bcc,
+        pdf_path=failed.pdf_path,
+        pdf_checksum=failed.pdf_checksum,
+    )
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(failed)
+
+    issued_invoice.refresh_from_db()
+    assert issued_invoice.status == Invoice.Status.NAPAKA
+    assert DeliveryAttempt.objects.filter(invoice=issued_invoice).count() == 2
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        DeliveryAttempt.Result.PREPARED,
+        DeliveryAttempt.Result.SUBMISSION_STARTED,
+        DeliveryAttempt.Result.ACCEPTED,
+        DeliveryAttempt.Result.UNKNOWN,
+    ],
+)
+def test_prepare_retry_rejects_nonfailure_states(issued_invoice, result):
+    attempt = prepare_attempt(issued_invoice)
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(result=result)
+    Invoice.objects.filter(pk=issued_invoice.pk).update(status=Invoice.Status.NAPAKA)
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(attempt)
+
+    assert DeliveryAttempt.objects.filter(invoice=issued_invoice).count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.NAPAKA
+
+
+def test_prepare_retry_rejects_wrong_invoice_status(issued_invoice):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    Invoice.objects.filter(pk=issued_invoice.pk).update(status=Invoice.Status.POSLAN)
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(failed)
+
+    assert DeliveryAttempt.objects.filter(invoice=issued_invoice).count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.POSLAN
+
+
+def test_prepare_retry_rolls_back_attempt_if_invoice_reopen_fails(
+    issued_invoice, monkeypatch
+):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    monkeypatch.setattr("delivery.services.Invoice.objects.filter", lambda **kwargs: None)
+
+    with pytest.raises(AttributeError):
+        prepare_retry_attempt(failed)
+
+    assert DeliveryAttempt.objects.filter(invoice=issued_invoice).count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.NAPAKA
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"rendered_pdf_path": "other.pdf"},
+        {"checksum": "b" * 64},
+        {"checksum": "invalid"},
+        {"stevilka": ""},
+    ],
+)
+def test_prepare_retry_rejects_changed_or_invalid_document(issued_invoice, values):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    Invoice.objects.filter(pk=issued_invoice.pk).update(**values)
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(failed)
+
+    assert DeliveryAttempt.objects.filter(invoice=issued_invoice).count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.NAPAKA
+
+
+def test_prepare_retry_is_db_only(issued_invoice, monkeypatch):
+    failed = mark_confirmed_failure(
+        prepare_attempt(issued_invoice), code="CONNECTION_FAILED"
+    )
+    monkeypatch.setattr(
+        "delivery.services._recipient_snapshots",
+        lambda invoice: pytest.fail("live recipients read"),
+    )
+    monkeypatch.setattr(
+        "rendering.services.stanje_koncnega_pdf",
+        lambda invoice: pytest.fail("filesystem read"),
+    )
+    monkeypatch.setattr(
+        "delivery.credentials.load_password",
+        lambda ref: pytest.fail("keyring read"),
+    )
+    monkeypatch.setattr(
+        "delivery.transport.send_prepared_email",
+        lambda *args, **kwargs: pytest.fail("SMTP opened"),
+    )
+
+    assert prepare_retry_attempt(failed).result == DeliveryAttempt.Result.PREPARED
+
+
+def test_retry_composes_same_verified_pdf_and_envelope(prepared_email_data):
+    _, attempt, _, pdf_bytes = prepared_email_data
+    failed = mark_confirmed_failure(attempt, code="CONNECTION_FAILED")
+    retry = prepare_retry_attempt(failed)
+
+    prepared = build_pdf_email(retry, subject="Invoice", body="Attached invoice.")
+
+    assert prepared.envelope_sender == failed.sender
+    assert prepared.envelope_recipients == tuple(
+        failed.recipients_to + failed.recipients_cc + failed.recipients_bcc
+    )
+    assert next(prepared.message.iter_attachments()).get_payload(decode=True) == pdf_bytes
 
 
 @pytest.mark.parametrize(
