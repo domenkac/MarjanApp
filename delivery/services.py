@@ -1,4 +1,6 @@
 import re
+from dataclasses import dataclass
+from email.message import EmailMessage
 
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
@@ -21,6 +23,99 @@ _SECRET_RE = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)(?:\"[^\"]*\"|'[^']*'|\S+)")
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedEmail:
+    message: EmailMessage
+    envelope_sender: str
+    envelope_recipients: tuple[str, ...]
+    invoice_id: int
+    attempt_id: int
+
+
+def _required_text(value, name: str) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValidationError(f"{name} must be a non-empty string.")
+    return value.strip()
+
+
+def _validated_addresses(addresses, name: str) -> tuple[str, ...]:
+    if not isinstance(addresses, list):
+        raise ValidationError(f"{name} must be a list of email addresses.")
+    result = []
+    for address in addresses:
+        if not isinstance(address, str) or not address.strip():
+            raise ValidationError(f"{name} contains an invalid email address.")
+        address = address.strip()
+        validate_email(address)
+        result.append(address)
+    return tuple(result)
+
+
+def build_pdf_email(attempt: DeliveryAttempt, *, subject, body) -> PreparedEmail:
+    subject = _required_text(subject, "Subject")
+    body = _required_text(body, "Body")
+    if "\r" in subject or "\n" in subject:
+        raise ValidationError("Subject must not contain line breaks.")
+    if attempt.pk is None:
+        raise ValidationError("Delivery attempt must be persisted before composition.")
+    current = DeliveryAttempt.objects.select_related("invoice").get(pk=attempt.pk)
+    invoice = current.invoice
+    if current.result != DeliveryAttempt.Result.PREPARED:
+        raise ValidationError("Only a prepared delivery attempt can be composed.")
+    if invoice.rendered_eslog_path or invoice.rendered_eslog_checksum:
+        raise ValidationError("Unexpected eSLOG metadata blocks PDF-only delivery.")
+
+    sender = current.sender.strip()
+    validate_email(sender)
+    recipients_to = _validated_addresses(current.recipients_to, "To recipients")
+    recipients_cc = _validated_addresses(current.recipients_cc, "Cc recipients")
+    recipients_bcc = _validated_addresses(current.recipients_bcc, "Bcc recipients")
+    if not recipients_to:
+        raise ValidationError("At least one To recipient is required.")
+
+    from rendering.services import stanje_koncnega_pdf
+
+    pdf_state = stanje_koncnega_pdf(invoice)
+    if pdf_state["state"] != "READY":
+        raise ValidationError("Registered final PDF failed integrity verification.")
+    artifact = pdf_state["result"]
+    expected = (invoice.rendered_pdf_path, invoice.checksum)
+    if (artifact.pot, artifact.checksum) != expected or expected != (
+        current.pdf_path,
+        current.pdf_checksum,
+    ):
+        raise ValidationError("Final PDF metadata differs from the delivery snapshot.")
+
+    envelope_recipients = []
+    seen = set()
+    for address in (*recipients_to, *recipients_cc, *recipients_bcc):
+        key = address.casefold()
+        if key not in seen:
+            envelope_recipients.append(address)
+            seen.add(key)
+
+    message = EmailMessage()
+    message["From"] = sender
+    message["To"] = ", ".join(recipients_to)
+    if recipients_cc:
+        message["Cc"] = ", ".join(recipients_cc)
+    message["Subject"] = subject
+    message.set_content(body)
+    message.add_attachment(
+        artifact.pdf_bytes,
+        maintype="application",
+        subtype="pdf",
+        filename=artifact.pot.rsplit("/", 1)[-1],
+    )
+    return PreparedEmail(
+        message=message,
+        envelope_sender=sender,
+        envelope_recipients=tuple(envelope_recipients),
+        invoice_id=invoice.pk,
+        attempt_id=current.pk,
+    )
 
 
 def _sanitize(code: str, message: str) -> tuple[str, str]:

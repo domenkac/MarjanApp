@@ -1,13 +1,16 @@
 from datetime import date
 from decimal import Decimal
+from hashlib import sha256
 
 import pytest
 from django.core.exceptions import ValidationError
+from django.db import connection
 
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
 from delivery.models import DeliveryAttempt
 from delivery.services import (
+    build_pdf_email,
     is_retry_eligible,
     mark_accepted,
     mark_pre_submission_failure,
@@ -15,7 +18,7 @@ from delivery.services import (
     mark_submission_started,
     prepare_attempt,
 )
-from invoicing.models import Invoice, InvoiceLine
+from invoicing.models import Invoice, InvoiceLine, MonthlyCycle
 
 
 @pytest.fixture
@@ -105,6 +108,22 @@ def issued_invoice(db):
         zadnja_stevilka=1,
     )
     return invoice
+
+
+@pytest.fixture
+def prepared_email_data(issued_invoice, settings, tmp_path):
+    pdf_bytes = b"%PDF-1.7\nverified official invoice\n%%EOF"
+    path = f"company-{issued_invoice.company_id}/{issued_invoice.stevilka}.pdf"
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    artifact = settings.RENDERING_ROOT / path
+    artifact.parent.mkdir(parents=True)
+    artifact.write_bytes(pdf_bytes)
+    checksum = sha256(pdf_bytes).hexdigest()
+    Invoice.objects.filter(pk=issued_invoice.pk).update(
+        rendered_pdf_path=path, checksum=checksum
+    )
+    issued_invoice.refresh_from_db()
+    return issued_invoice, prepare_attempt(issued_invoice), artifact, pdf_bytes
 
 
 def test_prepare_stores_sender_recipients_and_pdf_without_secret(issued_invoice):
@@ -251,3 +270,192 @@ def test_invalid_transition_order_and_audit_mutation_are_rejected(issued_invoice
         attempt.delete()
 
     assert DeliveryAttempt.objects.filter(pk=attempt.pk).exists()
+
+
+def test_build_pdf_email_uses_snapshots_envelope_and_verified_attachment(
+    prepared_email_data,
+):
+    invoice, attempt, _, pdf_bytes = prepared_email_data
+    RecipientContact.objects.filter(lease=invoice.lease).update(
+        email="changed@example.com", aktiven=False
+    )
+    Company.objects.filter(pk=invoice.company_id).update(
+        email_posiljatelj="changed-sender@example.com"
+    )
+
+    prepared = build_pdf_email(attempt, subject="Račun", body="V prilogi je račun.")
+    attachment = next(prepared.message.iter_attachments())
+
+    assert prepared.envelope_sender == "sender@example.com"
+    assert prepared.message["From"] == "sender@example.com"
+    assert prepared.message["To"] == "to@example.com"
+    assert prepared.message["Cc"] == "cc@example.com"
+    assert prepared.message["Bcc"] is None
+    assert prepared.envelope_recipients == (
+        "to@example.com",
+        "cc@example.com",
+        "accountant@example.com",
+    )
+    assert attachment.get_payload(decode=True) == pdf_bytes
+    assert attachment.get_content_type() == "application/pdf"
+    assert attachment.get_filename() == f"{invoice.stevilka}.pdf"
+    assert len(tuple(prepared.message.iter_attachments())) == 1
+    assert (prepared.invoice_id, prepared.attempt_id) == (invoice.pk, attempt.pk)
+
+
+def test_envelope_deduplicates_case_insensitively_without_changing_headers(
+    prepared_email_data,
+):
+    _, attempt, _, _ = prepared_email_data
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(
+        recipients_to=["First@Example.com", "to@example.com"],
+        recipients_cc=["first@example.com", "CC@example.com"],
+        recipients_bcc=["cc@EXAMPLE.com", "accountant@example.com"],
+    )
+
+    prepared = build_pdf_email(attempt, subject="Račun", body="Račun")
+
+    assert prepared.message["To"] == "First@Example.com, to@example.com"
+    assert prepared.message["Cc"] == "first@example.com, CC@example.com"
+    assert prepared.message["Bcc"] is None
+    assert prepared.envelope_recipients == (
+        "First@Example.com",
+        "to@example.com",
+        "CC@example.com",
+        "accountant@example.com",
+    )
+
+
+@pytest.mark.parametrize("value", ["", "   ", None, 42])
+@pytest.mark.parametrize("field", ["subject", "body"])
+def test_build_pdf_email_requires_nonempty_text(prepared_email_data, field, value):
+    _, attempt, _, _ = prepared_email_data
+    arguments = {"subject": "Račun", "body": "Račun"}
+    arguments[field] = value
+
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, **arguments)
+
+
+def test_build_pdf_email_rejects_header_injection_and_unsaved_attempt(
+    prepared_email_data,
+):
+    _, attempt, _, _ = prepared_email_data
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun\nBcc: leaked@example.com", body="Račun")
+
+    attempt.pk = None
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+@pytest.mark.parametrize("kind", ["missing", "corrupt"])
+def test_missing_or_corrupt_pdf_blocks_composition(prepared_email_data, kind):
+    _, attempt, artifact, _ = prepared_email_data
+    if kind == "missing":
+        artifact.unlink()
+    else:
+        artifact.write_bytes(b"corrupt")
+
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+@pytest.mark.parametrize("target", ["invoice", "attempt"])
+def test_pdf_metadata_mismatch_blocks_composition(prepared_email_data, target):
+    invoice, attempt, _, _ = prepared_email_data
+    if target == "invoice":
+        Invoice.objects.filter(pk=invoice.pk).update(checksum="b" * 64)
+    else:
+        DeliveryAttempt.objects.filter(pk=attempt.pk).update(pdf_checksum="b" * 64)
+
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+def test_nonprepared_attempt_and_eslog_metadata_are_rejected(prepared_email_data):
+    invoice, attempt, _, _ = prepared_email_data
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(
+        result=DeliveryAttempt.Result.SUBMISSION_STARTED
+    )
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(
+        result=DeliveryAttempt.Result.PREPARED
+    )
+    Invoice.objects.filter(pk=invoice.pk).update(rendered_eslog_path="unexpected.xml")
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("sender", "invalid"),
+        ("recipients_to", []),
+        ("recipients_to", ["invalid"]),
+        ("recipients_cc", ["invalid"]),
+        ("recipients_bcc", ["invalid"]),
+    ],
+)
+def test_invalid_sender_or_envelope_recipient_is_rejected(
+    prepared_email_data, field, value
+):
+    _, attempt, _, _ = prepared_email_data
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(**{field: value})
+
+    with pytest.raises(ValidationError):
+        build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+@pytest.mark.django_db(transaction=True)
+def test_integrity_check_runs_outside_transaction(prepared_email_data, monkeypatch):
+    _, attempt, _, _ = prepared_email_data
+    import rendering.services
+
+    original = rendering.services.stanje_koncnega_pdf
+
+    def observed(invoice):
+        assert connection.in_atomic_block is False
+        return original(invoice)
+
+    monkeypatch.setattr(rendering.services, "stanje_koncnega_pdf", observed)
+    build_pdf_email(attempt, subject="Račun", body="Račun")
+
+
+def test_composition_does_not_mutate_business_state(prepared_email_data):
+    invoice, attempt, _, _ = prepared_email_data
+    cycle = MonthlyCycle.objects.create(
+        obdobje=date(2026, 8, 1), datum_izdaje=date(2026, 9, 1)
+    )
+    before = (
+        Invoice.objects.values().get(pk=invoice.pk),
+        DeliveryAttempt.objects.values().get(pk=attempt.pk),
+        list(InvoiceLine.objects.filter(invoice=invoice).values()),
+        list(NumberSequence.objects.filter(company=invoice.company).values()),
+        MonthlyCycle.objects.values().get(pk=cycle.pk),
+    )
+
+    build_pdf_email(attempt, subject="Račun", body="Račun")
+
+    after = (
+        Invoice.objects.values().get(pk=invoice.pk),
+        DeliveryAttempt.objects.values().get(pk=attempt.pk),
+        list(InvoiceLine.objects.filter(invoice=invoice).values()),
+        list(NumberSequence.objects.filter(company=invoice.company).values()),
+        MonthlyCycle.objects.values().get(pk=cycle.pk),
+    )
+    assert after == before
+
+
+def test_composition_does_not_open_network_connection(
+    prepared_email_data, monkeypatch
+):
+    _, attempt, _, _ = prepared_email_data
+
+    def network_forbidden(*args, **kwargs):
+        raise AssertionError("network access attempted")
+
+    monkeypatch.setattr("socket.socket", network_forbidden)
+    build_pdf_email(attempt, subject="Račun", body="Račun")
