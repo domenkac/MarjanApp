@@ -5,3 +5,4 @@ ruff
 Pillow
 WeasyPrint
 lxml>=5.3,<7
+keyring

@@ -208,13 +208,15 @@ def mark_accepted(attempt: DeliveryAttempt, *, code: str, message: str = "") -> 
 def mark_confirmed_failure(
     attempt: DeliveryAttempt, *, code: str, message: str = ""
 ) -> DeliveryAttempt:
+    if attempt.result not in (
+        DeliveryAttempt.Result.PREPARED,
+        DeliveryAttempt.Result.SUBMISSION_STARTED,
+    ):
+        raise ValidationError("Only a prepared or started delivery can fail.")
     code, message = _sanitize(code, message)
     return _transition_with_invoice(
         attempt,
-        expected=(
-            DeliveryAttempt.Result.PREPARED,
-            DeliveryAttempt.Result.SUBMISSION_STARTED,
-        ),
+        expected=attempt.result,
         result=DeliveryAttempt.Result.CONFIRMED_FAILURE,
         invoice_status=Invoice.Status.NAPAKA,
         code=code,
@@ -238,6 +240,45 @@ def mark_result_unknown(
 
 def is_retry_eligible(invoice: Invoice) -> bool:
     return Invoice.objects.filter(pk=invoice.pk, status=Invoice.Status.NAPAKA).exists()
+
+
+def send_pdf_email(
+    attempt: DeliveryAttempt,
+    *,
+    subject,
+    body,
+    smtp_config,
+    credential_ref,
+    password_loader=None,
+    smtp_factory=None,
+) -> DeliveryAttempt:
+    from .credentials import load_password
+    from .transport import _default_smtp_factory, send_prepared_email
+
+    current = DeliveryAttempt.objects.get(pk=attempt.pk)
+    if current.result != DeliveryAttempt.Result.PREPARED:
+        raise ValidationError("Only a prepared delivery attempt can be sent.")
+    prepared = build_pdf_email(current, subject=subject, body=body)
+
+    started = current
+
+    def mark_started():
+        nonlocal started
+        started = mark_submission_started(current)
+
+    result = send_prepared_email(
+        prepared,
+        smtp_config,
+        credential_ref,
+        on_submission_started=mark_started,
+        password_loader=password_loader or load_password,
+        smtp_factory=smtp_factory or _default_smtp_factory,
+    )
+    if result.success:
+        return mark_accepted(started, code=result.code, message=result.message)
+    if result.submission_started and result.code == "SMTP_RESULT_UNKNOWN":
+        return mark_result_unknown(started, code=result.code, message=result.message)
+    return mark_confirmed_failure(started, code=result.code, message=result.message)
 
 
 def _transition(attempt, *, expected, result, **values) -> DeliveryAttempt:

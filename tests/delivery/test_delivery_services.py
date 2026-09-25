@@ -1,5 +1,7 @@
 from datetime import date
 from decimal import Decimal
+from email import policy
+from email.parser import BytesParser
 from hashlib import sha256
 
 import pytest
@@ -8,6 +10,7 @@ from django.db import connection
 
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
+from delivery.credentials import CredentialError, KeyringCredentialRef, load_password
 from delivery.models import DeliveryAttempt
 from delivery.services import (
     build_pdf_email,
@@ -17,12 +20,20 @@ from delivery.services import (
     mark_result_unknown,
     mark_submission_started,
     prepare_attempt,
+    send_pdf_email,
+)
+from delivery.transport import (
+    SmtpConfig,
+    SmtpSecurity,
+)
+from delivery.transport import (
+    test_smtp_connection as check_smtp_connection,
 )
 from invoicing.models import Invoice, InvoiceLine, MonthlyCycle
 
 
 @pytest.fixture
-def issued_invoice(db):
+def issued_invoice(transactional_db):
     company = Company.objects.create(
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
@@ -124,6 +135,86 @@ def prepared_email_data(issued_invoice, settings, tmp_path):
     )
     issued_invoice.refresh_from_db()
     return issued_invoice, prepare_attempt(issued_invoice), artifact, pdf_bytes
+
+
+@pytest.fixture
+def smtp_config():
+    return SmtpConfig(
+        host="smtp.example.com",
+        port=587,
+        security=SmtpSecurity.STARTTLS,
+        timeout_seconds=12.5,
+        username="smtp-user",
+    )
+
+
+class FakeSmtp:
+    def __init__(self, behavior=None):
+        self.behavior = behavior or {}
+        self.calls = []
+
+    def _call(self, name, *args):
+        assert connection.in_atomic_block is False
+        self.calls.append((name, *args))
+        outcome = self.behavior.get(name)
+        if callable(outcome):
+            return outcome(*args)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def ehlo(self):
+        return self._call("ehlo") or (250, b"hello")
+
+    def starttls(self, *, context):
+        assert context.verify_mode != 0
+        return self._call("starttls") or (220, b"ready")
+
+    def login(self, username, password):
+        assert password == "top-secret"
+        return self._call("login", username) or (235, b"ok")
+
+    def mail(self, sender):
+        return self._call("mail", sender) or (250, b"sender ok")
+
+    def rcpt(self, recipient):
+        outcomes = self.behavior.get("rcpt", {})
+        self._call("rcpt_call", recipient)
+        outcome = outcomes.get(recipient, (250, b"recipient ok"))
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    def data(self, payload):
+        return self._call("data", payload) or (250, b"queued")
+
+    def rset(self):
+        return self._call("rset") or (250, b"reset")
+
+    def quit(self):
+        return self._call("quit") or (221, b"bye")
+
+    def close(self):
+        return self._call("close")
+
+
+def smtp_factory(fake):
+    def factory(config, context):
+        assert connection.in_atomic_block is False
+        assert (config.host, config.port, config.timeout_seconds) == (
+            "smtp.example.com",
+            587,
+            12.5,
+        )
+        return fake
+
+    return factory
+
+
+def password_loader(ref):
+    assert connection.in_atomic_block is False
+    assert ref == KeyringCredentialRef("marjan", "smtp-user")
+    return "top-secret"
 
 
 def test_prepare_stores_sender_recipients_and_pdf_without_secret(issued_invoice):
@@ -259,6 +350,19 @@ def test_confirmed_failure_after_submission_marks_invoice_failed(issued_invoice)
     assert failed.completed_at is not None
     assert issued_invoice.status == Invoice.Status.NAPAKA
     assert is_retry_eligible(issued_invoice)
+
+
+def test_stale_prepared_cannot_fail_started_attempt(issued_invoice):
+    stale = prepare_attempt(issued_invoice)
+    mark_submission_started(stale)
+
+    with pytest.raises(ValidationError):
+        mark_confirmed_failure(stale, code="SMTP_CONNECT_FAILED")
+
+    persisted = DeliveryAttempt.objects.get(pk=stale.pk)
+    issued_invoice.refresh_from_db()
+    assert persisted.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+    assert issued_invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
 
 
 @pytest.mark.parametrize(
@@ -483,6 +587,345 @@ def test_composition_does_not_mutate_business_state(prepared_email_data):
         MonthlyCycle.objects.values().get(pk=cycle.pk),
     )
     assert after == before
+
+
+def _send(attempt, smtp_config, fake, loader=password_loader):
+    return send_pdf_email(
+        attempt,
+        subject="Invoice",
+        body="Attached invoice.",
+        smtp_config=smtp_config,
+        credential_ref=KeyringCredentialRef("marjan", "smtp-user"),
+        password_loader=loader,
+        smtp_factory=smtp_factory(fake),
+    )
+
+
+def test_send_accepts_message_and_all_recipients(prepared_email_data, smtp_config):
+    invoice, attempt, _, pdf_bytes = prepared_email_data
+
+    def data_result(payload):
+        persisted = DeliveryAttempt.objects.get(pk=attempt.pk)
+        assert persisted.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+        assert connection.in_atomic_block is False
+        return 250, b"queued"
+
+    fake = FakeSmtp({"data": data_result})
+    before = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+    result = _send(attempt, smtp_config, fake)
+    invoice.refresh_from_db()
+    assert (result.result, invoice.status) == (
+        DeliveryAttempt.Result.ACCEPTED,
+        Invoice.Status.POSLAN,
+    )
+    assert [call[1] for call in fake.calls if call[0] == "rcpt_call"] == [
+        "to@example.com",
+        "cc@example.com",
+        "accountant@example.com",
+    ]
+    payload = next(call[1] for call in fake.calls if call[0] == "data")
+    assert b"\n" not in payload.replace(b"\r\n", b"")
+    assert b"Bcc:" not in payload
+    assert b"Content-Type: application/pdf" in payload
+    parsed = BytesParser(policy=policy.default).parsebytes(payload)
+    assert parsed.get_payload()[-1].get_payload(decode=True) == pdf_bytes
+    for field in (
+        "sender",
+        "recipients_to",
+        "recipients_cc",
+        "recipients_bcc",
+        "pdf_path",
+        "pdf_checksum",
+    ):
+        assert getattr(result, field) == before[field]
+
+
+@pytest.mark.parametrize("code", ["KEYCHAIN_CREDENTIAL_MISSING", "KEYCHAIN_ERROR"])
+def test_keychain_failure_is_confirmed_without_network(
+    prepared_email_data, smtp_config, code
+):
+    invoice, attempt, _, _ = prepared_email_data
+
+    def loader(ref):
+        assert connection.in_atomic_block is False
+        raise CredentialError(code, "Safe credential error.")
+
+    result = send_pdf_email(
+        attempt,
+        subject="Invoice",
+        body="Attached.",
+        smtp_config=smtp_config,
+        credential_ref=KeyringCredentialRef("marjan", "smtp-user"),
+        password_loader=loader,
+        smtp_factory=lambda config, context: pytest.fail("network opened"),
+    )
+    invoice.refresh_from_db()
+    assert (result.result, result.result_code, invoice.status) == (
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+        code,
+        Invoice.Status.NAPAKA,
+    )
+    assert "top-secret" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("behavior", "expected_code"),
+    [
+        (
+            {"login": __import__("smtplib").SMTPAuthenticationError(535, b"denied")},
+            "SMTP_AUTH_FAILED",
+        ),
+        ({"ehlo": TimeoutError("late")}, "SMTP_TIMEOUT"),
+        (
+            {"ehlo": __import__("smtplib").SMTPServerDisconnected("gone")},
+            "SMTP_CONNECTION_LOST",
+        ),
+    ],
+)
+def test_setup_failures_are_distinct(
+    prepared_email_data, smtp_config, behavior, expected_code
+):
+    invoice, attempt, _, _ = prepared_email_data
+    result = _send(attempt, smtp_config, FakeSmtp(behavior))
+    invoice.refresh_from_db()
+    assert (result.result, result.result_code, invoice.status) == (
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+        expected_code,
+        Invoice.Status.NAPAKA,
+    )
+
+
+def test_connect_failure_is_safe_and_confirmed(prepared_email_data, smtp_config):
+    _, attempt, _, _ = prepared_email_data
+
+    def fail_connect(config, context):
+        assert connection.in_atomic_block is False
+        raise ConnectionRefusedError("unreachable top-secret")
+
+    result = send_pdf_email(
+        attempt,
+        subject="Invoice",
+        body="Attached.",
+        smtp_config=smtp_config,
+        credential_ref=KeyringCredentialRef("marjan", "smtp-user"),
+        password_loader=password_loader,
+        smtp_factory=fail_connect,
+    )
+    assert result.result_code == "SMTP_CONNECT_FAILED"
+    assert "top-secret" not in result.message
+
+
+@pytest.mark.parametrize(
+    ("behavior", "expected_code", "message"),
+    [
+        ({"mail": (550, b"sender denied")}, "SMTP_SENDER_REJECTED", ""),
+        (
+            {"rcpt": {"cc@example.com": (550, b"unknown mailbox")}},
+            "SMTP_RECIPIENT_REJECTED",
+            "cc@example.com",
+        ),
+    ],
+)
+def test_envelope_rejection_prevents_data(
+    prepared_email_data, smtp_config, behavior, expected_code, message
+):
+    _, attempt, _, _ = prepared_email_data
+    fake = FakeSmtp(behavior)
+    result = _send(attempt, smtp_config, fake)
+    assert result.result_code == expected_code
+    assert message in result.message
+    assert not any(call[0] == "data" for call in fake.calls)
+
+
+def test_first_recipient_rejection_stops_later_rcpt_commands(
+    prepared_email_data, smtp_config
+):
+    _, attempt, _, _ = prepared_email_data
+    fake = FakeSmtp(
+        {
+            "rcpt": {
+                "to@example.com": (550, b"unknown mailbox"),
+                "cc@example.com": ConnectionResetError("must not be reached"),
+            }
+        }
+    )
+
+    result = _send(attempt, smtp_config, fake)
+
+    assert result.result_code == "SMTP_RECIPIENT_REJECTED"
+    assert result.message == "to@example.com: 550 unknown mailbox"
+    assert [call[1] for call in fake.calls if call[0] == "rcpt_call"] == [
+        "to@example.com"
+    ]
+    assert not any(call[0] == "data" for call in fake.calls)
+
+
+def test_stale_send_failure_cannot_overwrite_another_started_send(
+    prepared_email_data, smtp_config
+):
+    invoice, attempt, _, _ = prepared_email_data
+
+    def racing_loader(ref):
+        mark_submission_started(attempt)
+        raise CredentialError("KEYCHAIN_ERROR", "Safe credential error.")
+
+    with pytest.raises(ValidationError):
+        send_pdf_email(
+            attempt,
+            subject="Invoice",
+            body="Attached.",
+            smtp_config=smtp_config,
+            credential_ref=KeyringCredentialRef("marjan", "smtp-user"),
+            password_loader=racing_loader,
+            smtp_factory=lambda config, context: pytest.fail("network opened"),
+        )
+
+    persisted = DeliveryAttempt.objects.get(pk=attempt.pk)
+    invoice.refresh_from_db()
+    assert persisted.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+    assert invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+
+
+@pytest.mark.parametrize("response", [(450, b"temporary reject"), (550, b"reject")])
+def test_explicit_data_rejection_is_confirmed(
+    prepared_email_data, smtp_config, response
+):
+    invoice, attempt, _, _ = prepared_email_data
+    result = _send(attempt, smtp_config, FakeSmtp({"data": response}))
+    invoice.refresh_from_db()
+    assert (result.result, result.result_code, invoice.status) == (
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+        "SMTP_DATA_REJECTED",
+        Invoice.Status.NAPAKA,
+    )
+
+
+@pytest.mark.parametrize("error", [TimeoutError("late"), ConnectionResetError("gone")])
+def test_no_final_data_response_is_unknown(prepared_email_data, smtp_config, error):
+    invoice, attempt, _, _ = prepared_email_data
+    result = _send(attempt, smtp_config, FakeSmtp({"data": error}))
+    invoice.refresh_from_db()
+    assert (result.result, result.result_code, invoice.status) == (
+        DeliveryAttempt.Result.UNKNOWN,
+        "SMTP_RESULT_UNKNOWN",
+        Invoice.Status.REZULTAT_NI_ZNAN,
+    )
+
+
+def test_cleanup_failure_does_not_overwrite_acceptance(
+    prepared_email_data, smtp_config
+):
+    invoice, attempt, _, _ = prepared_email_data
+    result = _send(attempt, smtp_config, FakeSmtp({"quit": OSError("gone")}))
+    invoice.refresh_from_db()
+    assert (result.result, invoice.status) == (
+        DeliveryAttempt.Result.ACCEPTED,
+        Invoice.Status.POSLAN,
+    )
+
+
+def test_cleanup_failure_does_not_overwrite_rejection(prepared_email_data, smtp_config):
+    invoice, attempt, _, _ = prepared_email_data
+    fake = FakeSmtp({"data": (550, b"rejected"), "quit": OSError("gone")})
+    result = _send(attempt, smtp_config, fake)
+    invoice.refresh_from_db()
+    assert (result.result, invoice.status) == (
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+        Invoice.Status.NAPAKA,
+    )
+
+
+def test_connection_test_does_not_mutate_business_state(
+    prepared_email_data, smtp_config
+):
+    invoice, attempt, _, _ = prepared_email_data
+    before = (
+        Invoice.objects.values().get(pk=invoice.pk),
+        DeliveryAttempt.objects.values().get(pk=attempt.pk),
+    )
+    result = check_smtp_connection(
+        smtp_config,
+        KeyringCredentialRef("marjan", "smtp-user"),
+        password_loader=password_loader,
+        smtp_factory=smtp_factory(FakeSmtp()),
+    )
+    assert result.success and result.code == "SMTP_CONNECTION_OK"
+    assert before == (
+        Invoice.objects.values().get(pk=invoice.pk),
+        DeliveryAttempt.objects.values().get(pk=attempt.pk),
+    )
+    assert "top-secret" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    ("behavior", "code"),
+    [
+        (
+            {"login": __import__("smtplib").SMTPAuthenticationError(535, b"denied")},
+            "SMTP_AUTH_FAILED",
+        ),
+        ({"ehlo": OSError("unreachable")}, "SMTP_CONNECT_FAILED"),
+    ],
+)
+def test_connection_test_returns_safe_failure(smtp_config, behavior, code):
+    result = check_smtp_connection(
+        smtp_config,
+        KeyringCredentialRef("marjan", "smtp-user"),
+        password_loader=password_loader,
+        smtp_factory=smtp_factory(FakeSmtp(behavior)),
+    )
+    assert not result.success
+    assert result.code == code
+    assert "top-secret" not in repr(result)
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {
+            "host": "",
+            "port": 587,
+            "security": SmtpSecurity.STARTTLS,
+            "timeout_seconds": 1,
+            "username": "u",
+        },
+        {
+            "host": "h",
+            "port": 0,
+            "security": SmtpSecurity.STARTTLS,
+            "timeout_seconds": 1,
+            "username": "u",
+        },
+        {
+            "host": "h",
+            "port": 587,
+            "security": SmtpSecurity.STARTTLS,
+            "timeout_seconds": 0,
+            "username": "u",
+        },
+        {
+            "host": "h",
+            "port": 587,
+            "security": "STARTTLS",
+            "timeout_seconds": 1,
+            "username": "u",
+        },
+    ],
+)
+def test_smtp_config_is_strict(arguments):
+    with pytest.raises((TypeError, ValueError)):
+        SmtpConfig(**arguments)
+
+
+def test_load_password_wraps_backend_error_without_secret(monkeypatch):
+    def fail(service, username):
+        raise RuntimeError("top-secret")
+
+    monkeypatch.setattr("delivery.credentials.keyring.get_password", fail)
+    with pytest.raises(CredentialError) as caught:
+        load_password(KeyringCredentialRef("marjan", "smtp-user"))
+    assert caught.value.code == "KEYCHAIN_ERROR"
+    assert "top-secret" not in str(caught.value)
 
 
 def test_composition_does_not_open_network_connection(
