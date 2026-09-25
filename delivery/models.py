@@ -7,10 +7,7 @@ class DeliveryAttempt(models.Model):
         PREPARED = "PREPARED", "Prepared"
         SUBMISSION_STARTED = "SUBMISSION_STARTED", "Submission started"
         ACCEPTED = "ACCEPTED", "Accepted"
-        FAILED_BEFORE_SUBMISSION = (
-            "FAILED_BEFORE_SUBMISSION",
-            "Failed before submission",
-        )
+        CONFIRMED_FAILURE = "CONFIRMED_FAILURE", "Confirmed failure"
         UNKNOWN = "UNKNOWN", "Unknown"
 
     invoice = models.ForeignKey(

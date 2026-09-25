@@ -13,7 +13,7 @@ from delivery.services import (
     build_pdf_email,
     is_retry_eligible,
     mark_accepted,
-    mark_pre_submission_failure,
+    mark_confirmed_failure,
     mark_result_unknown,
     mark_submission_started,
     prepare_attempt,
@@ -175,7 +175,7 @@ def test_accepted_transition_marks_invoice_sent_and_blocks_resend(issued_invoice
         prepare_attempt(issued_invoice)
 
 
-def test_pre_submission_failure_is_retry_eligible_and_preserves_issue_data(
+def test_confirmed_failure_is_retry_eligible_and_preserves_issue_data(
     issued_invoice,
 ):
     original = (
@@ -186,7 +186,7 @@ def test_pre_submission_failure_is_retry_eligible_and_preserves_issue_data(
         NumberSequence.objects.get(company=issued_invoice.company).zadnja_stevilka,
     )
     attempt = prepare_attempt(issued_invoice)
-    failed = mark_pre_submission_failure(
+    failed = mark_confirmed_failure(
         attempt,
         code="CONNECTION_FAILED",
         message="password=hunter2 connection failed",
@@ -200,6 +200,7 @@ def test_pre_submission_failure_is_retry_eligible_and_preserves_issue_data(
         list(InvoiceLine.objects.filter(invoice=issued_invoice).values()),
         NumberSequence.objects.get(company=issued_invoice.company).zadnja_stevilka,
     )
+    assert failed.result == DeliveryAttempt.Result.CONFIRMED_FAILURE
     assert issued_invoice.status == Invoice.Status.NAPAKA
     assert is_retry_eligible(issued_invoice)
     assert failed.message == "password=[REDACTED] connection failed"
@@ -235,13 +236,48 @@ def test_pre_submission_failure_is_retry_eligible_and_preserves_issue_data(
 def test_persisted_message_redacts_common_credentials(
     issued_invoice, message, secret, expected
 ):
-    failed = mark_pre_submission_failure(
+    failed = mark_confirmed_failure(
         prepare_attempt(issued_invoice), code="AUTH_FAILED", message=message
     )
 
     persisted = DeliveryAttempt.objects.get(pk=failed.pk).message
     assert secret not in persisted
     assert persisted == expected
+
+
+def test_confirmed_failure_after_submission_marks_invoice_failed(issued_invoice):
+    attempt = mark_submission_started(prepare_attempt(issued_invoice))
+
+    failed = mark_confirmed_failure(
+        attempt, code="SMTP_REJECTED", message="550 Message rejected"
+    )
+
+    issued_invoice.refresh_from_db()
+    assert failed.result == DeliveryAttempt.Result.CONFIRMED_FAILURE
+    assert failed.result_code == "SMTP_REJECTED"
+    assert failed.message == "550 Message rejected"
+    assert failed.completed_at is not None
+    assert issued_invoice.status == Invoice.Status.NAPAKA
+    assert is_retry_eligible(issued_invoice)
+
+
+@pytest.mark.parametrize(
+    "terminal_result",
+    [
+        DeliveryAttempt.Result.ACCEPTED,
+        DeliveryAttempt.Result.UNKNOWN,
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+    ],
+)
+def test_confirmed_failure_rejects_terminal_attempt(issued_invoice, terminal_result):
+    attempt = prepare_attempt(issued_invoice)
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(result=terminal_result)
+
+    with pytest.raises(ValidationError):
+        mark_confirmed_failure(attempt, code="SMTP_REJECTED")
+
+    issued_invoice.refresh_from_db()
+    assert issued_invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
 
 
 def test_unknown_after_submission_blocks_retry(issued_invoice):

@@ -205,14 +205,17 @@ def mark_accepted(attempt: DeliveryAttempt, *, code: str, message: str = "") -> 
     )
 
 
-def mark_pre_submission_failure(
+def mark_confirmed_failure(
     attempt: DeliveryAttempt, *, code: str, message: str = ""
 ) -> DeliveryAttempt:
     code, message = _sanitize(code, message)
     return _transition_with_invoice(
         attempt,
-        expected=DeliveryAttempt.Result.PREPARED,
-        result=DeliveryAttempt.Result.FAILED_BEFORE_SUBMISSION,
+        expected=(
+            DeliveryAttempt.Result.PREPARED,
+            DeliveryAttempt.Result.SUBMISSION_STARTED,
+        ),
+        result=DeliveryAttempt.Result.CONFIRMED_FAILURE,
         invoice_status=Invoice.Status.NAPAKA,
         code=code,
         message=message,
@@ -251,7 +254,8 @@ def _transition_with_invoice(
 ) -> DeliveryAttempt:
     with transaction.atomic():
         current = DeliveryAttempt.objects.get(pk=attempt.pk)
-        if current.result != expected:
+        expected_results = (expected,) if isinstance(expected, str) else tuple(expected)
+        if current.result not in expected_results:
             raise ValidationError(f"Invalid delivery transition; expected {expected}.")
         updated = Invoice.objects.filter(
             pk=current.invoice_id,
@@ -259,7 +263,9 @@ def _transition_with_invoice(
         ).update(status=invoice_status)
         if updated != 1:
             raise ValidationError("Invoice status no longer permits this delivery transition.")
-        DeliveryAttempt.objects.filter(pk=current.pk, result=expected).update(
+        DeliveryAttempt.objects.filter(
+            pk=current.pk, result__in=expected_results
+        ).update(
             result=result,
             result_code=code,
             message=message,
