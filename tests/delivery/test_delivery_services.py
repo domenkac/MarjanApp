@@ -5,14 +5,20 @@ from email.parser import BytesParser
 from hashlib import sha256
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import connection
 
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
+from core.models import AuditLogEntry
 from delivery.credentials import CredentialError, KeyringCredentialRef, load_password
 from delivery.models import DeliveryAttempt
 from delivery.services import (
+    UNKNOWN_RESOLUTION_FIELD,
+    UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+    UNKNOWN_RESOLUTION_SENT_VERIFIED,
+    UNKNOWN_RESOLUTION_UNRESOLVED,
     build_pdf_email,
     is_retry_eligible,
     mark_accepted,
@@ -21,6 +27,8 @@ from delivery.services import (
     mark_submission_started,
     prepare_attempt,
     prepare_retry_attempt,
+    resolve_unknown_as_sent,
+    resolve_unknown_user_confirmed_not_sent_and_prepare_retry,
     send_pdf_email,
 )
 from delivery.transport import (
@@ -621,6 +629,308 @@ def test_unknown_after_submission_blocks_retry(issued_invoice):
     assert not is_retry_eligible(issued_invoice)
     with pytest.raises(ValidationError):
         prepare_attempt(issued_invoice)
+
+
+def _unknown_attempt(invoice):
+    return mark_result_unknown(
+        mark_submission_started(prepare_attempt(invoice)),
+        code="SMTP_RESULT_UNKNOWN",
+        message="No final response",
+    )
+
+
+def _resolution_audits(attempt):
+    return AuditLogEntry.objects.filter(
+        content_type=ContentType.objects.get_for_model(DeliveryAttempt),
+        object_id=attempt.pk,
+        polje=UNKNOWN_RESOLUTION_FIELD,
+    )
+
+
+def test_resolve_unknown_as_sent_audits_without_rewriting_attempt(issued_invoice):
+    unknown = _unknown_attempt(issued_invoice)
+    before = DeliveryAttempt.objects.values().get(pk=unknown.pk)
+
+    resolved = resolve_unknown_as_sent(unknown, reason="Verified in Sent folder")
+
+    issued_invoice.refresh_from_db()
+    audit = _resolution_audits(unknown).get()
+    assert resolved.pk == unknown.pk
+    assert issued_invoice.status == Invoice.Status.POSLAN
+    assert DeliveryAttempt.objects.values().get(pk=unknown.pk) == before
+    assert DeliveryAttempt.objects.count() == 1
+    assert (
+        audit.dejanje,
+        audit.polje,
+        audit.stara_vrednost,
+        audit.nova_vrednost,
+        audit.razlog,
+    ) == (
+        AuditLogEntry.Dejanje.SPREMEMBA,
+        "unknown_resolution",
+        UNKNOWN_RESOLUTION_UNRESOLVED,
+        UNKNOWN_RESOLUTION_SENT_VERIFIED,
+        "Verified in Sent folder",
+    )
+
+
+@pytest.mark.parametrize("reason", ["", "   ", None])
+@pytest.mark.parametrize(
+    "service",
+    [resolve_unknown_as_sent, resolve_unknown_user_confirmed_not_sent_and_prepare_retry],
+)
+def test_unknown_resolution_requires_reason(issued_invoice, reason, service):
+    unknown = _unknown_attempt(issued_invoice)
+
+    with pytest.raises(ValidationError):
+        service(unknown, reason=reason)
+
+    assert not _resolution_audits(unknown).exists()
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.REZULTAT_NI_ZNAN
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        DeliveryAttempt.Result.PREPARED,
+        DeliveryAttempt.Result.SUBMISSION_STARTED,
+        DeliveryAttempt.Result.ACCEPTED,
+        DeliveryAttempt.Result.CONFIRMED_FAILURE,
+    ],
+)
+@pytest.mark.parametrize(
+    "service",
+    [resolve_unknown_as_sent, resolve_unknown_user_confirmed_not_sent_and_prepare_retry],
+)
+def test_unknown_resolution_rejects_other_results(issued_invoice, result, service):
+    attempt = prepare_attempt(issued_invoice)
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(result=result)
+    Invoice.objects.filter(pk=issued_invoice.pk).update(
+        status=Invoice.Status.REZULTAT_NI_ZNAN
+    )
+
+    with pytest.raises(ValidationError):
+        service(attempt, reason="Decision")
+
+    assert not AuditLogEntry.objects.exists()
+    assert DeliveryAttempt.objects.count() == 1
+
+
+@pytest.mark.parametrize(
+    "service",
+    [resolve_unknown_as_sent, resolve_unknown_user_confirmed_not_sent_and_prepare_retry],
+)
+def test_unknown_resolution_rejects_unsaved_or_missing_attempt(issued_invoice, service):
+    for attempt in (DeliveryAttempt(), DeliveryAttempt(pk=999999)):
+        with pytest.raises(ValidationError):
+            service(attempt, reason="Decision")
+
+    assert not AuditLogEntry.objects.exists()
+    assert not DeliveryAttempt.objects.exists()
+
+
+def test_explicit_not_sent_creates_snapshot_retry_and_audit(issued_invoice):
+    unknown = _unknown_attempt(issued_invoice)
+    source_before = DeliveryAttempt.objects.values().get(pk=unknown.pk)
+    Company.objects.filter(pk=issued_invoice.company_id).update(
+        email_posiljatelj="new-sender@example.com",
+        email_racunovodja="new-accountant@example.com",
+    )
+    RecipientContact.objects.filter(lease=issued_invoice.lease).update(
+        email="new-contact@example.com"
+    )
+
+    retry = resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
+        unknown, reason="User checked and confirmed not sent"
+    )
+
+    issued_invoice.refresh_from_db()
+    audit = _resolution_audits(unknown).get()
+    assert (retry.sequence, retry.result) == (2, DeliveryAttempt.Result.PREPARED)
+    assert issued_invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert DeliveryAttempt.objects.values().get(pk=unknown.pk) == source_before
+    assert (
+        retry.sender,
+        retry.recipients_to,
+        retry.recipients_cc,
+        retry.recipients_bcc,
+        retry.pdf_path,
+        retry.pdf_checksum,
+    ) == (
+        unknown.sender,
+        unknown.recipients_to,
+        unknown.recipients_cc,
+        unknown.recipients_bcc,
+        unknown.pdf_path,
+        unknown.pdf_checksum,
+    )
+    assert retry.submission_started_at is None
+    assert retry.completed_at is None
+    assert (retry.result_code, retry.message) == ("", "")
+    assert (audit.stara_vrednost, audit.nova_vrednost, audit.razlog) == (
+        UNKNOWN_RESOLUTION_UNRESOLVED,
+        UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+        "User checked and confirmed not sent",
+    )
+
+
+def test_unresolved_unknown_cannot_use_confirmed_failure_retry(issued_invoice):
+    unknown = _unknown_attempt(issued_invoice)
+
+    with pytest.raises(ValidationError):
+        prepare_retry_attempt(unknown)
+
+    assert DeliveryAttempt.objects.count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.REZULTAT_NI_ZNAN
+
+
+@pytest.mark.parametrize("resolution", ["sent", "not_sent"])
+def test_unknown_resolution_rejects_duplicate_or_stale_attempt(issued_invoice, resolution):
+    unknown = _unknown_attempt(issued_invoice)
+    service = (
+        resolve_unknown_as_sent
+        if resolution == "sent"
+        else resolve_unknown_user_confirmed_not_sent_and_prepare_retry
+    )
+    service(unknown, reason="First decision")
+
+    with pytest.raises(ValidationError):
+        service(unknown, reason="Duplicate decision")
+
+    assert _resolution_audits(unknown).count() == 1
+    assert DeliveryAttempt.objects.count() == (1 if resolution == "sent" else 2)
+
+
+@pytest.mark.parametrize(
+    "service",
+    [resolve_unknown_as_sent, resolve_unknown_user_confirmed_not_sent_and_prepare_retry],
+)
+def test_unknown_resolution_rejects_nonlatest_and_wrong_invoice_state(
+    issued_invoice, service
+):
+    unknown = _unknown_attempt(issued_invoice)
+    DeliveryAttempt.objects.create(
+        invoice=issued_invoice,
+        sequence=2,
+        sender=unknown.sender,
+        recipients_to=unknown.recipients_to,
+        recipients_cc=unknown.recipients_cc,
+        recipients_bcc=unknown.recipients_bcc,
+        pdf_path=unknown.pdf_path,
+        pdf_checksum=unknown.pdf_checksum,
+    )
+
+    with pytest.raises(ValidationError):
+        service(unknown, reason="Decision")
+
+    assert not _resolution_audits(unknown).exists()
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.REZULTAT_NI_ZNAN
+
+    DeliveryAttempt.objects.filter(sequence=2).update(result=DeliveryAttempt.Result.UNKNOWN)
+    Invoice.objects.filter(pk=issued_invoice.pk).update(status=Invoice.Status.NAPAKA)
+    latest = DeliveryAttempt.objects.get(sequence=2)
+    with pytest.raises(ValidationError):
+        service(latest, reason="Decision")
+    assert not _resolution_audits(latest).exists()
+
+
+@pytest.mark.parametrize(
+    "values",
+    [
+        {"rendered_pdf_path": "other.pdf"},
+        {"checksum": "b" * 64},
+        {"stevilka": ""},
+    ],
+)
+def test_unknown_not_sent_rejects_changed_document(issued_invoice, values):
+    unknown = _unknown_attempt(issued_invoice)
+    Invoice.objects.filter(pk=issued_invoice.pk).update(**values)
+
+    with pytest.raises(ValidationError):
+        resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
+            unknown, reason="Not sent"
+        )
+
+    assert DeliveryAttempt.objects.count() == 1
+    assert not _resolution_audits(unknown).exists()
+
+
+def test_unknown_not_sent_rejects_invalid_source_checksum(issued_invoice):
+    unknown = _unknown_attempt(issued_invoice)
+    DeliveryAttempt.objects.filter(pk=unknown.pk).update(pdf_checksum="invalid")
+    Invoice.objects.filter(pk=issued_invoice.pk).update(checksum="invalid")
+
+    with pytest.raises(ValidationError):
+        resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
+            unknown, reason="Not sent"
+        )
+
+    assert DeliveryAttempt.objects.count() == 1
+    assert not _resolution_audits(unknown).exists()
+
+
+def test_unknown_sent_resolution_rolls_back_audit_when_status_update_fails(
+    issued_invoice, monkeypatch
+):
+    unknown = _unknown_attempt(issued_invoice)
+    original_update = type(Invoice.objects.all()).update
+
+    def fail_update(queryset, **kwargs):
+        if kwargs.get("status") == Invoice.Status.POSLAN:
+            raise RuntimeError("status write failed")
+        return original_update(queryset, **kwargs)
+
+    monkeypatch.setattr(type(Invoice.objects.all()), "update", fail_update)
+    with pytest.raises(RuntimeError, match="status write failed"):
+        resolve_unknown_as_sent(unknown, reason="Verified")
+
+    assert not _resolution_audits(unknown).exists()
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.REZULTAT_NI_ZNAN
+
+
+def test_unknown_not_sent_rolls_back_audit_and_retry_when_status_update_fails(
+    issued_invoice, monkeypatch
+):
+    unknown = _unknown_attempt(issued_invoice)
+    original_update = type(Invoice.objects.all()).update
+
+    def fail_update(queryset, **kwargs):
+        if kwargs.get("status") == Invoice.Status.IZBRAN_ZA_POSILJANJE:
+            raise RuntimeError("status write failed")
+        return original_update(queryset, **kwargs)
+
+    monkeypatch.setattr(type(Invoice.objects.all()), "update", fail_update)
+    with pytest.raises(RuntimeError, match="status write failed"):
+        resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
+            unknown, reason="Not sent"
+        )
+
+    assert not _resolution_audits(unknown).exists()
+    assert DeliveryAttempt.objects.count() == 1
+    assert Invoice.objects.get(pk=issued_invoice.pk).status == Invoice.Status.REZULTAT_NI_ZNAN
+
+
+@pytest.mark.parametrize(
+    "service",
+    [resolve_unknown_as_sent, resolve_unknown_user_confirmed_not_sent_and_prepare_retry],
+)
+def test_unknown_resolution_is_db_only(issued_invoice, monkeypatch, service):
+    unknown = _unknown_attempt(issued_invoice)
+    for target in (
+        "delivery.services._recipient_snapshots",
+        "rendering.services.stanje_koncnega_pdf",
+        "delivery.credentials.load_password",
+        "delivery.transport.send_prepared_email",
+    ):
+        monkeypatch.setattr(target, lambda *args, **kwargs: pytest.fail("external I/O"))
+
+    resolved = service(unknown, reason="Resolution evidence")
+    expected = (
+        DeliveryAttempt.Result.UNKNOWN
+        if service is resolve_unknown_as_sent
+        else DeliveryAttempt.Result.PREPARED
+    )
+    assert resolved.result == expected
 
 
 def test_invalid_transition_order_and_audit_mutation_are_rejected(issued_invoice):

@@ -2,6 +2,7 @@ import re
 from dataclasses import dataclass
 from email.message import EmailMessage
 
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
 from django.db import transaction
@@ -9,6 +10,7 @@ from django.db.models import Max
 from django.utils import timezone
 
 from contracts.models import RecipientContact
+from core.models import AuditLogEntry
 from invoicing.models import Invoice
 
 from .models import DeliveryAttempt
@@ -23,6 +25,11 @@ _SECRET_RE = re.compile(
     r"(?:\"[^\"]*\"|'[^']*'|\S+)"
 )
 _BEARER_RE = re.compile(r"(?i)(\bbearer\s+)(?:\"[^\"]*\"|'[^']*'|\S+)")
+
+UNKNOWN_RESOLUTION_FIELD = "unknown_resolution"
+UNKNOWN_RESOLUTION_UNRESOLVED = "UNRESOLVED"
+UNKNOWN_RESOLUTION_SENT_VERIFIED = "SENT_VERIFIED"
+UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED = "NOT_SENT_CONFIRMED"
 
 
 @dataclass(frozen=True, slots=True)
@@ -236,6 +243,114 @@ def prepare_retry_attempt(failed_attempt: DeliveryAttempt) -> DeliveryAttempt:
         if updated != 1:
             raise ValidationError("Invoice status no longer permits retry.")
         return retry
+
+
+def resolve_unknown_as_sent(
+    attempt: DeliveryAttempt, *, reason: str
+) -> DeliveryAttempt:
+    reason = _required_text(reason, "Reason")
+    with transaction.atomic():
+        source, invoice, content_type = _unresolved_unknown(attempt)
+        audit = _unknown_resolution_audit(
+            source,
+            content_type,
+            reason,
+            UNKNOWN_RESOLUTION_SENT_VERIFIED,
+        )
+        audit.full_clean()
+        audit.save()
+        updated = Invoice.objects.filter(
+            pk=invoice.pk, status=Invoice.Status.REZULTAT_NI_ZNAN
+        ).update(status=Invoice.Status.POSLAN)
+        if updated != 1:
+            raise ValidationError("Invoice status no longer permits UNKNOWN resolution.")
+        return source
+
+
+def resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
+    attempt: DeliveryAttempt, *, reason: str
+) -> DeliveryAttempt:
+    reason = _required_text(reason, "Reason")
+    with transaction.atomic():
+        source, invoice, content_type = _unresolved_unknown(attempt)
+        if not invoice.stevilka:
+            raise ValidationError("Invoice must be issued before retry.")
+        if not source.pdf_path or not _SHA256_RE.fullmatch(source.pdf_checksum or ""):
+            raise ValidationError("Valid PDF snapshot metadata is required for retry.")
+        if (invoice.rendered_pdf_path, invoice.checksum) != (
+            source.pdf_path,
+            source.pdf_checksum,
+        ):
+            raise ValidationError("Invoice PDF metadata differs from the UNKNOWN attempt.")
+
+        audit = _unknown_resolution_audit(
+            source,
+            content_type,
+            reason,
+            UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+        )
+        audit.full_clean()
+        audit.save()
+        retry = DeliveryAttempt(
+            invoice=invoice,
+            sequence=source.sequence + 1,
+            sender=source.sender,
+            recipients_to=source.recipients_to,
+            recipients_cc=source.recipients_cc,
+            recipients_bcc=source.recipients_bcc,
+            pdf_path=source.pdf_path,
+            pdf_checksum=source.pdf_checksum,
+        )
+        retry.full_clean()
+        retry.save()
+        updated = Invoice.objects.filter(
+            pk=invoice.pk, status=Invoice.Status.REZULTAT_NI_ZNAN
+        ).update(status=Invoice.Status.IZBRAN_ZA_POSILJANJE)
+        if updated != 1:
+            raise ValidationError("Invoice status no longer permits UNKNOWN resolution.")
+        return retry
+
+
+def _unresolved_unknown(attempt: DeliveryAttempt):
+    if attempt.pk is None:
+        raise ValidationError("Delivery attempt must be persisted before resolution.")
+    source = (
+        DeliveryAttempt.objects.select_related("invoice").filter(pk=attempt.pk).first()
+    )
+    if source is None:
+        raise ValidationError("Delivery attempt must be persisted before resolution.")
+    invoice = source.invoice
+    if source.result != DeliveryAttempt.Result.UNKNOWN:
+        raise ValidationError("Only an UNKNOWN delivery attempt can be resolved.")
+    latest = (
+        DeliveryAttempt.objects.filter(invoice=invoice).order_by("-sequence").first()
+    )
+    if latest is None or latest.pk != source.pk:
+        raise ValidationError("Only the latest delivery attempt can be resolved.")
+    if invoice.status != Invoice.Status.REZULTAT_NI_ZNAN:
+        raise ValidationError("Invoice status no longer permits UNKNOWN resolution.")
+    content_type = ContentType.objects.get_for_model(DeliveryAttempt)
+    if AuditLogEntry.objects.filter(
+        content_type=content_type,
+        object_id=source.pk,
+        polje=UNKNOWN_RESOLUTION_FIELD,
+    ).exists():
+        raise ValidationError("UNKNOWN delivery attempt has already been resolved.")
+    return source, invoice, content_type
+
+
+def _unknown_resolution_audit(
+    source: DeliveryAttempt, content_type, reason: str, resolution: str
+) -> AuditLogEntry:
+    return AuditLogEntry(
+        content_type=content_type,
+        object_id=source.pk,
+        dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
+        polje=UNKNOWN_RESOLUTION_FIELD,
+        stara_vrednost=UNKNOWN_RESOLUTION_UNRESOLVED,
+        nova_vrednost=resolution,
+        razlog=reason,
+    )
 
 
 def mark_submission_started(attempt: DeliveryAttempt) -> DeliveryAttempt:
