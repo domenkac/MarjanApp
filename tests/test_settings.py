@@ -33,6 +33,7 @@ def test_minimal_settings():
         "catalogs",
         "contracts",
         "invoicing",
+        "delivery",
         "rendering",
         "ui",
     ]

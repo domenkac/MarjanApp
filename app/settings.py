@@ -23,6 +23,7 @@ INSTALLED_APPS = [
     "catalogs",
     "contracts",
     "invoicing",
+    "delivery",
     "rendering",
     "ui",
 ]
