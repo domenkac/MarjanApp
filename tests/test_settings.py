@@ -35,6 +35,7 @@ def test_minimal_settings():
         "invoicing",
         "delivery",
         "rendering",
+        "archive",
         "ui",
     ]
     assert settings.DATABASES["default"]["ENGINE"] == "django.db.backends.sqlite3"
