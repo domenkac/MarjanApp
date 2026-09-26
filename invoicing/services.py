@@ -6,6 +6,7 @@ from collections import Counter
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal, InvalidOperation
+from enum import StrEnum
 from itertools import pairwise
 
 from django.conf import settings
@@ -81,6 +82,15 @@ class KonfliktPodatkovPrvegaKoraka(MesecniCikelNapaka):
 
 class NeveljavenPrehodMesecnegaCikla(MesecniCikelNapaka):
     pass
+
+
+class StanjeMesecnegaArhiva(StrEnum):
+    WAITING_DELIVERY = "WAITING_DELIVERY"
+    DELIVERY_FAILED = "DELIVERY_FAILED"
+    DELIVERY_UNKNOWN = "DELIVERY_UNKNOWN"
+    ARCHIVE_NOT_STARTED = "ARCHIVE_NOT_STARTED"
+    ARCHIVE_VERIFIED = "ARCHIVE_VERIFIED"
+    CONFLICT = "CONFLICT"
 
 
 def normaliziraj_obdobje(obdobje: date) -> date:
@@ -2794,6 +2804,16 @@ def stanje_zamrznjenega_mesecnega_kandidata(
                 batch_id, lease_id, candidate_fingerprint, samo_branje=True
             )
         )
+        if review.selected and batch.cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
+            existing_status = Invoice.objects.filter(
+                company_id=batch.company_id,
+                lease_id=review.lease_id,
+                document_type=Invoice.DocumentType.NP,
+                obdobje_od=prepared["period_start"],
+                obdobje_do=prepared["period_end"],
+            ).values_list("status", flat=True).first()
+            if existing_status is not None:
+                fields["status"] = existing_status
         state, invoice, error = _obstojece_stanje_materializacije(
             batch, review, prepared, fields
         )
@@ -2936,3 +2956,191 @@ def odpri_zakljucek_mesecnega_cikla(cycle):
         svezi.trenutni_korak = MonthlyCycle.Korak.ZAKLJUCEK
         svezi.save(update_fields=["trenutni_korak", "updated_at"])
         return svezi
+
+
+def _preveri_korak_mesecnega_arhiva(cycle):
+    if getattr(cycle, "pk", None) is None:
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Arhiviranje zahteva shranjen mesečni cikel."
+        )
+    cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+    if (
+        cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
+        or cycle.status != MonthlyCycle.Status.V_TEKU
+    ):
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Arhiviranje je dovoljeno samo v aktivnem koraku 6."
+        )
+    return cycle
+
+
+def _identitete_zamrznjenega_mesecnega_paketa(cycle):
+    return [
+        (
+            batch.pk,
+            candidate.get("lease_id"),
+            candidate.get("candidate_fingerprint"),
+        )
+        for batch in aktivni_izracuni_mesecnega_cikla(cycle).order_by(
+            "company_id", "pk"
+        )
+        for candidate in batch.calculation_snapshot.get("candidates", [])
+    ]
+
+
+def _rezultat_mesecnega_arhiva(cycle, *, archive_failures=None):
+    from archive.models import ArchivedFile
+    from archive.services import ArchiveState, verify_archived_file
+
+    archive_failures = archive_failures or {}
+    results = []
+    selected_count = 0
+    package_conflicts = 0
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    for identity in _identitete_zamrznjenega_mesecnega_paketa(cycle):
+        review = reviews.get(identity)
+        if review is not None and review.selected:
+            selected_count += 1
+        materialization = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+        if review is None or materialization["state"] != "MATERIALIZED":
+            package_conflicts += 1
+            results.append(
+                {
+                    "invoice_id": None,
+                    "invoice_number": None,
+                    "company_id": None,
+                    "issuer_label": "",
+                    "delivery_status": None,
+                    "archive_state": StanjeMesecnegaArhiva.CONFLICT,
+                    "message": materialization["error"]
+                    or "Zamrznjeni kandidat nima pričakovanega materializiranega računa.",
+                }
+            )
+            continue
+
+        invoice = materialization["invoice"]
+        archived = ArchivedFile.objects.filter(
+            invoice=invoice, artifact_type=ArchivedFile.ArtifactType.PDF
+        ).first()
+        if not review.selected:
+            if (
+                invoice.status != Invoice.Status.ARHIVIRAN_NI_IZDAN
+                or invoice.stevilka
+                or invoice.rendered_pdf_path
+                or invoice.checksum
+                or archived is not None
+            ):
+                package_conflicts += 1
+                results.append(
+                    {
+                        "invoice_id": invoice.pk,
+                        "invoice_number": invoice.stevilka,
+                        "company_id": invoice.company_id,
+                        "issuer_label": invoice.izdajatelj_naziv,
+                        "delivery_status": invoice.status,
+                        "archive_state": StanjeMesecnegaArhiva.CONFLICT,
+                        "message": "Neizdani kandidat krši pravila materializacije ali arhiva.",
+                    }
+                )
+            continue
+
+        if invoice.pk in archive_failures:
+            state, message = archive_failures[invoice.pk]
+        elif invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE:
+            state, message = (
+                StanjeMesecnegaArhiva.WAITING_DELIVERY,
+                "Račun čaka na rezultat pošiljanja.",
+            )
+        elif invoice.status == Invoice.Status.NAPAKA:
+            state, message = (
+                StanjeMesecnegaArhiva.DELIVERY_FAILED,
+                "Pošiljanje računa je potrjeno neuspešno.",
+            )
+        elif invoice.status == Invoice.Status.REZULTAT_NI_ZNAN:
+            state, message = (
+                StanjeMesecnegaArhiva.DELIVERY_UNKNOWN,
+                "Rezultat pošiljanja računa ni znan.",
+            )
+        elif invoice.status != Invoice.Status.POSLAN:
+            state, message = (
+                StanjeMesecnegaArhiva.CONFLICT,
+                f"Nepričakovano stanje računa: {invoice.status}.",
+            )
+        elif archived is None:
+            state, message = (
+                StanjeMesecnegaArhiva.ARCHIVE_NOT_STARTED,
+                "Arhiviranje računa se še ni začelo.",
+            )
+        else:
+            verification = verify_archived_file(archived)
+            state = (
+                StanjeMesecnegaArhiva.ARCHIVE_VERIFIED
+                if verification.state == ArchiveState.VERIFIED
+                else verification.state
+            )
+            message = verification.message
+        results.append(
+            {
+                "invoice_id": invoice.pk,
+                "invoice_number": invoice.stevilka,
+                "company_id": invoice.company_id,
+                "issuer_label": invoice.izdajatelj_naziv,
+                "delivery_status": invoice.status,
+                "archive_state": state,
+                "message": message,
+            }
+        )
+
+    verified_count = sum(
+        item["archive_state"] == StanjeMesecnegaArhiva.ARCHIVE_VERIFIED
+        for item in results
+    )
+    pending_count = selected_count - verified_count
+    issue_count = sum(
+        item["archive_state"]
+        not in {
+            StanjeMesecnegaArhiva.WAITING_DELIVERY,
+            StanjeMesecnegaArhiva.ARCHIVE_NOT_STARTED,
+            StanjeMesecnegaArhiva.ARCHIVE_VERIFIED,
+        }
+        for item in results
+    )
+    return {
+        "cycle_id": cycle.pk,
+        "complete": package_conflicts == 0 and verified_count == selected_count,
+        "selected_count": selected_count,
+        "verified_count": verified_count,
+        "pending_count": pending_count,
+        "issue_count": issue_count,
+        "per_invoice": results,
+    }
+
+
+def stanje_arhiviranja_mesecnega_cikla(cycle):
+    cycle = _preveri_korak_mesecnega_arhiva(cycle)
+    return _rezultat_mesecnega_arhiva(cycle)
+
+
+def arhiviraj_poslane_racune_mesecnega_cikla(cycle, roots):
+    from archive.services import ArchiveState, archive_pdf
+
+    cycle = _preveri_korak_mesecnega_arhiva(cycle)
+    initial = _rezultat_mesecnega_arhiva(cycle)
+    failures = {}
+    for item in initial["per_invoice"]:
+        if (
+            item["invoice_id"] is None
+            or item["delivery_status"] != Invoice.Status.POSLAN
+        ):
+            continue
+        try:
+            result = archive_pdf(Invoice.objects.get(pk=item["invoice_id"]), roots)
+        except Exception as exc:  # noqa: BLE001 - sibling isolation is required
+            failures[item["invoice_id"]] = (ArchiveState.FAILED, str(exc))
+        else:
+            if not result.success:
+                failures[item["invoice_id"]] = (result.state, result.message)
+    return _rezultat_mesecnega_arhiva(cycle, archive_failures=failures)
