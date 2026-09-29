@@ -6,17 +6,11 @@ from enum import StrEnum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
-from django.contrib.contenttypes.models import ContentType
 from django.db import connection, transaction
 
-from core.models import AuditLogEntry
 from core.pravila import slugify_naziv
 from delivery.models import DeliveryAttempt
-from delivery.services import (
-    UNKNOWN_RESOLUTION_FIELD,
-    UNKNOWN_RESOLUTION_SENT_VERIFIED,
-    UNKNOWN_RESOLUTION_UNRESOLVED,
-)
+from delivery.services import has_sent_delivery_evidence
 from invoicing.models import Invoice
 from rendering.services import stanje_koncnega_pdf
 
@@ -168,23 +162,8 @@ def _delivery_evidence(invoice: Invoice) -> DeliveryAttempt:
     attempt = invoice.delivery_attempts.order_by("-sequence").first()
     if attempt is None:
         raise ArchiveConflict("Invoice has no delivery attempt.")
-    compatible = attempt.result == DeliveryAttempt.Result.ACCEPTED
-    if attempt.result == DeliveryAttempt.Result.UNKNOWN:
-        compatible = AuditLogEntry.objects.filter(
-            content_type=ContentType.objects.get_for_model(DeliveryAttempt),
-            object_id=attempt.pk,
-            dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
-            polje=UNKNOWN_RESOLUTION_FIELD,
-            stara_vrednost=UNKNOWN_RESOLUTION_UNRESOLVED,
-            nova_vrednost=UNKNOWN_RESOLUTION_SENT_VERIFIED,
-        ).exists()
-    if not compatible:
+    if not has_sent_delivery_evidence(invoice, attempt):
         raise ArchiveConflict("Latest delivery attempt does not prove delivery.")
-    if (attempt.pdf_path, attempt.pdf_checksum) != (
-        invoice.rendered_pdf_path,
-        invoice.checksum,
-    ):
-        raise ArchiveConflict("Delivery PDF metadata differs from invoice metadata.")
     return attempt
 
 

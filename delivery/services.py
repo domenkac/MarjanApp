@@ -41,6 +41,40 @@ class PreparedEmail:
     attempt_id: int
 
 
+def has_sent_delivery_evidence(
+    invoice: Invoice, attempt: DeliveryAttempt | None = None
+) -> bool:
+    if invoice.status != Invoice.Status.POSLAN:
+        return False
+    attempt = attempt or invoice.delivery_attempts.order_by("-sequence").first()
+    if attempt is None:
+        return False
+    compatible = attempt.result == DeliveryAttempt.Result.ACCEPTED
+    if attempt.result == DeliveryAttempt.Result.UNKNOWN:
+        compatible = has_unknown_resolution(
+            attempt, UNKNOWN_RESOLUTION_SENT_VERIFIED
+        )
+    return compatible and (attempt.pdf_path, attempt.pdf_checksum) == (
+        invoice.rendered_pdf_path,
+        invoice.checksum,
+    )
+
+
+def has_unknown_resolution(attempt: DeliveryAttempt, resolution: str) -> bool:
+    content_type = ContentType.objects.filter(
+        app_label=DeliveryAttempt._meta.app_label,
+        model=DeliveryAttempt._meta.model_name,
+    ).first()
+    return content_type is not None and AuditLogEntry.objects.filter(
+        content_type=content_type,
+        object_id=attempt.pk,
+        dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
+        polje=UNKNOWN_RESOLUTION_FIELD,
+        stara_vrednost=UNKNOWN_RESOLUTION_UNRESOLVED,
+        nova_vrednost=resolution,
+    ).exists()
+
+
 def _required_text(value, name: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise ValidationError(f"{name} must be a non-empty string.")

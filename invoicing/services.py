@@ -93,6 +93,16 @@ class StanjeMesecnegaArhiva(StrEnum):
     CONFLICT = "CONFLICT"
 
 
+class StanjeMesecneDostave(StrEnum):
+    DELIVERY_NOT_PREPARED = "DELIVERY_NOT_PREPARED"
+    DELIVERY_PREPARED = "DELIVERY_PREPARED"
+    DELIVERY_IN_PROGRESS = "DELIVERY_IN_PROGRESS"
+    DELIVERY_SENT = "DELIVERY_SENT"
+    DELIVERY_FAILED = "DELIVERY_FAILED"
+    DELIVERY_UNKNOWN = "DELIVERY_UNKNOWN"
+    CONFLICT = "CONFLICT"
+
+
 def normaliziraj_obdobje(obdobje: date) -> date:
     return obdobje.replace(day=1)
 
@@ -2958,10 +2968,10 @@ def odpri_zakljucek_mesecnega_cikla(cycle):
         return svezi
 
 
-def _preveri_korak_mesecnega_arhiva(cycle):
+def _preveri_aktivni_korak_6(cycle):
     if getattr(cycle, "pk", None) is None:
         raise NeveljavenPrehodMesecnegaCikla(
-            "Arhiviranje zahteva shranjen mesečni cikel."
+            "Operacija zahteva shranjen mesečni cikel."
         )
     cycle = MonthlyCycle.objects.get(pk=cycle.pk)
     if (
@@ -2969,7 +2979,7 @@ def _preveri_korak_mesecnega_arhiva(cycle):
         or cycle.status != MonthlyCycle.Status.V_TEKU
     ):
         raise NeveljavenPrehodMesecnegaCikla(
-            "Arhiviranje je dovoljeno samo v aktivnem koraku 6."
+            "Operacija je dovoljena samo v aktivnem koraku 6."
         )
     return cycle
 
@@ -2986,6 +2996,219 @@ def _identitete_zamrznjenega_mesecnega_paketa(cycle):
         )
         for candidate in batch.calculation_snapshot.get("candidates", [])
     ]
+
+
+def _rezultat_mesecne_dostave(cycle, *, preparation_failures=None):
+    from delivery.models import DeliveryAttempt
+    from delivery.services import (
+        UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+        has_sent_delivery_evidence,
+        has_unknown_resolution,
+    )
+
+    preparation_failures = preparation_failures or {}
+    results = []
+    selected_count = 0
+    package_conflicts = 0
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    for identity in _identitete_zamrznjenega_mesecnega_paketa(cycle):
+        review = reviews.get(identity)
+        if review is not None and review.selected:
+            selected_count += 1
+        materialization = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+        if review is None or materialization["state"] != "MATERIALIZED":
+            package_conflicts += 1
+            results.append(
+                {
+                    "invoice_id": None,
+                    "invoice_number": None,
+                    "company_id": None,
+                    "issuer_label": "",
+                    "invoice_status": None,
+                    "latest_attempt_id": None,
+                    "latest_attempt_sequence": None,
+                    "latest_attempt_result": None,
+                    "delivery_state": StanjeMesecneDostave.CONFLICT,
+                    "message": materialization["error"]
+                    or "Zamrznjeni kandidat nima pričakovanega materializiranega računa.",
+                }
+            )
+            continue
+
+        invoice = materialization["invoice"]
+        attempts = list(invoice.delivery_attempts.order_by("sequence"))
+        latest = attempts[-1] if attempts else None
+        if not review.selected:
+            if (
+                invoice.status != Invoice.Status.ARHIVIRAN_NI_IZDAN
+                or invoice.stevilka
+                or invoice.rendered_pdf_path
+                or invoice.checksum
+                or attempts
+            ):
+                package_conflicts += 1
+                results.append(
+                    _rezultat_dostave_racuna(
+                        invoice,
+                        latest,
+                        StanjeMesecneDostave.CONFLICT,
+                        "Neizdani kandidat krši pravila materializacije ali dostave.",
+                    )
+                )
+            continue
+
+        state = StanjeMesecneDostave.CONFLICT
+        preparation_failed = invoice.pk in preparation_failures
+        message = preparation_failures.get(invoice.pk) or "Priprava dostave ni uspela."
+        valid_attempt_identity = [attempt.sequence for attempt in attempts] == list(
+            range(1, len(attempts) + 1)
+        ) and all(
+            attempt.result == DeliveryAttempt.Result.CONFIRMED_FAILURE
+            or (
+                attempt.result == DeliveryAttempt.Result.UNKNOWN
+                and has_unknown_resolution(
+                    attempt, UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED
+                )
+            )
+            for attempt in attempts[:-1]
+        )
+        snapshot_matches = all(
+            (attempt.pdf_path, attempt.pdf_checksum)
+            == (invoice.rendered_pdf_path, invoice.checksum)
+            for attempt in attempts
+        )
+        snapshot_well_formed = latest is None or (
+            bool(latest.sender)
+            and all(
+                isinstance(recipients, list)
+                for recipients in (
+                    latest.recipients_to,
+                    latest.recipients_cc,
+                    latest.recipients_bcc,
+                )
+            )
+            and bool(latest.pdf_path)
+            and bool(latest.pdf_checksum)
+        )
+        if preparation_failed:
+            pass
+        elif not valid_attempt_identity:
+            message = "Zaporedje poskusov dostave ni veljavno."
+        elif not snapshot_well_formed:
+            message = "Posnetek poskusa dostave ni veljaven."
+        elif not snapshot_matches:
+            message = "PDF-posnetek dostave se ne ujema z računom."
+        elif invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE and latest is None:
+            state = StanjeMesecneDostave.DELIVERY_NOT_PREPARED
+            message = "Dostava še ni pripravljena."
+        elif (
+            invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+            and latest.result == DeliveryAttempt.Result.PREPARED
+        ):
+            state = StanjeMesecneDostave.DELIVERY_PREPARED
+            message = "Prvi poskus dostave je pripravljen."
+        elif (
+            invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+            and latest.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+        ):
+            state = StanjeMesecneDostave.DELIVERY_IN_PROGRESS
+            message = "Oddaja sporočila je v teku."
+        elif invoice.status == Invoice.Status.POSLAN and has_sent_delivery_evidence(
+            invoice, latest
+        ):
+            state = StanjeMesecneDostave.DELIVERY_SENT
+            message = "Dostava je dokazano uspešna."
+        elif (
+            invoice.status == Invoice.Status.NAPAKA
+            and latest is not None
+            and latest.result == DeliveryAttempt.Result.CONFIRMED_FAILURE
+        ):
+            state = StanjeMesecneDostave.DELIVERY_FAILED
+            message = "Dostava je potrjeno neuspešna."
+        elif (
+            invoice.status == Invoice.Status.REZULTAT_NI_ZNAN
+            and latest is not None
+            and latest.result == DeliveryAttempt.Result.UNKNOWN
+        ):
+            state = StanjeMesecneDostave.DELIVERY_UNKNOWN
+            message = "Rezultat dostave ni znan."
+        else:
+            message = "Stanje računa in zadnji poskus dostave nista skladna."
+        if state == StanjeMesecneDostave.CONFLICT:
+            package_conflicts += 1
+        results.append(_rezultat_dostave_racuna(invoice, latest, state, message))
+
+    sent_count = sum(
+        item["delivery_state"] == StanjeMesecneDostave.DELIVERY_SENT
+        for item in results
+    )
+    failed_count = sum(
+        item["delivery_state"] == StanjeMesecneDostave.DELIVERY_FAILED
+        for item in results
+    )
+    unknown_count = sum(
+        item["delivery_state"] == StanjeMesecneDostave.DELIVERY_UNKNOWN
+        for item in results
+    )
+    pending_count = sum(
+        item["delivery_state"]
+        in {
+            StanjeMesecneDostave.DELIVERY_NOT_PREPARED,
+            StanjeMesecneDostave.DELIVERY_PREPARED,
+            StanjeMesecneDostave.DELIVERY_IN_PROGRESS,
+        }
+        for item in results
+    )
+    return {
+        "cycle_id": cycle.pk,
+        "complete": package_conflicts == 0 and sent_count == selected_count,
+        "selected_count": selected_count,
+        "sent_count": sent_count,
+        "failed_count": failed_count,
+        "unknown_count": unknown_count,
+        "pending_count": pending_count,
+        "conflict_count": package_conflicts,
+        "per_invoice": results,
+    }
+
+
+def _rezultat_dostave_racuna(invoice, latest, state, message):
+    return {
+        "invoice_id": invoice.pk,
+        "invoice_number": invoice.stevilka,
+        "company_id": invoice.company_id,
+        "issuer_label": invoice.izdajatelj_naziv,
+        "invoice_status": invoice.status,
+        "latest_attempt_id": latest.pk if latest else None,
+        "latest_attempt_sequence": latest.sequence if latest else None,
+        "latest_attempt_result": latest.result if latest else None,
+        "delivery_state": state,
+        "message": message,
+    }
+
+
+def stanje_dostave_mesecnega_cikla(cycle):
+    cycle = _preveri_aktivni_korak_6(cycle)
+    return _rezultat_mesecne_dostave(cycle)
+
+
+def pripravi_dostavo_mesecnega_cikla(cycle):
+    from delivery.services import prepare_attempt
+
+    cycle = _preveri_aktivni_korak_6(cycle)
+    initial = _rezultat_mesecne_dostave(cycle)
+    failures = {}
+    for item in initial["per_invoice"]:
+        if item["delivery_state"] != StanjeMesecneDostave.DELIVERY_NOT_PREPARED:
+            continue
+        try:
+            prepare_attempt(Invoice.objects.get(pk=item["invoice_id"]))
+        except Exception as exc:  # noqa: BLE001 - sibling isolation is required
+            failures[item["invoice_id"]] = _sporocilo_validacijske_napake(exc)
+    return _rezultat_mesecne_dostave(cycle, preparation_failures=failures)
 
 
 def _rezultat_mesecnega_arhiva(cycle, *, archive_failures=None):
@@ -3120,14 +3343,14 @@ def _rezultat_mesecnega_arhiva(cycle, *, archive_failures=None):
 
 
 def stanje_arhiviranja_mesecnega_cikla(cycle):
-    cycle = _preveri_korak_mesecnega_arhiva(cycle)
+    cycle = _preveri_aktivni_korak_6(cycle)
     return _rezultat_mesecnega_arhiva(cycle)
 
 
 def arhiviraj_poslane_racune_mesecnega_cikla(cycle, roots):
     from archive.services import ArchiveState, archive_pdf
 
-    cycle = _preveri_korak_mesecnega_arhiva(cycle)
+    cycle = _preveri_aktivni_korak_6(cycle)
     initial = _rezultat_mesecnega_arhiva(cycle)
     failures = {}
     for item in initial["per_invoice"]:
