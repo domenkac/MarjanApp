@@ -1,3 +1,4 @@
+import traceback
 from datetime import date
 from decimal import Decimal
 from email import policy
@@ -1453,14 +1454,22 @@ def test_smtp_config_is_strict(arguments):
 
 
 def test_load_password_wraps_backend_error_without_secret(monkeypatch):
+    fake_secret = "SUPER_SECRET_123"
+
     def fail(service, username):
-        raise RuntimeError("top-secret")
+        raise RuntimeError(f"backend failed with password {fake_secret}")
 
     monkeypatch.setattr("delivery.credentials.keyring.get_password", fail)
     with pytest.raises(CredentialError) as caught:
         load_password(KeyringCredentialRef("marjan", "smtp-user"))
-    assert caught.value.code == "KEYCHAIN_ERROR"
-    assert "top-secret" not in str(caught.value)
+    error = caught.value
+    assert error.code == "KEYCHAIN_ERROR"
+    assert str(error) == "Keychain credential lookup failed."
+    assert fake_secret not in str(error)
+    assert error.__cause__ is None
+    assert fake_secret not in "".join(
+        traceback.format_exception(type(error), error, error.__traceback__)
+    )
 
 
 def test_composition_does_not_open_network_connection(

@@ -31,10 +31,10 @@ def load_password(ref: KeyringCredentialRef) -> str:
         raise RuntimeError("Keyring lookup must run outside a database transaction.")
     try:
         password = keyring.get_password(ref.service_name, ref.username)
-    except Exception as exc:
+    except Exception:  # noqa: BLE001 -- backend failures must expose no details
         raise CredentialError(
             "KEYCHAIN_ERROR", "Keychain credential lookup failed."
-        ) from exc
+        ) from None
     if password is None:
         raise CredentialError(
             "KEYCHAIN_CREDENTIAL_MISSING", "Keychain credential is missing."
