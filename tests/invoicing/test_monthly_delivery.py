@@ -5,6 +5,7 @@ from django.db import connection
 
 from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
 from contracts.models import RecipientContact
+from delivery.credentials import KeyringCredentialRef
 from delivery.models import DeliveryAttempt
 from delivery.services import (
     mark_accepted,
@@ -13,13 +14,16 @@ from delivery.services import (
     mark_submission_started,
     resolve_unknown_as_sent,
 )
+from delivery.transport import SmtpConfig, SmtpSecurity
 from invoicing.models import Invoice, MonthlyCandidateReview, MonthlyCycle
 from invoicing.services import (
     NeveljavenPrehodMesecnegaCikla,
+    PosiljanjeMesecnegaRacuna,
     StanjeMesecneDostave,
     izdaj_zamrznjeni_mesecni_paket,
     nastavi_izbiro_kandidata,
     odpri_zakljucek_mesecnega_cikla,
+    poslji_dostavo_mesecnega_cikla,
     pripravi_dostavo_mesecnega_cikla,
     stanje_dostave_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
@@ -64,6 +68,22 @@ def _ready_step_6(data, settings, tmp_path):
 
 def _state(summary):
     return summary["per_invoice"][0]["delivery_state"]
+
+
+def _send_input(invoice_id, *, subject="Invoice", body="Attached."):
+    return PosiljanjeMesecnegaRacuna(
+        invoice_id=invoice_id,
+        smtp_config=SmtpConfig(
+            host="smtp.example.com",
+            port=587,
+            security=SmtpSecurity.STARTTLS,
+            timeout_seconds=10,
+            username="smtp-user",
+        ),
+        credential_ref=KeyringCredentialRef("marjan", "smtp-user"),
+        subject=subject,
+        body=body,
+    )
 
 
 def test_first_preparation_is_idempotent_and_keeps_cycle_open(
@@ -297,3 +317,290 @@ def test_wrong_step_rejects_before_preparation(ready_company, monkeypatch):
     with pytest.raises(NeveljavenPrehodMesecnegaCikla, match="koraku 6"):
         pripravi_dostavo_mesecnega_cikla(ready_company["cycle"])
     assert not calls and not DeliveryAttempt.objects.exists()
+
+
+def test_monthly_send_uses_persisted_result_without_outer_transaction(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    invoice = _ready_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    calls = []
+
+    def send(attempt, **kwargs):
+        calls.append((attempt.pk, connection.in_atomic_block, kwargs))
+        started = mark_submission_started(attempt)
+        return mark_accepted(started, code="SMTP_ACCEPTED", message="Accepted")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    summary = poslji_dostavo_mesecnega_cikla(
+        data["cycle"], [_send_input(invoice.pk)]
+    )
+
+    invoice.refresh_from_db()
+    attempt = DeliveryAttempt.objects.get(invoice=invoice)
+    cycle = MonthlyCycle.objects.get(pk=data["cycle"].pk)
+    assert len(calls) == 1 and calls[0][1] is False
+    assert invoice.status == Invoice.Status.POSLAN
+    assert (attempt.result, attempt.result_code) == (
+        DeliveryAttempt.Result.ACCEPTED,
+        "SMTP_ACCEPTED",
+    )
+    assert summary["complete"] and summary["sent_count"] == 1
+    assert _state(summary) == StanjeMesecneDostave.DELIVERY_SENT
+    assert summary["per_invoice"][0]["latest_attempt_result_code"] == "SMTP_ACCEPTED"
+    assert (cycle.status, cycle.trenutni_korak) == (
+        MonthlyCycle.Status.V_TEKU,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+
+
+def test_monthly_send_isolates_siblings_and_never_retries_terminal_results(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    second_lease = _add_lease(data, "P-B", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    for lease in (data["lease"], second_lease):
+        for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
+            RecipientContact.objects.create(
+                lease=lease,
+                email=f"lease-{lease.pk}-{role.lower()}@example.com",
+                vloga=role,
+                kanal=RecipientContact.Kanal.PDF,
+            )
+    _freeze_all_candidates(data)
+    invoices = _open_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    calls = []
+
+    def send(attempt, **kwargs):
+        calls.append(attempt.invoice_id)
+        started = mark_submission_started(attempt)
+        if attempt.invoice_id == invoices[0].pk:
+            return mark_accepted(started, code="SMTP_ACCEPTED")
+        return mark_confirmed_failure(started, code="SMTP_AUTH_FAILED")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    inputs = [_send_input(invoice.pk) for invoice in invoices]
+    first = poslji_dostavo_mesecnega_cikla(data["cycle"], inputs)
+    second = poslji_dostavo_mesecnega_cikla(data["cycle"], inputs)
+
+    states = {item["invoice_id"]: item["delivery_state"] for item in first["per_invoice"]}
+    assert states == {
+        invoices[0].pk: StanjeMesecneDostave.DELIVERY_SENT,
+        invoices[1].pk: StanjeMesecneDostave.DELIVERY_FAILED,
+    }
+    assert (first["sent_count"], first["failed_count"]) == (1, 1)
+    assert calls == [invoice.pk for invoice in invoices]
+    assert second["sent_count"] == 1 and second["failed_count"] == 1
+
+
+def test_monthly_send_missing_input_does_not_block_sibling(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    second_lease = _add_lease(data, "P-B", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    for lease in (data["lease"], second_lease):
+        for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
+            RecipientContact.objects.create(
+                lease=lease,
+                email=f"lease-{lease.pk}-{role.lower()}@example.com",
+                vloga=role,
+                kanal=RecipientContact.Kanal.PDF,
+            )
+    _freeze_all_candidates(data)
+    invoices = _open_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    calls = []
+
+    def send(attempt, **kwargs):
+        calls.append(attempt.invoice_id)
+        return mark_accepted(mark_submission_started(attempt), code="SMTP_ACCEPTED")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    summary = poslji_dostavo_mesecnega_cikla(
+        data["cycle"],
+        [_send_input(invoices[1].pk)],
+    )
+
+    states = {item["invoice_id"]: item for item in summary["per_invoice"]}
+    assert calls == [invoices[1].pk]
+    assert states[invoices[0].pk]["delivery_state"] == StanjeMesecneDostave.CONFLICT
+    assert "Manjka" in states[invoices[0].pk]["message"]
+    assert states[invoices[1].pk]["delivery_state"] == StanjeMesecneDostave.DELIVERY_SENT
+    assert summary["input_error_count"] == 1
+    assert DeliveryAttempt.objects.get(invoice=invoices[0]).result == DeliveryAttempt.Result.PREPARED
+
+
+@pytest.mark.parametrize("invalid_kind", ["unrelated", "duplicate", "object"])
+def test_monthly_send_rejects_invalid_input_set_before_any_send(
+    ready_company, settings, tmp_path, monkeypatch, invalid_kind
+):
+    data = ready_company
+    second_lease = _add_lease(data, "P-B", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    for lease in (data["lease"], second_lease):
+        for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
+            RecipientContact.objects.create(
+                lease=lease,
+                email=f"lease-{lease.pk}-{role.lower()}@example.com",
+                vloga=role,
+                kanal=RecipientContact.Kanal.PDF,
+            )
+    _freeze_all_candidates(data)
+    invoices = _open_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    inputs = [_send_input(invoice.pk) for invoice in invoices]
+    if invalid_kind == "unrelated":
+        unrelated = Invoice.objects.create(
+            company=data["company"],
+            document_type=Invoice.DocumentType.NP,
+            status=Invoice.Status.IZBRAN_ZA_POSILJANJE,
+            stevilka="NP-99999",
+            datum_izdaje=invoices[0].datum_izdaje,
+            obdobje_od=invoices[0].obdobje_od,
+            obdobje_do=invoices[0].obdobje_do,
+        )
+        inputs.append(_send_input(unrelated.pk))
+    elif invalid_kind == "duplicate":
+        inputs.append(_send_input(invoices[0].pk))
+    else:
+        inputs.append(object())
+    calls = []
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email", lambda *args, **kwargs: calls.append(args)
+    )
+
+    with pytest.raises(ValidationError, match="Vhodni nabor za pošiljanje ni veljaven"):
+        poslji_dostavo_mesecnega_cikla(data["cycle"], inputs)
+
+    assert not calls
+    assert set(
+        DeliveryAttempt.objects.values_list("result", flat=True)
+    ) == {DeliveryAttempt.Result.PREPARED}
+    assert set(Invoice.objects.filter(pk__in=[invoice.pk for invoice in invoices]).values_list("status", flat=True)) == {
+        Invoice.Status.IZBRAN_ZA_POSILJANJE
+    }
+    cycle = MonthlyCycle.objects.get(pk=data["cycle"].pk)
+    assert (cycle.status, cycle.trenutni_korak) == (
+        MonthlyCycle.Status.V_TEKU,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+
+
+def test_monthly_send_unknown_and_validation_failure_continue_and_are_not_retried(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    second_lease = _add_lease(data, "P-B", with_item=True)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    for lease in (data["lease"], second_lease):
+        for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
+            RecipientContact.objects.create(
+                lease=lease,
+                email=f"lease-{lease.pk}-{role.lower()}@example.com",
+                vloga=role,
+                kanal=RecipientContact.Kanal.PDF,
+            )
+    _freeze_all_candidates(data)
+    invoices = _open_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    calls = []
+
+    def send(attempt, **kwargs):
+        calls.append(attempt.invoice_id)
+        if attempt.invoice_id == invoices[0].pk:
+            raise ValidationError("Subject must not contain line breaks.")
+        return mark_result_unknown(
+            mark_submission_started(attempt), code="SMTP_RESULT_UNKNOWN"
+        )
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    inputs = [
+        _send_input(invoices[0].pk, subject="bad\nsubject"),
+        _send_input(invoices[1].pk),
+    ]
+    first = poslji_dostavo_mesecnega_cikla(data["cycle"], inputs)
+    second = poslji_dostavo_mesecnega_cikla(data["cycle"], inputs)
+
+    states = {item["invoice_id"]: item for item in first["per_invoice"]}
+    assert calls == [invoices[0].pk, invoices[1].pk, invoices[0].pk]
+    assert states[invoices[0].pk]["delivery_state"] == StanjeMesecneDostave.CONFLICT
+    assert states[invoices[1].pk]["delivery_state"] == StanjeMesecneDostave.DELIVERY_UNKNOWN
+    assert second["unknown_count"] == 1
+
+
+def test_monthly_send_runtime_exception_uses_transitioned_persisted_state(
+    ready_company, settings, tmp_path, monkeypatch
+):
+    data = ready_company
+    invoice = _ready_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    calls = []
+
+    def send(attempt, **kwargs):
+        calls.append(attempt.pk)
+        mark_submission_started(attempt)
+        raise RuntimeError("sensitive/internal backend failure")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    execution_inputs = [_send_input(invoice.pk)]
+
+    first = poslji_dostavo_mesecnega_cikla(data["cycle"], execution_inputs)
+    second = poslji_dostavo_mesecnega_cikla(data["cycle"], execution_inputs)
+
+    attempt = DeliveryAttempt.objects.get(invoice=invoice)
+    invoice.refresh_from_db()
+    cycle = MonthlyCycle.objects.get(pk=data["cycle"].pk)
+    assert calls == [attempt.pk]
+    assert _state(first) == StanjeMesecneDostave.DELIVERY_IN_PROGRESS
+    assert _state(second) == StanjeMesecneDostave.DELIVERY_IN_PROGRESS
+    assert attempt.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+    assert invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert "sensitive/internal backend failure" not in str(first)
+    assert "sensitive/internal backend failure" not in str(second)
+    assert (cycle.status, cycle.trenutni_korak) == (
+        MonthlyCycle.Status.V_TEKU,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+
+
+def test_monthly_send_rejects_wrong_step_before_domain_interaction(
+    ready_company, monkeypatch
+):
+    calls = []
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email", lambda *args, **kwargs: calls.append(args)
+    )
+    with pytest.raises(NeveljavenPrehodMesecnegaCikla, match="koraku 6"):
+        poslji_dostavo_mesecnega_cikla(ready_company["cycle"], [])
+    assert not calls
+
+
+def test_monthly_send_zero_selected_is_complete(ready_company, settings, tmp_path):
+    data = ready_company
+    _calculate(data)
+    data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
+    data["cycle"].save(update_fields=["trenutni_korak"])
+    uskladi_preglede_mesecnega_cikla(data["cycle"])
+    review = MonthlyCandidateReview.objects.get()
+    nastavi_izbiro_kandidata(
+        data["cycle"],
+        lease_id=review.lease_id,
+        candidate_fingerprint=review.candidate_fingerprint,
+        selected=False,
+        non_issue_reason="User decision",
+    )
+    zamrzni_paket_za_potrditev(data["cycle"])
+    _open_step_6(data, settings, tmp_path)
+
+    summary = poslji_dostavo_mesecnega_cikla(data["cycle"], [])
+
+    assert summary["complete"] and summary["selected_count"] == 0
+    assert summary["per_invoice"] == []

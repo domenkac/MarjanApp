@@ -43,6 +43,8 @@ from core.validators import (
     preveri_kodo_drzave,
     preveri_maticno_stevilko,
 )
+from delivery.credentials import KeyringCredentialRef
+from delivery.transport import SmtpConfig
 
 from .models import (
     Invoice,
@@ -101,6 +103,25 @@ class StanjeMesecneDostave(StrEnum):
     DELIVERY_FAILED = "DELIVERY_FAILED"
     DELIVERY_UNKNOWN = "DELIVERY_UNKNOWN"
     CONFLICT = "CONFLICT"
+
+
+@dataclass(frozen=True, slots=True)
+class PosiljanjeMesecnegaRacuna:
+    invoice_id: int
+    smtp_config: SmtpConfig
+    credential_ref: KeyringCredentialRef
+    subject: str
+    body: str
+
+    def __post_init__(self):
+        if isinstance(self.invoice_id, bool) or not isinstance(self.invoice_id, int):
+            raise TypeError("invoice_id must be an integer.")
+        if self.invoice_id < 1:
+            raise ValueError("invoice_id must be positive.")
+        if not isinstance(self.smtp_config, SmtpConfig):
+            raise TypeError("smtp_config must be a SmtpConfig value.")
+        if not isinstance(self.credential_ref, KeyringCredentialRef):
+            raise TypeError("credential_ref must be a KeyringCredentialRef value.")
 
 
 def normaliziraj_obdobje(obdobje: date) -> date:
@@ -3031,6 +3052,13 @@ def _rezultat_mesecne_dostave(cycle, *, preparation_failures=None):
                     "latest_attempt_id": None,
                     "latest_attempt_sequence": None,
                     "latest_attempt_result": None,
+                    "latest_attempt_result_code": "",
+                    "latest_attempt_message": "",
+                    "attempt_id": None,
+                    "attempt_sequence": None,
+                    "attempt_result": None,
+                    "result_code": "",
+                    "result_message": "",
                     "delivery_state": StanjeMesecneDostave.CONFLICT,
                     "message": materialization["error"]
                     or "Zamrznjeni kandidat nima pričakovanega materializiranega računa.",
@@ -3185,6 +3213,13 @@ def _rezultat_dostave_racuna(invoice, latest, state, message):
         "latest_attempt_id": latest.pk if latest else None,
         "latest_attempt_sequence": latest.sequence if latest else None,
         "latest_attempt_result": latest.result if latest else None,
+        "latest_attempt_result_code": latest.result_code if latest else "",
+        "latest_attempt_message": latest.message if latest else "",
+        "attempt_id": latest.pk if latest else None,
+        "attempt_sequence": latest.sequence if latest else None,
+        "attempt_result": latest.result if latest else None,
+        "result_code": latest.result_code if latest else "",
+        "result_message": latest.message if latest else "",
         "delivery_state": state,
         "message": message,
     }
@@ -3209,6 +3244,114 @@ def pripravi_dostavo_mesecnega_cikla(cycle):
         except Exception as exc:  # noqa: BLE001 - sibling isolation is required
             failures[item["invoice_id"]] = _sporocilo_validacijske_napake(exc)
     return _rezultat_mesecne_dostave(cycle, preparation_failures=failures)
+
+
+def poslji_dostavo_mesecnega_cikla(cycle, execution_inputs):
+    from delivery.models import DeliveryAttempt
+    from delivery.services import send_pdf_email
+
+    cycle = _preveri_aktivni_korak_6(cycle)
+    initial = _rezultat_mesecne_dostave(cycle)
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    selected_ids = set()
+    for identity in _identitete_zamrznjenega_mesecnega_paketa(cycle):
+        review = reviews.get(identity)
+        if review is None or not review.selected:
+            continue
+        materialization = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+        if materialization["state"] == "MATERIALIZED":
+            selected_ids.add(materialization["invoice"].pk)
+    inputs_by_invoice = {}
+    duplicate_ids = set()
+    input_errors = []
+    for execution_input in execution_inputs:
+        if not isinstance(execution_input, PosiljanjeMesecnegaRacuna):
+            input_errors.append(
+                {"invoice_id": None, "message": "Vhod za pošiljanje ni veljaven."}
+            )
+            continue
+        invoice_id = execution_input.invoice_id
+        if invoice_id not in selected_ids:
+            input_errors.append(
+                {
+                    "invoice_id": invoice_id,
+                    "message": "Račun ne pripada izbranemu zamrznjenemu paketu.",
+                }
+            )
+            continue
+        if invoice_id in inputs_by_invoice or invoice_id in duplicate_ids:
+            input_errors.append(
+                {
+                    "invoice_id": invoice_id,
+                    "message": "Za račun je podanih več vhodov za pošiljanje.",
+                }
+            )
+            inputs_by_invoice.pop(invoice_id, None)
+            duplicate_ids.add(invoice_id)
+            continue
+        inputs_by_invoice[invoice_id] = execution_input
+
+    if input_errors:
+        messages = " ".join(error["message"] for error in input_errors)
+        raise ValidationError(
+            f"Vhodni nabor za pošiljanje ni veljaven. {messages}"
+        )
+
+    failures = {}
+    for item in initial["per_invoice"]:
+        if item["delivery_state"] != StanjeMesecneDostave.DELIVERY_PREPARED:
+            continue
+        invoice_id = item["invoice_id"]
+        execution_input = inputs_by_invoice.get(invoice_id)
+        if execution_input is None:
+            failures[invoice_id] = "Manjka vhod za pošiljanje pripravljenega računa."
+            continue
+        try:
+            attempt = DeliveryAttempt.objects.get(pk=item["latest_attempt_id"])
+            if attempt.invoice_id != execution_input.invoice_id:
+                failures[invoice_id] = "Vhod za pošiljanje ne pripada obdelanemu računu."
+                continue
+            send_pdf_email(
+                attempt,
+                subject=execution_input.subject,
+                body=execution_input.body,
+                smtp_config=execution_input.smtp_config,
+                credential_ref=execution_input.credential_ref,
+            )
+        except ValidationError as exc:
+            failures[invoice_id] = _sporocilo_validacijske_napake(exc)
+        except Exception:  # noqa: BLE001 - isolate siblings without exposing secrets
+            failures[invoice_id] = "Pošiljanje dostave ni uspelo."
+
+    persisted = _rezultat_mesecne_dostave(cycle)
+    persisted_states = {
+        item["invoice_id"]: item["delivery_state"]
+        for item in persisted["per_invoice"]
+    }
+    pre_send_failures = {
+        invoice_id: message
+        for invoice_id, message in failures.items()
+        if persisted_states.get(invoice_id)
+        == StanjeMesecneDostave.DELIVERY_PREPARED
+    }
+    result = (
+        _rezultat_mesecne_dostave(
+            cycle, preparation_failures=pre_send_failures
+        )
+        if pre_send_failures
+        else persisted
+    )
+    missing_count = sum(
+        item["delivery_state"] == StanjeMesecneDostave.DELIVERY_PREPARED
+        and item["invoice_id"] not in inputs_by_invoice
+        for item in initial["per_invoice"]
+    )
+    result["input_errors"] = input_errors
+    result["input_error_count"] = len(input_errors) + missing_count
+    return result
 
 
 def _rezultat_mesecnega_arhiva(cycle, *, archive_failures=None):
