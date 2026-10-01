@@ -7,6 +7,7 @@ from django.core.exceptions import ValidationError
 from django.test import Client
 from django.utils import timezone
 
+from archive.configuration import ArchiveConfigurationError
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
 from delivery.credentials import KeyringCredentialRef
@@ -192,6 +193,48 @@ def _step6_cycle(data, settings, tmp_path):
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
     renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
     return odpri_zakljucek_mesecnega_cikla(data["cycle"])
+
+
+def _final_control_state(*, successful=True, category=None):
+    issue = []
+    if category:
+        issue = [{
+            "issuer_label": "Alfa d.o.o.",
+            "invoice_number": "NP-00001",
+            "category": category,
+            "message": "Konkretna težava.",
+            "delivery_result_code": "SMTP_REJECTED" if category == "DELIVERY_FAILED" else "",
+            "delivery_result_message": "Strežnik je zavrnil sporočilo." if category == "DELIVERY_FAILED" else "",
+        }]
+    return {
+        "delivery_complete": successful,
+        "archive_complete": successful,
+        "all_required_work_successful": successful,
+        "requires_attention": not successful,
+        "headline": "Mesečni postopek uspešno zaključen" if successful else "Mesečni postopek zahteva pozornost",
+        "prepared_count": 0 if successful else 3,
+        "sent_count": 0 if successful else 2,
+        "intentionally_unissued_count": 2,
+        "failed_count": 0 if successful else 1,
+        "unknown_count": 0,
+        "delivery_pending_count": 0,
+        "archive_verified_count": 0 if successful else 2,
+        "archive_pending_count": 0,
+        "conflict_count": 1 if category == "PACKAGE_CONFLICT" else 0,
+        "per_company": [{
+            "issuer_label": "Alfa d.o.o.",
+            "prepared_count": 0 if successful else 3,
+            "sent_count": 0 if successful else 2,
+            "intentionally_unissued_count": 2,
+            "archive_verified_count": 0 if successful else 2,
+            "failed_count": 0 if successful else 1,
+            "unknown_count": 0,
+            "delivery_pending_count": 0,
+            "archive_issue_count": 0 if successful else 1,
+            "requires_attention": not successful,
+        }],
+        "issues": issue,
+    }
 
 
 @pytest.mark.django_db
@@ -1147,6 +1190,141 @@ def test_korak_6_je_aktiven_in_ne_zakljucen(client):
     assert "Pošiljanje, preverjanje in arhiviranje še niso izvedeni" in content
     assert 'is-completed"><span>✓</span><strong>Potrditev paketa' in content
     assert 'is-active" aria-current="step"><span>6</span><strong>Zaključek ciklusa' in content
+
+
+@pytest.mark.django_db
+def test_step6_get_nalozi_uspesno_zakljucno_kontrolo_brez_mutacij(
+    client, monkeypatch
+):
+    cycle = MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    state = _final_control_state()
+    calls = []
+    monkeypatch.setattr("ui.views.resolve_archive_roots", lambda: object())
+    monkeypatch.setattr("ui.views.stanje_arhiviranja_mesecnega_cikla", lambda _cycle: {"per_invoice": []})
+    monkeypatch.setattr(
+        "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda received: calls.append(received.pk) or state,
+    )
+    forbidden = lambda *_args, **_kwargs: pytest.fail("GET ne sme izvajati operacij.")
+    monkeypatch.setattr("ui.views.poslji_dostavo_mesecnega_cikla", forbidden)
+    monkeypatch.setattr("ui.views.arhiviraj_poslane_racune_mesecnega_cikla", forbidden)
+    monkeypatch.setattr("ui.views.odpri_zakljucek_mesecnega_cikla", forbidden)
+
+    content = client.get("/mesecni-obracun/").content.decode()
+
+    cycle.refresh_from_db()
+    assert calls == [cycle.pk]
+    assert "Mesečni postopek uspešno zaključen" in content
+    assert "Zaključna kontrola je uspešna. Mesečni cikel še ni zaprt." in content
+    assert "Namenoma neizdani <strong>2</strong>" in content
+    assert "Alfa d.o.o." in content
+    assert (cycle.status, cycle.trenutni_korak) == (
+        MonthlyCycle.Status.V_TEKU,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    assert not DeliveryAttempt.objects.exists()
+
+
+@pytest.mark.django_db
+def test_step6_brez_nastavitev_ne_klice_zakljucne_kontrole(client, monkeypatch):
+    MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    monkeypatch.setattr(
+        "ui.views.resolve_archive_roots",
+        lambda: (_ for _ in ()).throw(ArchiveConfigurationError("Manjka.")),
+    )
+    monkeypatch.setattr(
+        "ui.views.stanje_arhiviranja_mesecnega_cikla",
+        lambda *_args: pytest.fail("Preverjanje arhiva mora biti preskočeno."),
+    )
+    monkeypatch.setattr(
+        "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda *_args: pytest.fail("Zaključna kontrola mora biti preskočena."),
+    )
+
+    content = client.get("/mesecni-obracun/").content.decode()
+
+    assert "Lokacije arhiva niso konfigurirane." in content
+    assert "Mesečni postopek" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("category", "label"),
+    [
+        ("DELIVERY_FAILED", "Dostava ni uspela"),
+        ("DELIVERY_UNKNOWN", "Rezultat dostave ni znan"),
+        ("ARCHIVE_NOT_STARTED", "Arhiviranje ni začeto"),
+        ("ARCHIVE_DIVERGENCE", "Neskladje arhiva"),
+        ("PACKAGE_CONFLICT", "Konflikt paketa"),
+    ],
+)
+def test_step6_prikaze_težavo_zakljucne_kontrole(
+    client, monkeypatch, category, label
+):
+    MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    monkeypatch.setattr("ui.views.resolve_archive_roots", lambda: object())
+    monkeypatch.setattr("ui.views.stanje_arhiviranja_mesecnega_cikla", lambda _cycle: {"per_invoice": []})
+    monkeypatch.setattr(
+        "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda _cycle: _final_control_state(successful=False, category=category),
+    )
+
+    content = client.get("/mesecni-obracun/").content.decode()
+
+    assert "Mesečni postopek zahteva pozornost" in content
+    assert label in content
+    assert "Konkretna težava." in content
+    assert "Namenoma neizdani <strong>2</strong>" in content
+    assert "Alfa d.o.o." in content
+
+
+@pytest.mark.django_db
+def test_step6_prikaze_stetja_podjetja_iz_rezultata_storitve(client, monkeypatch):
+    MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    state = _final_control_state(successful=False)
+    state["per_company"][0].update({
+        "prepared_count": 8,
+        "sent_count": 7,
+        "intentionally_unissued_count": 6,
+        "archive_verified_count": 5,
+        "failed_count": 4,
+        "unknown_count": 3,
+        "delivery_pending_count": 2,
+        "archive_issue_count": 1,
+    })
+    monkeypatch.setattr("ui.views.resolve_archive_roots", lambda: object())
+    monkeypatch.setattr(
+        "ui.views.stanje_arhiviranja_mesecnega_cikla",
+        lambda _cycle: {"per_invoice": []},
+    )
+    monkeypatch.setattr(
+        "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda _cycle: state,
+    )
+
+    content = client.get("/mesecni-obracun/").content.decode()
+
+    assert (
+        "<strong>Alfa d.o.o.</strong></td><td>8</td><td>7</td><td>6</td>"
+        "<td>5</td><td>4</td><td>3</td><td>2</td><td>1</td>"
+        "<td>Zahteva pozornost</td>"
+    ) in content
 
 
 @pytest.mark.django_db

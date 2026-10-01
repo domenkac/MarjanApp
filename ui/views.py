@@ -74,6 +74,7 @@ from invoicing.services import (
     so_vsi_uspesni_izracuni_aktivni,
     stanje_arhiviranja_mesecnega_cikla,
     stanje_dostave_mesecnega_cikla,
+    stanje_zakljucne_kontrole_mesecnega_cikla,
     stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
@@ -1336,6 +1337,7 @@ def mesecni_obracun(request):
     delivery_can_prepare = False
     delivery_can_send = False
     archive_state = None
+    final_control_state = None
     archive_configuration_valid = False
     archive_can_run = False
     if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
@@ -1357,6 +1359,7 @@ def mesecni_obracun(request):
             resolve_archive_roots()
             archive_configuration_valid = True
             archive_state = stanje_arhiviranja_mesecnega_cikla(cycle)
+            final_control_state = stanje_zakljucne_kontrole_mesecnega_cikla(cycle)
             archive_can_run = any(
                 item["delivery_status"] == Invoice.Status.POSLAN
                 and item["archive_state"] != "ARCHIVE_VERIFIED"
@@ -1394,6 +1397,7 @@ def mesecni_obracun(request):
             "delivery_can_prepare": delivery_can_prepare,
             "delivery_can_send": delivery_can_send,
             "archive_state": archive_state,
+            "final_control_state": final_control_state,
             "archive_configuration_valid": archive_configuration_valid,
             "archive_can_run": archive_can_run,
             "step4_complete": bool(
