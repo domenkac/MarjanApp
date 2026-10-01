@@ -41,6 +41,12 @@ from contracts.services import (
 from contracts.services import (
     ponovno_aktiviraj_poslovni_zapis as ponovno_aktiviraj_pogodbeni_zapis,
 )
+from delivery.configuration import (
+    SmtpConfigurationError,
+    resolve_keyring_credential_ref,
+    resolve_smtp_config,
+)
+from delivery.transport import test_smtp_connection as check_smtp_connection
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
@@ -685,6 +691,12 @@ def _company_detail_context(
 ):
     ddv_state = veljavna_potrditev_ddv(company)
     sample_state = veljavna_potrditev_vzorca(company)
+    try:
+        smtp_config = resolve_smtp_config(company)
+        smtp_configuration_error = None
+    except SmtpConfigurationError as error:
+        smtp_config = None
+        smtp_configuration_error = str(error)
     return _settings_context(
         company=company,
         form=form or CompanyForm(instance=company),
@@ -701,6 +713,53 @@ def _company_detail_context(
             confirmation_marker, ddv_state, sample_state
         ),
         action_errors=action_errors,
+        smtp_config=smtp_config,
+        smtp_configuration_error=smtp_configuration_error,
+    )
+
+
+_SMTP_RESULT_MESSAGES = {
+    "KEYCHAIN_CREDENTIAL_MISSING": "Geslo SMTP ni shranjeno v Keychainu.",
+    "KEYCHAIN_ERROR": "Dostop do Keychaina ni uspel.",
+    "SMTP_AUTH_FAILED": "Prijava v SMTP ni uspela.",
+    "SMTP_CONNECT_FAILED": "SMTP strežnik ni dosegljiv.",
+    "SMTP_TIMEOUT": "Povezava s SMTP strežnikom je potekla.",
+    "SMTP_CONNECTION_LOST": "Povezava s SMTP strežnikom je bila prekinjena.",
+}
+
+
+@require_POST
+def test_smtp_connection(request, company_id):
+    company = get_object_or_404(Company, pk=company_id)
+    try:
+        config = resolve_smtp_config(company)
+        credential_ref = resolve_keyring_credential_ref(company)
+    except SmtpConfigurationError as error:
+        return render(
+            request,
+            "ui/podjetje_detail.html",
+            _company_detail_context(company, action_errors=[str(error)]),
+            status=400,
+        )
+
+    result = check_smtp_connection(config, credential_ref)
+    return render(
+        request,
+        "ui/podjetje_detail.html",
+        _company_detail_context(
+            company,
+            action_errors=None
+            if result.success
+            else [
+                _SMTP_RESULT_MESSAGES.get(
+                    result.code, "Preverjanje SMTP povezave ni uspelo."
+                )
+            ],
+        )
+        | {
+            "smtp_test_success": result.success,
+        },
+        status=200 if result.success else 502,
     )
 
 

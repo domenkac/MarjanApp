@@ -15,6 +15,13 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "1").strip().lower() in {
 }
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
 
+# Empty defaults fail closed in delivery.configuration before any network access.
+MARJAN_SMTP_HOST = os.environ.get("MARJAN_SMTP_HOST", "")
+MARJAN_SMTP_PORT = os.environ.get("MARJAN_SMTP_PORT", "")
+MARJAN_SMTP_SECURITY = os.environ.get("MARJAN_SMTP_SECURITY", "")
+MARJAN_SMTP_TIMEOUT_SECONDS = os.environ.get("MARJAN_SMTP_TIMEOUT_SECONDS", "")
+MARJAN_KEYRING_SERVICE = os.environ.get("MARJAN_KEYRING_SERVICE", "")
+
 INSTALLED_APPS = [
     "django.contrib.contenttypes",
     "django.contrib.staticfiles",

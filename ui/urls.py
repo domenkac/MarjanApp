@@ -52,6 +52,7 @@ from .views import (
     storitev_detail,
     storitev_nova,
     storitve,
+    test_smtp_connection,
 )
 
 app_name = "ui"
@@ -99,6 +100,7 @@ urlpatterns = [
     path("nastavitve/storitve/<int:item_id>/aktiviraj/", storitev_aktiviraj, name="storitev_aktiviraj"),
     path("nastavitve/podjetja/novo/", podjetje_novo, name="podjetje_novo"),
     path("nastavitve/podjetja/<int:company_id>/", podjetje_detail, name="podjetje_detail"),
+    path("nastavitve/podjetja/<int:company_id>/test-smtp/", test_smtp_connection, name="test_smtp_connection"),
     path("nastavitve/podjetja/<int:company_id>/potrdi-ddv/", podjetje_potrdi_ddv, name="podjetje_potrdi_ddv"),
     path("nastavitve/podjetja/<int:company_id>/potrdi-vzorec/", podjetje_potrdi_vzorec, name="podjetje_potrdi_vzorec"),
     path("nastavitve/podjetja/<int:company_id>/vzorec/<int:lease_id>/pdf/", podjetje_vzorec_pdf, name="podjetje_vzorec_pdf"),
