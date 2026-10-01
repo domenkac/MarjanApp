@@ -6,10 +6,11 @@ from django.test import Client
 from django.urls import NoReverseMatch, reverse
 
 from catalogs.models import ServiceCatalogItem, VatRegime
-from companies.models import Company
+from companies.models import Company, Signatory
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import MonthlyBatch
-from invoicing.services import shrani_prvi_korak
+from invoicing.services import izracunaj_kandidata, shrani_prvi_korak
 
 
 def vat_data(**changes):
@@ -59,7 +60,7 @@ def test_settings_navigation_and_empty_catalog_lists(client):
 @pytest.mark.django_db
 def test_vat_list_orders_active_first_and_form_hides_internal_fields(client):
     create_vat(sifra="NEAKT", naziv="Neaktiven", aktiven=False)
-    create_vat(sifra="AKT", naziv="Aktiven")
+    active = create_vat(sifra="AKT", naziv="Aktiven")
 
     content = client.get("/nastavitve/ddv/").content.decode()
     assert content.index("Aktiven") < content.index("Neaktiven")
@@ -75,9 +76,32 @@ def test_vat_list_orders_active_first_and_form_hides_internal_fields(client):
     assert 'name="eslog_koda"' not in form
     assert 'type="date"' in form
 
+    edit_form = client.get(f"/nastavitve/ddv/{active.pk}/").content.decode()
+    assert 'name="eslog_koda"' not in edit_form
+
 
 @pytest.mark.django_db
-def test_vat_create_edit_dates_and_hidden_eslog_value(client):
+@pytest.mark.parametrize(
+    ("nacin", "koda", "klavzula"),
+    [
+        (VatRegime.NacinObracuna.OBDAVCENO, "S", ""),
+        (VatRegime.NacinObracuna.OPROSCENO, "E", "Oprostitev"),
+        (VatRegime.NacinObracuna.OBRNJENA_DAVCNA, "AE", "Obrnjena obveznost"),
+        (VatRegime.NacinObracuna.NI_PREDMET, "O", ""),
+    ],
+)
+def test_vat_create_sets_eslog_code(client, nacin, koda, klavzula):
+    response = client.post(
+        "/nastavitve/ddv/nov/",
+        vat_data(nacin_obracuna=nacin, stopnja="0.00", klavzula=klavzula),
+    )
+
+    assert response.status_code == 302
+    assert VatRegime.objects.get().eslog_koda == koda
+
+
+@pytest.mark.django_db
+def test_vat_create_edit_dates_and_eslog_code(client):
     response = client.post(
         "/nastavitve/ddv/nov/",
         vat_data(velja_do="2027-12-31", zahteva_referenco="on"),
@@ -88,19 +112,62 @@ def test_vat_create_edit_dates_and_hidden_eslog_value(client):
     assert regime.velja_od == date(2026, 1, 1)
     assert regime.velja_do == date(2027, 12, 31)
     assert regime.zahteva_referenco is True
+    assert regime.eslog_koda == "S"
     assert regime.naziv in client.get("/nastavitve/ddv/").content.decode()
 
-    regime.eslog_koda = "S"
-    regime.save(update_fields=["eslog_koda"])
     edit = client.post(
         f"/nastavitve/ddv/{regime.pk}/",
-        vat_data(naziv="Spremenjeni DDV", velja_do="2028-06-30"),
+        vat_data(
+            naziv="Spremenjeni DDV",
+            nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO,
+            stopnja="0.00",
+            klavzula="Oprostitev",
+            velja_do="2028-06-30",
+        ),
     )
     regime.refresh_from_db()
     assert edit.status_code == 302
     assert regime.naziv == "Spremenjeni DDV"
     assert regime.velja_do == date(2028, 6, 30)
+    assert regime.eslog_koda == "E"
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("stara_koda", ["", "E"])
+def test_vat_edit_repairs_missing_or_wrong_eslog_code(client, stara_koda):
+    regime = create_vat(eslog_koda=stara_koda)
+
+    response = client.post(
+        f"/nastavitve/ddv/{regime.pk}/",
+        vat_data(),
+    )
+
+    regime.refresh_from_db()
+    assert response.status_code == 302
     assert regime.eslog_koda == "S"
+
+
+@pytest.mark.django_db
+def test_ui_created_taxable_vat_works_in_candidate_path(client):
+    assert client.post("/nastavitve/ddv/nov/", vat_data()).status_code == 302
+    regime = VatRegime.objects.get()
+    item = create_active_lease_item(regime)
+    company = item.lease.unit.property.company
+    Signatory.objects.create(
+        company=company,
+        ime_priimek="Ana Podpisnica",
+        podpis_slika="podpis.png",
+        velja_od=date(2020, 1, 1),
+    )
+    potrdi_ddv_nastavitve(company)
+
+    candidate = izracunaj_kandidata(
+        item.lease, date(2026, 1, 1), date(2026, 1, 31), date(2026, 2, 1)
+    )
+
+    assert candidate.se_izda is True
+    assert candidate.razlog_neizdaje is None
+    assert candidate.vrstice[0].ddv_eslog_koda == "S"
 
 
 @pytest.mark.django_db

@@ -56,6 +56,14 @@ class VatRegime(models.Model):
                     )
 
 
+ESLOG_KODE_DDV = {
+    VatRegime.NacinObracuna.OBDAVCENO: "S",
+    VatRegime.NacinObracuna.OPROSCENO: "E",
+    VatRegime.NacinObracuna.OBRNJENA_DAVCNA: "AE",
+    VatRegime.NacinObracuna.NI_PREDMET: "O",
+}
+
+
 class ServiceCatalogItem(models.Model):
     naziv = models.CharField()
     privzeta_cena = models.DecimalField(

@@ -16,7 +16,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
-from catalogs.models import VatRegime
+from catalogs.models import ESLOG_KODE_DDV, VatRegime
 from companies.models import Company, NumberSequence
 from companies.services import (
     dodeli_naslednjo_stevilko,
@@ -53,13 +53,6 @@ from .models import (
     MonthlyCandidateReview,
     MonthlyCycle,
 )
-
-ESLOG_KODE_DDV = {
-    VatRegime.NacinObracuna.OBDAVCENO: "S",
-    VatRegime.NacinObracuna.OPROSCENO: "E",
-    VatRegime.NacinObracuna.OBRNJENA_DAVCNA: "AE",
-    VatRegime.NacinObracuna.NI_PREDMET: "O",
-}
 
 
 class MesecniCikelNapaka(Exception):

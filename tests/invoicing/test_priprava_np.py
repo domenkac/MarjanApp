@@ -411,6 +411,19 @@ def test_potrditev_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
     assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
 
 
+@pytest.mark.parametrize("koda", ["", "E"])
+def test_priprava_zavrne_manjkajoco_ali_napacno_kodo_v_ddv_rezimu(
+    pogodba, koda
+):
+    postavka = dodaj_postavko(pogodba)
+    VatRegime.objects.filter(pk=postavka.vat_regime_id).update(eslog_koda=koda)
+
+    with pytest.raises(ValueError, match="eSLOG kod"):
+        pripravi(pogodba)
+
+    assert not Invoice.objects.exists()
+
+
 def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
     pogodba.tenant.davcna_stevilka = ""

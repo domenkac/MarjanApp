@@ -4,7 +4,7 @@ from datetime import date
 from django import forms
 from django.utils import timezone
 
-from catalogs.models import ServiceCatalogItem, VatRegime
+from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 
@@ -342,6 +342,12 @@ class VatRegimeForm(forms.ModelForm):
             "velja_do": forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
             "klavzula": forms.Textarea(attrs={"rows": 3}),
         }
+
+    def save(self, commit=True):
+        self.instance.eslog_koda = ESLOG_KODE_DDV[
+            self.cleaned_data["nacin_obracuna"]
+        ]
+        return super().save(commit=commit)
 
 
 class ServiceCatalogItemForm(forms.ModelForm):
