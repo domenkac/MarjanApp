@@ -21,9 +21,11 @@ from companies.services import (
     AssetPotrditveSpremenjen,
     odloci_o_fizicnem_izbrisu,
     potrdi_ddv_nastavitve,
-    potrdi_vzorec_podjetja,
     veljavna_potrditev_ddv,
     veljavna_potrditev_vzorca,
+)
+from companies.services import (
+    potrdi_vzorec_podjetja as _potrdi_vzorec_podjetja,
 )
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.services import odloci_o_fizicnem_izbrisu as odloci_o_izbrisu_pogodbe
@@ -32,6 +34,13 @@ from invoicing.models import Invoice, InvoiceLine
 PNG_1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 )
+
+
+def potrdi_vzorec_podjetja(company, lease):
+    potrdi_ddv_nastavitve(company)
+    return _potrdi_vzorec_podjetja(company, lease)
+
+
 PNG_2 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGNgYPj/HwADAgH/5ncLrgAAAABJRU5ErkJggg=="
 )

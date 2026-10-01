@@ -4,7 +4,9 @@ from decimal import Decimal
 import pytest
 from django.core.exceptions import ValidationError
 
-from companies.models import NumberSequence, Signatory
+from catalogs.models import VatRegime
+from companies.models import NumberSequence, Signatory, VatSettingsConfirmation
+from companies.services import potrdi_ddv_nastavitve, veljavna_potrditev_ddv
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     izracunaj_kandidata,
@@ -12,6 +14,7 @@ from invoicing.services import (
     preveri_predpogoje_podjetja,
     pripravi_osnutek_np,
 )
+from rendering.contexts import pripravi_vzorcni_pdf_context
 from tests.invoicing.test_priprava_np import dodaj_postavko
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
@@ -32,10 +35,10 @@ def _izdaj_avgust(pogodba):
 
 def test_predpogoji_podjetja_so_strukturirani(pogodba):
     company = pogodba.unit.property.company
+    potrdi_ddv_nastavitve(company)
     assert preveri_predpogoje_podjetja(company, DATUM_IZDAJE) == []
 
-    company.ddv_razporeditev_potrjena = False
-    company.save(update_fields=["ddv_razporeditev_potrjena"])
+    VatSettingsConfirmation.objects.filter(company=company).delete()
     Signatory.objects.filter(company=company).delete()
 
     blokade = preveri_predpogoje_podjetja(company, DATUM_IZDAJE)
@@ -49,8 +52,7 @@ def test_kandidat_vrne_predpogoje_brez_izdaje(pogodba, razlog):
     company = pogodba.unit.property.company
     dodaj_postavko(pogodba)
     if razlog == "ddv":
-        company.ddv_razporeditev_potrjena = False
-        company.save(update_fields=["ddv_razporeditev_potrjena"])
+        VatSettingsConfirmation.objects.filter(company=company).delete()
         koda = "DDV_NEPOTRJEN"
     elif razlog == "podpisnik":
         Signatory.objects.filter(company=company).delete()
@@ -70,6 +72,66 @@ def test_kandidat_vrne_predpogoje_brez_izdaje(pogodba, razlog):
     assert koda in {izjema.koda for izjema in kandidat.izjeme}
     assert not Invoice.objects.exists()
     assert not NumberSequence.objects.exists()
+
+
+def test_veljavna_ddv_potrditev_omogoci_kandidata_in_vzorec_ob_legacy_false(
+    pogodba,
+):
+    company = pogodba.unit.property.company
+    dodaj_postavko(pogodba)
+    company.ddv_razporeditev_potrjena = False
+    company.save(update_fields=["ddv_razporeditev_potrjena"])
+
+    blokade = preveri_predpogoje_podjetja(company, DATUM_IZDAJE)
+    kandidat = izracunaj_kandidata(
+        pogodba, SEPTEMBER_OD, SEPTEMBER_DO, DATUM_IZDAJE
+    )
+    context = pripravi_vzorcni_pdf_context(
+        pogodba,
+        datum_izdaje=DATUM_IZDAJE,
+        obdobje_od=SEPTEMBER_OD,
+        obdobje_do=SEPTEMBER_DO,
+    )
+
+    assert "DDV_NEPOTRJEN" not in {blokada.koda for blokada in blokade}
+    assert kandidat.se_izda is True
+    assert context.oznaka_pogodbe == pogodba.oznaka_pogodbe
+    company.refresh_from_db()
+    assert company.ddv_razporeditev_potrjena is False
+
+
+def test_legacy_true_brez_ddv_potrditve_ostane_blokiran(pogodba):
+    company = pogodba.unit.property.company
+    company.ddv_razporeditev_potrjena = True
+    company.save(update_fields=["ddv_razporeditev_potrjena"])
+
+    assert veljavna_potrditev_ddv(company).stanje == "missing"
+    assert "DDV_NEPOTRJEN" in {
+        blokada.koda
+        for blokada in preveri_predpogoje_podjetja(company, DATUM_IZDAJE)
+    }
+
+
+def test_zastarela_ddv_potrditev_blokira_predpogoje(pogodba):
+    company = pogodba.unit.property.company
+    postavka = dodaj_postavko(pogodba)
+    drug_rezim = VatRegime.objects.create(
+        sifra="R-drugi",
+        naziv="DDV 9,5",
+        nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
+        stopnja=Decimal("9.50"),
+        rekapitulacijska_skupina="DDV 9,5 %",
+        eslog_koda="S",
+        velja_od=date(2026, 1, 1),
+    )
+    postavka.vat_regime = drug_rezim
+    postavka.save(update_fields=["vat_regime"])
+
+    assert veljavna_potrditev_ddv(company).stanje == "stale"
+    assert "DDV_NEPOTRJEN" in {
+        blokada.koda
+        for blokada in preveri_predpogoje_podjetja(company, DATUM_IZDAJE)
+    }
 
 
 def test_brez_aktivnih_postavk_ne_ustvari_praznega_racuna(pogodba):

@@ -9,6 +9,7 @@ from django.core.files.storage import default_storage
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
@@ -253,6 +254,7 @@ def izdani_racun(db, tmp_path, settings):
         znesek_neto_mesecno=Decimal("100.00"),
         vat_regime=regime,
     )
+    potrdi_ddv_nastavitve(company)
     invoice = pripravi_osnutek_np(
         lease, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
     ).invoice

@@ -3,6 +3,7 @@ from decimal import Decimal
 
 from django.contrib.contenttypes.models import ContentType
 
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import IndexationEvent, LeaseItem
 from contracts.services import rocno_popravi_postavko
 from core.models import AuditLogEntry
@@ -219,6 +220,7 @@ def test_sprememba_ddv_pojasni_razliko(pogodba):
     racun(pogodba, 1, potrdi=True)
     item.vat_regime.stopnja = Decimal("9.50")
     item.vat_regime.save(update_fields=["stopnja"])
+    potrdi_ddv_nastavitve(pogodba.unit.property.company)
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
     assert [(r.koda, r.lease_item_id) for r in rezultat.razlage] == [

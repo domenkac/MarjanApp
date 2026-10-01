@@ -8,6 +8,7 @@ from PIL import Image, ImageDraw
 
 from catalogs.models import VatRegime
 from companies.models import Signatory
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Unit
 from invoicing.models import Invoice, InvoiceLine
 from rendering.contexts import pripravi_vzorcni_pdf_context
@@ -47,6 +48,7 @@ def test_sample_pdf_uses_production_template_without_db_side_effects(
         znesek_neto_mesecno=Decimal("30.00"),
         vat_regime=ni_predmet,
     )
+    potrdi_ddv_nastavitve(lease.unit.property.company)
     stanje = (Invoice.objects.count(), InvoiceLine.objects.count())
 
     rezultat = render_sample_pdf(
@@ -143,6 +145,7 @@ def test_vzorca_podjetij_z_enakim_slugom_se_ne_prepiseta(
             if polje.name not in {"id", "lease"}
         }
         LeaseItem.objects.create(lease=druga_pogodba, **podatki)
+    potrdi_ddv_nastavitve(podjetje)
     argumenti = {
         "datum_izdaje": date(2026, 9, 1),
         "obdobje_od": date(2026, 9, 1),

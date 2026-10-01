@@ -8,6 +8,7 @@ from django.db import transaction
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing import services as invoicing_services
 from invoicing.models import Invoice, InvoiceLine
@@ -80,7 +81,13 @@ def pogodba(db, tmp_path, settings):
 
 
 def dodaj_postavko(
-    pogodba, *, naziv="Najemnina", znesek="100.00", nacin="OBDAVCENO", **spremembe
+    pogodba,
+    *,
+    naziv="Najemnina",
+    znesek="100.00",
+    nacin="OBDAVCENO",
+    potrdi_ddv=True,
+    **spremembe,
 ):
     eslog_kode = {
         "OBDAVCENO": "S",
@@ -98,13 +105,16 @@ def dodaj_postavko(
         eslog_koda=eslog_kode[nacin],
         velja_od=date(2026, 1, 1),
     )
-    return LeaseItem.objects.create(
+    postavka = LeaseItem.objects.create(
         lease=pogodba,
         naziv_postavke=naziv,
         znesek_neto_mesecno=Decimal(znesek),
         vat_regime=rezim,
         **spremembe,
     )
+    if potrdi_ddv:
+        potrdi_ddv_nastavitve(pogodba.unit.property.company)
+    return postavka
 
 
 def pripravi(pogodba):
@@ -269,8 +279,7 @@ def test_predpogoji_blokirajo_pripravo(pogodba, razlog):
             velja_do=date(2026, 9, 30),
         )
     else:
-        company.ddv_razporeditev_potrjena = False
-        company.save()
+        company.vat_settings_confirmations.all().delete()
     with pytest.raises(ValueError):
         pripravi(pogodba)
     assert not Invoice.objects.exists()

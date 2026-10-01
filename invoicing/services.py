@@ -926,7 +926,7 @@ class RacunKandidat:
 
 def preveri_predpogoje_podjetja(company: Company, datum_izdaje: date) -> list[Blokada]:
     blokade = []
-    if not company.ddv_razporeditev_potrjena:
+    if veljavna_potrditev_ddv(company).stanje != "valid":
         blokade.append(
             Blokada(
                 "DDV_NEPOTRJEN", "DDV razporeditev enot še ni potrjena — Nastavitve"

@@ -96,7 +96,9 @@ def nov_dogodek(postavka):
 
 
 def test_neuporabljeni_zapisi_in_minimalni_audit(pogodba):
-    postavka = dodaj_postavko(pogodba, naziv="Zasebna najemnina")
+    postavka = dodaj_postavko(
+        pogodba, naziv="Zasebna najemnina", potrdi_ddv=False
+    )
     zapisi = (*veriga(pogodba), postavka)
     podjetje = zapisi[0]
     Signatory.objects.filter(company=podjetje).delete()

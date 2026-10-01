@@ -182,6 +182,7 @@ def test_one_selected_lease_drives_preview_and_confirmation(
         znesek_neto_mesecno=Decimal("200.00"),
         vat_regime=data.regime,
     )
+    potrdi_ddv_nastavitve(data.company)
 
     response = client.get(detail_url(data), {"vzorec_pogodba": lease_b.pk})
     content = response.content.decode()
@@ -224,6 +225,7 @@ def test_unknown_or_missing_success_marker_shows_no_message(
 
 def test_sample_post_is_immutable_safe_and_errors_are_controlled(client, confirmation_ui_data):
     data = confirmation_ui_data
+    potrdi_ddv_nastavitve(data.company)
     url = f"{detail_url(data)}potrdi-vzorec/"
     assert client.get(url).status_code == 405
     counts = (
