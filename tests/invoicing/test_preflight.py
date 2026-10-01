@@ -139,6 +139,23 @@ def ready_company(db, settings, tmp_path):
     }
 
 
+@pytest.fixture
+def potrdi_septembrski_vzorec(monkeypatch):
+    from companies import services as company_services
+
+    class DateMeta(type):
+        def __instancecheck__(cls, instance):
+            return isinstance(instance, date)
+
+    class SeptemberDate(date, metaclass=DateMeta):
+        @classmethod
+        def today(cls):
+            return date(2026, 9, 10)
+
+    monkeypatch.setattr(company_services, "date", SeptemberDate)
+    return potrdi_vzorec_podjetja
+
+
 def _codes(batch):
     batch.refresh_from_db()
     return {issue["code"] for issue in batch.preflight_issues}
@@ -636,9 +653,11 @@ def test_amount_master_data_and_vat_change_exceptions(ready_company):
         ),
     ],
 )
-def test_contract_lifecycle_exceptions(ready_company, updates, expected):
+def test_contract_lifecycle_exceptions(
+    ready_company, potrdi_septembrski_vzorec, updates, expected
+):
     Lease.objects.filter(pk=ready_company["lease"].pk).update(**updates)
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    potrdi_septembrski_vzorec(ready_company["company"], ready_company["lease"])
 
     assert expected in _candidate_codes(_calculate(ready_company)[0])
 
@@ -1513,14 +1532,16 @@ def test_lease_month_scope(ready_company, start, end, included):
     assert ("POSTAVKA_NEVELJAVNA" in _codes(data["batch"])) is included
 
 
-def test_proportional_and_expiry_are_warnings_only(ready_company):
+def test_proportional_and_expiry_are_warnings_only(
+    ready_company, potrdi_septembrski_vzorec
+):
     data = ready_company
     Lease.objects.filter(pk=data["lease"].pk).update(
         datum_zacetka=date(2026, 9, 10),
         tip_trajanja=Lease.TipTrajanja.DOLOCEN_CAS,
         datum_konca=date(2026, 9, 30),
     )
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    potrdi_septembrski_vzorec(data["company"], data["lease"])
 
     preveri_predhodno_kontrolo(data["cycle"])
     data["batch"].refresh_from_db()
@@ -2100,8 +2121,11 @@ def test_korak_5_v_6_zahteva_namenski_preverjen_prehod(ready_company):
         odpri_zakljucek_mesecnega_cikla(data["cycle"])
 
 
-def test_fake_pdf_metapodatki_brez_dokazila_ne_odprejo_koraka_6(ready_company):
+def test_fake_pdf_metapodatki_brez_dokazila_ne_odprejo_koraka_6(
+    ready_company, settings, tmp_path
+):
     data = ready_company
+    settings.RENDERING_ROOT = tmp_path / "rendered"
     _freeze_ready_package(data)
     invoice = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["invoice"]
     Invoice.objects.filter(pk=invoice.pk).update(
