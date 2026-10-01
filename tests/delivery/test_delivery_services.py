@@ -244,6 +244,72 @@ def test_prepare_stores_sender_recipients_and_pdf_without_secret(issued_invoice)
         prepare_attempt(issued_invoice)
 
 
+def test_attempt_model_allows_empty_optional_recipient_lists(issued_invoice):
+    attempt = DeliveryAttempt(
+        invoice=issued_invoice,
+        sequence=1,
+        sender="sender@example.com",
+        recipients_to=["to@example.com"],
+        recipients_cc=[],
+        recipients_bcc=[],
+        pdf_path=issued_invoice.rendered_pdf_path,
+        pdf_checksum=issued_invoice.checksum,
+    )
+
+    attempt.full_clean()
+
+
+def test_prepare_allows_no_cc_contact_and_keeps_accountant_bcc(issued_invoice):
+    RecipientContact.objects.filter(
+        lease=issued_invoice.lease,
+        vloga=RecipientContact.Vloga.CC,
+    ).delete()
+
+    attempt = prepare_attempt(issued_invoice)
+
+    assert attempt.recipients_to == ["to@example.com"]
+    assert attempt.recipients_cc == []
+    assert attempt.recipients_bcc == ["accountant@example.com"]
+
+
+def test_prepare_rejects_missing_to_with_explicit_error(issued_invoice):
+    RecipientContact.objects.filter(
+        lease=issued_invoice.lease,
+        vloga=RecipientContact.Vloga.TO,
+    ).delete()
+
+    with pytest.raises(ValidationError, match="At least one To recipient is required"):
+        prepare_attempt(issued_invoice)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("recipients_to", "to@example.com"),
+        ("recipients_to", [""]),
+        ("recipients_cc", "cc@example.com"),
+        ("recipients_cc", [""]),
+        ("recipients_bcc", "bcc@example.com"),
+        ("recipients_bcc", [""]),
+    ],
+)
+def test_attempt_model_rejects_malformed_recipient_lists(issued_invoice, field, value):
+    attempt = DeliveryAttempt(
+        invoice=issued_invoice,
+        sequence=1,
+        sender="sender@example.com",
+        recipients_to=["to@example.com"],
+        recipients_cc=[],
+        recipients_bcc=[],
+        pdf_path=issued_invoice.rendered_pdf_path,
+        pdf_checksum=issued_invoice.checksum,
+    )
+    setattr(attempt, field, value)
+
+    with pytest.raises(ValidationError, match="list of non-empty email strings"):
+        attempt.full_clean()
+
+
 @pytest.mark.parametrize(
     ("status", "path", "checksum"),
     [

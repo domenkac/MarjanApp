@@ -20,9 +20,9 @@ class DeliveryAttempt(models.Model):
     submission_started_at = models.DateTimeField(null=True, blank=True)
     completed_at = models.DateTimeField(null=True, blank=True)
     sender = models.EmailField()
-    recipients_to = models.JSONField(default=list)
-    recipients_cc = models.JSONField(default=list)
-    recipients_bcc = models.JSONField(default=list)
+    recipients_to = models.JSONField(default=list, blank=True)
+    recipients_cc = models.JSONField(default=list, blank=True)
+    recipients_bcc = models.JSONField(default=list, blank=True)
     pdf_path = models.CharField()
     pdf_checksum = models.CharField(max_length=64)
     result = models.CharField(
@@ -52,6 +52,8 @@ class DeliveryAttempt(models.Model):
     def clean(self):
         super().clean()
         errors = {}
+        if not self.recipients_to:
+            errors["recipients_to"] = "At least one To recipient is required."
         for field in ("recipients_to", "recipients_cc", "recipients_bcc"):
             value = getattr(self, field)
             if not isinstance(value, list) or any(

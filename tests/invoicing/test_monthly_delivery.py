@@ -56,12 +56,6 @@ def _ready_step_6(data, settings, tmp_path):
         vloga=RecipientContact.Vloga.TO,
         kanal=RecipientContact.Kanal.PDF,
     )
-    RecipientContact.objects.create(
-        lease=data["lease"],
-        email="copy@example.com",
-        vloga=RecipientContact.Vloga.CC,
-        kanal=RecipientContact.Kanal.PDF,
-    )
     _freeze_ready_package(data)
     return _open_step_6(data, settings, tmp_path)[0]
 
@@ -117,7 +111,7 @@ def test_first_preparation_is_idempotent_and_keeps_cycle_open(
     ) == (
         "racuni@example.com",
         ["recipient@example.com"],
-        ["copy@example.com"],
+        [],
         ["racunovodja@example.com"],
         invoice.rendered_pdf_path,
         invoice.checksum,

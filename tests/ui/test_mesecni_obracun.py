@@ -177,12 +177,6 @@ def _step6_cycle(data, settings, tmp_path):
         vloga=RecipientContact.Vloga.TO,
         kanal=RecipientContact.Kanal.PDF,
     )
-    RecipientContact.objects.create(
-        lease=data["lease"],
-        email="copy@example.com",
-        vloga=RecipientContact.Vloga.CC,
-        kanal=RecipientContact.Kanal.PDF,
-    )
     settings.RENDERING_ROOT = tmp_path / "rendered"
     _freeze_ready_package(data)
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
