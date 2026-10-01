@@ -53,8 +53,10 @@ from invoicing.services import (
     potrdi_izjemo_kandidata,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
+    pripravi_dostavo_mesecnega_cikla,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    stanje_dostave_mesecnega_cikla,
     stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
@@ -1016,6 +1018,21 @@ def mesecni_obracun(request):
                 return redirect("ui:mesecni_obracun")
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
+    if request.method == "POST" and action == "prepare_delivery":
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Priprava dostave je dovoljena samo v koraku 6.")
+            result = pripravi_dostavo_mesecnega_cikla(cycle)
+            if result["conflict_count"]:
+                review_error = next(
+                    item["message"]
+                    for item in result["per_invoice"]
+                    if item["delivery_state"] == "CONFLICT"
+                )
+            else:
+                return redirect("ui:mesecni_obracun")
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
 
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
@@ -1137,6 +1154,12 @@ def mesecni_obracun(request):
             for row in review_rows
         )
     )
+    delivery_state = None
+    if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
+        try:
+            delivery_state = stanje_dostave_mesecnega_cikla(cycle)
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -1161,6 +1184,7 @@ def mesecni_obracun(request):
             "review_error": review_error,
             "final_render_can_attempt": final_render_can_attempt,
             "step6_all_pdfs_ready": step6_all_pdfs_ready,
+            "delivery_state": delivery_state,
             "step4_complete": bool(
                 cycle
                 and cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA

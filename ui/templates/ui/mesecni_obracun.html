@@ -95,6 +95,16 @@
 <div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje</th><th>Najemnik</th><th>Pogodba</th><th>Rezultat</th><th class="numeric">Skupaj</th></tr></thead><tbody>
 {% for row in review_rows %}<tr><td><strong>{{ row.company_name }}</strong></td><td>{{ row.tenant_name }}</td><td>{{ row.contract_reference }}</td><td>{% if row.selected %}{{ row.materialization.invoice.stevilka }} · {% if row.pdf_state.state == 'READY' %}PDF pripravljen{% elif row.pdf_state.state == 'ERROR' %}Napaka PDF<span class="review-row-error" role="alert">{{ row.pdf_state.error }}</span>{% else %}PDF čaka pripravo{% endif %}{% else %}Neizdano · {% if row.will_issue %}{{ row.user_non_issue_reason }}{% else %}{{ row.system_non_issue_reason }}{% endif %}{% endif %}</td><td class="numeric">{{ row.current_display }}</td></tr>{% endfor %}
 </tbody></table></div>
+{% if review_error %}<div class="form-errors" role="alert">{{ review_error }}</div>{% endif %}
+{% if delivery_state %}
+<h2>Dostava</h2>
+<section class="review-summary" aria-label="Povzetek dostave"><span>Izbrani računi <strong>{{ delivery_state.selected_count }}</strong></span><span>Poslani <strong>{{ delivery_state.sent_count }}</strong></span><span>Neuspešni <strong>{{ delivery_state.failed_count }}</strong></span><span>Neznani <strong>{{ delivery_state.unknown_count }}</strong></span><span>Čakajoči <strong>{{ delivery_state.pending_count }}</strong></span><span>Konflikti <strong>{{ delivery_state.conflict_count }}</strong></span></section>
+<div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje / izdajatelj</th><th>Številka računa</th><th>Stanje dostave</th><th>Sporočilo</th></tr></thead><tbody>
+{% for item in delivery_state.per_invoice %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.invoice_number }}</td><td>{{ item.delivery_state }}</td><td>{{ item.message }}</td></tr>{% endfor %}
+</tbody></table></div>
+<div class="form-note" role="note"><span class="material-symbols-outlined" aria-hidden="true">info</span>E-pošta še ni bila poslana.</div>
+<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="prepare_delivery" type="submit">Pripravi pošiljanje</button></form>
+{% endif %}
 {% else %}
 <header class="page-heading billing-heading">
   <p class="eyebrow">Mesečni obračunski postopek</p>

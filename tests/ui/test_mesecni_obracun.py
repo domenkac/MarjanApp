@@ -8,7 +8,8 @@ from django.test import Client
 from django.utils import timezone
 
 from companies.models import Company, NumberSequence
-from contracts.models import Lease, Property, Tenant, Unit
+from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
+from delivery.models import DeliveryAttempt
 from invoicing.models import (
     Invoice,
     InvoiceLine,
@@ -20,10 +21,17 @@ from invoicing.services import (
     CALCULATION_SNAPSHOT_VERSION,
     MesecniCikelNapaka,
     NeveljavenPrehodMesecnegaCikla,
+    izdaj_zamrznjeni_mesecni_paket,
+    odpri_zakljucek_mesecnega_cikla,
     premakni_mesecni_cikel,
     zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import PdfRenderNapaka
+from rendering.services import renderiraj_koncne_pdfje_mesecnega_paketa
+from tests.invoicing.test_preflight import (
+    _freeze_ready_package,
+    ready_company,  # noqa: F401
+)
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -160,6 +168,26 @@ def _review_cycle(*candidates):
             )
         )
     return cycle, reviews
+
+
+def _step6_cycle(data, settings, tmp_path):
+    RecipientContact.objects.create(
+        lease=data["lease"],
+        email="recipient@example.com",
+        vloga=RecipientContact.Vloga.TO,
+        kanal=RecipientContact.Kanal.PDF,
+    )
+    RecipientContact.objects.create(
+        lease=data["lease"],
+        email="copy@example.com",
+        vloga=RecipientContact.Vloga.CC,
+        kanal=RecipientContact.Kanal.PDF,
+    )
+    settings.RENDERING_ROOT = tmp_path / "rendered"
+    _freeze_ready_package(data)
+    izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
+    return odpri_zakljucek_mesecnega_cikla(data["cycle"])
 
 
 @pytest.mark.django_db
@@ -1085,7 +1113,8 @@ def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
 
 @pytest.mark.django_db
 @pytest.mark.parametrize(
-    "action", ["freeze_package", "issue_frozen_package", "render_final_pdfs"]
+    "action",
+    ["freeze_package", "issue_frozen_package", "render_final_pdfs", "prepare_delivery"],
 )
 def test_zamrznitev_in_izdaja_post_sta_csrf_zascitena(action):
     _review_cycle({})
@@ -1107,3 +1136,75 @@ def test_korak_6_je_aktiven_in_ne_zakljucen(client):
     assert "Pošiljanje, preverjanje in arhiviranje še niso izvedeni" in content
     assert 'is-completed"><span>✓</span><strong>Potrditev paketa' in content
     assert 'is-active" aria-current="step"><span>6</span><strong>Zaključek ciklusa' in content
+
+
+@pytest.mark.django_db
+def test_prepare_delivery_izven_koraka_6_ne_klice_storitve(client, monkeypatch):
+    _review_cycle({})
+    monkeypatch.setattr(
+        "ui.views.pripravi_dostavo_mesecnega_cikla",
+        lambda *_args: pytest.fail("Storitev se izven koraka 6 ne sme klicati."),
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "prepare_delivery"})
+
+    assert response.status_code == 200
+    assert "Priprava dostave je dovoljena samo v koraku 6." in response.content.decode()
+    assert not DeliveryAttempt.objects.exists()
+
+
+@pytest.mark.django_db
+def test_step6_get_prikaze_avtoritativno_nepripravljeno_dostavo_in_pdf(
+    client, ready_company, settings, tmp_path  # noqa: F811
+):
+    _step6_cycle(ready_company, settings, tmp_path)
+    invoice = Invoice.objects.get()
+
+    response = client.get("/mesecni-obracun/")
+    content = response.content.decode()
+
+    assert response.status_code == 200
+    assert response.context["delivery_state"]["selected_count"] == 1
+    assert response.context["delivery_state"]["pending_count"] == 1
+    assert invoice.company.naziv in content
+    assert invoice.stevilka in content
+    assert "DELIVERY_NOT_PREPARED" in content
+    assert "Dostava še ni pripravljena." in content
+    assert "PDF pripravljen" in content
+    assert "Pripravi pošiljanje" in content
+    assert "E-pošta še ni bila poslana." in content
+
+
+@pytest.mark.django_db
+def test_step6_prepare_delivery_je_idempotenten_brez_zunanjih_operacij(
+    client, ready_company, settings, tmp_path, monkeypatch  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    invoice = Invoice.objects.get()
+
+    def forbidden(*_args, **_kwargs):
+        pytest.fail("Zunanja operacija se med pripravo dostave ne sme izvesti.")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", forbidden)
+    monkeypatch.setattr("keyring.get_password", forbidden)
+    monkeypatch.setattr("archive.services.archive_pdf", forbidden)
+
+    first = client.post("/mesecni-obracun/", {"action": "prepare_delivery"})
+    assert first.status_code == 302
+    attempt = DeliveryAttempt.objects.get(invoice=invoice)
+    assert (attempt.sequence, attempt.result) == (1, DeliveryAttempt.Result.PREPARED)
+
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert "DELIVERY_PREPARED" in content
+    assert "Prvi poskus dostave je pripravljen." in content
+    assert "E-pošta še ni bila poslana." in content
+    assert "PDF pripravljen" in content
+
+    second = client.post("/mesecni-obracun/", {"action": "prepare_delivery"})
+    assert second.status_code == 302
+    assert DeliveryAttempt.objects.filter(invoice=invoice).count() == 1
+    cycle.refresh_from_db()
+    assert (cycle.trenutni_korak, cycle.status) == (
+        MonthlyCycle.Korak.ZAKLJUCEK,
+        MonthlyCycle.Status.V_TEKU,
+    )
