@@ -3490,6 +3490,199 @@ def stanje_arhiviranja_mesecnega_cikla(cycle):
     return _rezultat_mesecnega_arhiva(cycle)
 
 
+def stanje_zakljucne_kontrole_mesecnega_cikla(cycle):
+    cycle = _preveri_aktivni_korak_6(cycle)
+    delivery = stanje_dostave_mesecnega_cikla(cycle)
+    archive = stanje_arhiviranja_mesecnega_cikla(cycle)
+    delivery_by_invoice = {
+        item["invoice_id"]: item
+        for item in delivery["per_invoice"]
+        if item["invoice_id"] is not None
+    }
+    archive_by_invoice = {
+        item["invoice_id"]: item
+        for item in archive["per_invoice"]
+        if item["invoice_id"] is not None
+    }
+    reviews = {
+        (review.batch_id, review.lease_id, review.candidate_fingerprint): review
+        for review in trenutni_pregledi_mesecnega_cikla(cycle)
+    }
+    companies = {}
+    issues = []
+    prepared_count = 0
+    intentionally_unissued_count = 0
+    package_conflicts = 0
+
+    def company_result(company_id, issuer_label):
+        return companies.setdefault(
+            company_id,
+            {
+                "company_id": company_id,
+                "issuer_label": issuer_label,
+                "prepared_count": 0,
+                "sent_count": 0,
+                "intentionally_unissued_count": 0,
+                "failed_count": 0,
+                "unknown_count": 0,
+                "delivery_pending_count": 0,
+                "archive_verified_count": 0,
+                "archive_issue_count": 0,
+                "requires_attention": False,
+            },
+        )
+
+    def add_issue(company, invoice, category, message, delivery_item=None):
+        issues.append(
+            {
+                "company_id": company["company_id"],
+                "issuer_label": company["issuer_label"],
+                "invoice_id": invoice.pk if invoice else None,
+                "invoice_number": invoice.stevilka if invoice else None,
+                "category": category,
+                "message": message,
+                "delivery_result_code": (
+                    delivery_item["latest_attempt_result_code"] if delivery_item else ""
+                ),
+                "delivery_result_message": (
+                    delivery_item["latest_attempt_message"] if delivery_item else ""
+                ),
+            }
+        )
+        company["requires_attention"] = True
+
+    for batch in aktivni_izracuni_mesecnega_cikla(cycle).select_related("company").order_by(
+        "company_id", "pk"
+    ):
+        for candidate in batch.calculation_snapshot.get("candidates", []):
+            identity = (
+                batch.pk,
+                candidate.get("lease_id"),
+                candidate.get("candidate_fingerprint"),
+            )
+            review = reviews.get(identity)
+            materialization = stanje_zamrznjenega_mesecnega_kandidata(*identity)
+            invoice = materialization["invoice"]
+            issuer_label = (
+                invoice.izdajatelj_naziv
+                if invoice
+                else batch.calculation_snapshot.get("company", {}).get("name", "")
+            )
+            company = company_result(batch.company_id, issuer_label)
+            if review is None or materialization["state"] != "MATERIALIZED":
+                package_conflicts += 1
+                add_issue(
+                    company,
+                    invoice,
+                    "PACKAGE_CONFLICT",
+                    materialization["error"]
+                    or "Zamrznjeni kandidat nima pričakovanega materializiranega računa.",
+                )
+                continue
+            company["issuer_label"] = invoice.izdajatelj_naziv
+            if not review.selected:
+                valid_unissued = (
+                    invoice.status == Invoice.Status.ARHIVIRAN_NI_IZDAN
+                    and bool((invoice.razlog_arhiviranja or "").strip())
+                    and not invoice.stevilka
+                    and not invoice.rendered_pdf_path
+                    and not invoice.checksum
+                )
+                if valid_unissued:
+                    intentionally_unissued_count += 1
+                    company["intentionally_unissued_count"] += 1
+                else:
+                    package_conflicts += 1
+                    add_issue(
+                        company,
+                        invoice,
+                        "PACKAGE_CONFLICT",
+                        "Neizdani kandidat krši pravila materializacije ali nima zapisanega razloga.",
+                    )
+                continue
+
+            prepared_count += 1
+            company["prepared_count"] += 1
+            delivery_item = delivery_by_invoice.get(invoice.pk)
+            archive_item = archive_by_invoice.get(invoice.pk)
+            delivery_state = delivery_item and delivery_item["delivery_state"]
+            archive_state = archive_item and archive_item["archive_state"]
+            if delivery_state == StanjeMesecneDostave.DELIVERY_SENT:
+                company["sent_count"] += 1
+            elif delivery_state == StanjeMesecneDostave.DELIVERY_FAILED:
+                company["failed_count"] += 1
+                add_issue(company, invoice, "DELIVERY_FAILED", delivery_item["message"], delivery_item)
+            elif delivery_state == StanjeMesecneDostave.DELIVERY_UNKNOWN:
+                company["unknown_count"] += 1
+                add_issue(company, invoice, "DELIVERY_UNKNOWN", delivery_item["message"], delivery_item)
+            elif delivery_state in {
+                StanjeMesecneDostave.DELIVERY_NOT_PREPARED,
+                StanjeMesecneDostave.DELIVERY_PREPARED,
+                StanjeMesecneDostave.DELIVERY_IN_PROGRESS,
+            }:
+                company["delivery_pending_count"] += 1
+                add_issue(company, invoice, delivery_state.value, delivery_item["message"], delivery_item)
+            else:
+                add_issue(
+                    company,
+                    invoice,
+                    "DELIVERY_CONFLICT",
+                    delivery_item["message"] if delivery_item else "Stanje dostave manjka.",
+                    delivery_item,
+                )
+
+            if archive_state == StanjeMesecnegaArhiva.ARCHIVE_VERIFIED:
+                company["archive_verified_count"] += 1
+            elif archive_state == StanjeMesecnegaArhiva.ARCHIVE_NOT_STARTED:
+                company["archive_issue_count"] += 1
+                add_issue(company, invoice, "ARCHIVE_NOT_STARTED", archive_item["message"])
+            elif archive_state not in {
+                StanjeMesecnegaArhiva.WAITING_DELIVERY,
+                StanjeMesecnegaArhiva.DELIVERY_FAILED,
+                StanjeMesecnegaArhiva.DELIVERY_UNKNOWN,
+            }:
+                company["archive_issue_count"] += 1
+                add_issue(
+                    company,
+                    invoice,
+                    "ARCHIVE_DIVERGENCE",
+                    archive_item["message"] if archive_item else "Stanje arhiva manjka.",
+                )
+
+    per_company = [companies[key] for key in sorted(companies)]
+    conflict_count = max(package_conflicts, delivery["conflict_count"])
+    successful = (
+        delivery["complete"]
+        and archive["complete"]
+        and conflict_count == 0
+        and not issues
+    )
+    return {
+        "cycle_id": cycle.pk,
+        "period": cycle.obdobje,
+        "delivery_complete": delivery["complete"],
+        "archive_complete": archive["complete"],
+        "all_required_work_successful": successful,
+        "requires_attention": not successful,
+        "headline": (
+            "Mesečni postopek uspešno zaključen"
+            if successful
+            else "Mesečni postopek zahteva pozornost"
+        ),
+        "prepared_count": prepared_count,
+        "sent_count": delivery["sent_count"],
+        "intentionally_unissued_count": intentionally_unissued_count,
+        "failed_count": delivery["failed_count"],
+        "unknown_count": delivery["unknown_count"],
+        "delivery_pending_count": delivery["pending_count"],
+        "archive_verified_count": archive["verified_count"],
+        "archive_pending_count": archive["pending_count"],
+        "conflict_count": conflict_count,
+        "per_company": per_company,
+        "issues": issues,
+    }
+
+
 def arhiviraj_poslane_racune_mesecnega_cikla(cycle, roots):
     from archive.services import ArchiveState, archive_pdf
 
