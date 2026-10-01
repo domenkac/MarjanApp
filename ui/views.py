@@ -8,6 +8,12 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from archive.configuration import (
+    ArchiveConfigurationError,
+    resolve_archive_roots,
+    verify_and_save_archive_roots,
+)
+from archive.models import ArchiveConfiguration
 from catalogs.models import ServiceCatalogItem, VatRegime
 from catalogs.services import (
     deaktiviraj_ddv_rezim,
@@ -53,6 +59,7 @@ from invoicing.services import (
     PosiljanjeMesecnegaRacuna,
     StanjeMesecneDostave,
     aktivni_izracuni_mesecnega_cikla,
+    arhiviraj_poslane_racune_mesecnega_cikla,
     izdaj_zamrznjeni_mesecni_paket,
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
@@ -65,6 +72,7 @@ from invoicing.services import (
     pripravi_dostavo_mesecnega_cikla,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
+    stanje_arhiviranja_mesecnega_cikla,
     stanje_dostave_mesecnega_cikla,
     stanje_zamrznjenega_mesecnega_kandidata,
     trenutni_mesecni_kandidat,
@@ -81,6 +89,7 @@ from rendering.services import (
 )
 
 from .forms import (
+    ArchiveConfigurationForm,
     CompanyForm,
     IzbiraMesecaForm,
     LeaseForm,
@@ -527,6 +536,39 @@ def nastavitve(request):
         request,
         "ui/nastavitve.html",
         _settings_context(companies=companies),
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def nastavitve_arhiv(request):
+    configuration = ArchiveConfiguration.objects.filter(pk=1).first()
+    initial = (
+        {
+            "local_root": configuration.local_root,
+            "icloud_root": configuration.icloud_root,
+        }
+        if configuration
+        else None
+    )
+    form = ArchiveConfigurationForm(request.POST or None, initial=initial)
+    success = False
+    if request.method == "POST" and form.is_valid():
+        try:
+            configuration = verify_and_save_archive_roots(
+                form.cleaned_data["local_root"], form.cleaned_data["icloud_root"]
+            )
+        except ArchiveConfigurationError as error:
+            form.add_error(None, str(error))
+        else:
+            success = True
+    return render(
+        request,
+        "ui/archive_settings.html",
+        _settings_context(
+            form=form,
+            configuration=configuration,
+            success=success,
+        ),
     )
 
 
@@ -1156,6 +1198,20 @@ def mesecni_obracun(request):
         except Exception:  # noqa: BLE001 - never expose SMTP or keyring details
             review_error = "Pošiljanja ni bilo mogoče izvesti."
 
+    if request.method == "POST" and action == "archive_sent_invoices":
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Arhiviranje je dovoljeno samo v koraku 6.")
+            roots = resolve_archive_roots()
+            arhiviraj_poslane_racune_mesecnega_cikla(cycle, roots)
+            return redirect("ui:mesecni_obracun")
+        except ArchiveConfigurationError as exc:
+            review_error = str(exc)
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
+        except Exception:  # noqa: BLE001 - never expose filesystem details
+            review_error = "Arhiviranja ni bilo mogoče izvesti."
+
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
         obdobje_do = form.cleaned_data.get("obdobje_do")
@@ -1279,6 +1335,9 @@ def mesecni_obracun(request):
     delivery_state = None
     delivery_can_prepare = False
     delivery_can_send = False
+    archive_state = None
+    archive_configuration_valid = False
+    archive_can_run = False
     if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
         try:
             delivery_state = stanje_dostave_mesecnega_cikla(cycle)
@@ -1292,6 +1351,19 @@ def mesecni_obracun(request):
                 == StanjeMesecneDostave.DELIVERY_PREPARED
                 for item in delivery_state["per_invoice"]
             )
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
+        try:
+            resolve_archive_roots()
+            archive_configuration_valid = True
+            archive_state = stanje_arhiviranja_mesecnega_cikla(cycle)
+            archive_can_run = any(
+                item["delivery_status"] == Invoice.Status.POSLAN
+                and item["archive_state"] != "ARCHIVE_VERIFIED"
+                for item in archive_state["per_invoice"]
+            )
+        except ArchiveConfigurationError:
+            pass
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
     return render(
@@ -1321,6 +1393,9 @@ def mesecni_obracun(request):
             "delivery_state": delivery_state,
             "delivery_can_prepare": delivery_can_prepare,
             "delivery_can_send": delivery_can_send,
+            "archive_state": archive_state,
+            "archive_configuration_valid": archive_configuration_valid,
+            "archive_can_run": archive_can_run,
             "step4_complete": bool(
                 cycle
                 and cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA

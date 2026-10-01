@@ -1124,6 +1124,7 @@ def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
         "render_final_pdfs",
         "prepare_delivery",
         "send_delivery",
+        "archive_sent_invoices",
     ],
 )
 def test_zamrznitev_in_izdaja_post_sta_csrf_zascitena(action):

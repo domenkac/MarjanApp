@@ -106,6 +106,15 @@
 {% if delivery_can_prepare %}<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="prepare_delivery" type="submit">Pripravi pošiljanje</button></form>{% endif %}
 {% if delivery_can_send %}<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="send_delivery" type="submit">Pošlji pripravljene račune</button></form>{% endif %}
 {% endif %}
+<h2>Arhiviranje</h2>
+{% if not archive_configuration_valid %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">info</span>Lokacije arhiva niso konfigurirane. <a href="{% url 'ui:nastavitve_arhiv' %}">Odprite nastavitve arhiva.</a></div>{% endif %}
+{% if archive_state %}
+<section class="review-summary" aria-label="Povzetek arhiviranja"><span>Izbrani <strong>{{ archive_state.selected_count }}</strong></span><span>Preverjeni <strong>{{ archive_state.verified_count }}</strong></span><span>Čakajoči <strong>{{ archive_state.pending_count }}</strong></span><span>Težave <strong>{{ archive_state.issue_count }}</strong></span></section>
+<div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje / izdajatelj</th><th>Številka računa</th><th>Stanje arhiva</th><th>Sporočilo</th></tr></thead><tbody>
+{% for item in archive_state.per_invoice %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.invoice_number }}</td><td>{% if item.archive_state == 'WAITING_DELIVERY' %}Čaka na dostavo{% elif item.archive_state == 'DELIVERY_FAILED' %}Dostava ni uspela{% elif item.archive_state == 'DELIVERY_UNKNOWN' %}Rezultat dostave ni znan{% elif item.archive_state == 'ARCHIVE_NOT_STARTED' %}Arhiviranje ni začeto{% elif item.archive_state == 'ARCHIVE_VERIFIED' %}Arhiv preverjen{% elif item.archive_state == 'LOCAL_MISSING' %}Lokalna kopija manjka{% elif item.archive_state == 'ICLOUD_MISSING' %}iCloud kopija manjka{% elif item.archive_state == 'LOCAL_CHECKSUM_MISMATCH' or item.archive_state == 'ICLOUD_CHECKSUM_MISMATCH' %}Kontrolni odtis se ne ujema{% else %}Napaka ali neskladje arhiva{% endif %}</td><td>{{ item.message }}</td></tr>{% endfor %}
+</tbody></table></div>
+{% endif %}
+{% if archive_configuration_valid and archive_can_run %}<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="archive_sent_invoices" type="submit">Arhiviraj poslane račune</button></form>{% endif %}
 {% else %}
 <header class="page-heading billing-heading">
   <p class="eyebrow">Mesečni obračunski postopek</p>

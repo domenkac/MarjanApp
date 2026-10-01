@@ -28,3 +28,23 @@ class ArchivedFile(models.Model):
                 name="uniq_archived_file_invoice_artifact",
             )
         ]
+
+
+class ArchiveConfiguration(models.Model):
+    local_root = models.CharField()
+    icloud_root = models.CharField()
+    verified_at = models.DateTimeField()
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(id=1),
+                name="archive_configuration_singleton",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        self.pk = 1
+        return super().save(*args, **kwargs)

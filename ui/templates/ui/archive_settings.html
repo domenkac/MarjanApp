@@ -1,0 +1,13 @@
+{% extends "ui/base.html" %}
+{% block title %}Arhiv · Nastavitve{% endblock %}
+{% block content %}
+<header class="page-heading settings-heading"><div><p class="eyebrow">Nastavitve · Arhiv</p><h1>Lokacije arhiva</h1><p>Obe obstoječi mapi morata imeti absolutno pot.</p></div></header>
+{% if success %}<div class="form-success" role="status"><p>Obe lokaciji sta preverjeni in shranjeni.</p></div>{% endif %}
+<section class="settings-card">
+  <form method="post" novalidate>{% csrf_token %}
+    {% include "ui/partials/form_fields.html" %}
+    <div class="form-actions"><button class="button-primary" type="submit">Preveri in shrani</button></div>
+  </form>
+  {% if configuration %}<p>Preverjeno: {{ configuration.verified_at|date:"d. m. Y H:i:s" }}</p>{% endif %}
+</section>
+{% endblock %}

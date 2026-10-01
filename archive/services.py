@@ -332,10 +332,10 @@ def verify_archived_file(archived_file: ArchivedFile) -> ArchiveVerification:
                 paths=paths,
                 checksum=checksum,
             )
-    except OSError as error:
+    except OSError:
         return _result(
             ArchiveState.FAILED,
-            f"Archive verification failed: {error}",
+            "Archive verification failed because a copy is inaccessible.",
             archived_file,
             paths=paths,
             checksum=checksum,
