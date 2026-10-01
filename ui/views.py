@@ -50,12 +50,15 @@ from delivery.transport import test_smtp_connection as check_smtp_connection
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
+    PosiljanjeMesecnegaRacuna,
+    StanjeMesecneDostave,
     aktivni_izracuni_mesecnega_cikla,
     izdaj_zamrznjeni_mesecni_paket,
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
     nastavi_izbiro_kandidata,
     odpri_zakljucek_mesecnega_cikla,
+    poslji_dostavo_mesecnega_cikla,
     potrdi_izjemo_kandidata,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
@@ -95,6 +98,18 @@ from .forms import (
     VatRegimeForm,
     obdobje_za_mesec,
 )
+
+
+def _sporocilo_mesecnega_racuna(invoice):
+    return (
+        f"Račun {invoice.stevilka} – {invoice.izdajatelj_naziv}",
+        (
+            "Spoštovani,\n\n"
+            f"v priponki vam pošiljamo račun {invoice.stevilka}.\n\n"
+            "Lep pozdrav,\n"
+            f"{invoice.izdajatelj_naziv}"
+        ),
+    )
 
 
 def _contracts_context(**extra):
@@ -1092,6 +1107,54 @@ def mesecni_obracun(request):
                 return redirect("ui:mesecni_obracun")
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
+    if request.method == "POST" and action == "send_delivery":
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Pošiljanje je dovoljeno samo v koraku 6.")
+            delivery = stanje_dostave_mesecnega_cikla(cycle)
+            prepared = {
+                item["invoice_id"]: item
+                for item in delivery["per_invoice"]
+                if item["delivery_state"]
+                == StanjeMesecneDostave.DELIVERY_PREPARED
+            }
+            invoices = Invoice.objects.select_related("company").in_bulk(prepared)
+            execution_inputs = []
+            configuration_errors = []
+            for invoice_id, item in prepared.items():
+                invoice = invoices.get(invoice_id)
+                if invoice is None:
+                    configuration_errors.append(
+                        f"Računa {item['invoice_number']} ni mogoče naložiti."
+                    )
+                    continue
+                try:
+                    smtp_config = resolve_smtp_config(invoice.company)
+                    credential_ref = resolve_keyring_credential_ref(invoice.company)
+                except SmtpConfigurationError:
+                    configuration_errors.append(
+                        f"Za račun {invoice.stevilka} SMTP nastavitev ni mogoče uporabiti."
+                    )
+                    continue
+                subject, body = _sporocilo_mesecnega_racuna(invoice)
+                execution_inputs.append(
+                    PosiljanjeMesecnegaRacuna(
+                        invoice_id=invoice.pk,
+                        smtp_config=smtp_config,
+                        credential_ref=credential_ref,
+                        subject=subject,
+                        body=body,
+                    )
+                )
+            poslji_dostavo_mesecnega_cikla(cycle, execution_inputs)
+            if configuration_errors:
+                review_error = " ".join(configuration_errors)
+            else:
+                return redirect("ui:mesecni_obracun")
+        except (MesecniCikelNapaka, ValidationError) as exc:
+            review_error = _review_error_message(exc)
+        except Exception:  # noqa: BLE001 - never expose SMTP or keyring details
+            review_error = "Pošiljanja ni bilo mogoče izvesti."
 
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
@@ -1214,9 +1277,21 @@ def mesecni_obracun(request):
         )
     )
     delivery_state = None
+    delivery_can_prepare = False
+    delivery_can_send = False
     if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
         try:
             delivery_state = stanje_dostave_mesecnega_cikla(cycle)
+            delivery_can_prepare = any(
+                item["delivery_state"]
+                == StanjeMesecneDostave.DELIVERY_NOT_PREPARED
+                for item in delivery_state["per_invoice"]
+            )
+            delivery_can_send = any(
+                item["delivery_state"]
+                == StanjeMesecneDostave.DELIVERY_PREPARED
+                for item in delivery_state["per_invoice"]
+            )
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
     return render(
@@ -1244,6 +1319,8 @@ def mesecni_obracun(request):
             "final_render_can_attempt": final_render_can_attempt,
             "step6_all_pdfs_ready": step6_all_pdfs_ready,
             "delivery_state": delivery_state,
+            "delivery_can_prepare": delivery_can_prepare,
+            "delivery_can_send": delivery_can_send,
             "step4_complete": bool(
                 cycle
                 and cycle.trenutni_korak >= MonthlyCycle.Korak.POTRDITEV_PAKETA

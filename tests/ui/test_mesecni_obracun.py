@@ -9,7 +9,15 @@ from django.utils import timezone
 
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
+from delivery.credentials import KeyringCredentialRef
 from delivery.models import DeliveryAttempt
+from delivery.services import (
+    mark_accepted,
+    mark_confirmed_failure,
+    mark_result_unknown,
+    mark_submission_started,
+)
+from delivery.transport import SmtpConfig, SmtpSecurity
 from invoicing.models import (
     Invoice,
     InvoiceLine,
@@ -24,6 +32,7 @@ from invoicing.services import (
     izdaj_zamrznjeni_mesecni_paket,
     odpri_zakljucek_mesecnega_cikla,
     premakni_mesecni_cikel,
+    pripravi_dostavo_mesecnega_cikla,
     zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import PdfRenderNapaka
@@ -32,6 +41,7 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,  # noqa: F401
 )
+from ui.views import _sporocilo_mesecnega_racuna
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -1108,7 +1118,13 @@ def test_step5_zavrne_vse_mutacije_in_ponovljen_post(client):
 @pytest.mark.django_db
 @pytest.mark.parametrize(
     "action",
-    ["freeze_package", "issue_frozen_package", "render_final_pdfs", "prepare_delivery"],
+    [
+        "freeze_package",
+        "issue_frozen_package",
+        "render_final_pdfs",
+        "prepare_delivery",
+        "send_delivery",
+    ],
 )
 def test_zamrznitev_in_izdaja_post_sta_csrf_zascitena(action):
     _review_cycle({})
@@ -1162,11 +1178,11 @@ def test_step6_get_prikaze_avtoritativno_nepripravljeno_dostavo_in_pdf(
     assert response.context["delivery_state"]["pending_count"] == 1
     assert invoice.company.naziv in content
     assert invoice.stevilka in content
-    assert "DELIVERY_NOT_PREPARED" in content
+    assert "Ni pripravljeno" in content
     assert "Dostava še ni pripravljena." in content
     assert "PDF pripravljen" in content
     assert "Pripravi pošiljanje" in content
-    assert "E-pošta še ni bila poslana." in content
+    assert "Pošlji pripravljene račune" not in content
 
 
 @pytest.mark.django_db
@@ -1189,9 +1205,11 @@ def test_step6_prepare_delivery_je_idempotenten_brez_zunanjih_operacij(
     assert (attempt.sequence, attempt.result) == (1, DeliveryAttempt.Result.PREPARED)
 
     content = client.get("/mesecni-obracun/").content.decode()
-    assert "DELIVERY_PREPARED" in content
+    assert "Pripravljeno za pošiljanje" in content
     assert "Prvi poskus dostave je pripravljen." in content
-    assert "E-pošta še ni bila poslana." in content
+    assert "Pripravljeni računi še niso poslani." in content
+    assert "Pošlji pripravljene račune" in content
+    assert "Pripravi pošiljanje" not in content
     assert "PDF pripravljen" in content
 
     second = client.post("/mesecni-obracun/", {"action": "prepare_delivery"})
@@ -1202,3 +1220,272 @@ def test_step6_prepare_delivery_je_idempotenten_brez_zunanjih_operacij(
         MonthlyCycle.Korak.ZAKLJUCEK,
         MonthlyCycle.Status.V_TEKU,
     )
+
+
+@pytest.mark.django_db
+def test_sporocilo_uporabi_nespremenljivi_posnetek_izdajatelja():
+    company = ustvari_podjetje("Poznejše ime d.o.o.", "24561004")
+    invoice = Invoice(
+        company=company,
+        stevilka="NP-00001",
+        izdajatelj_naziv="Alfa d.o.o.",
+    )
+
+    subject, body = _sporocilo_mesecnega_racuna(invoice)
+
+    assert subject == "Račun NP-00001 – Alfa d.o.o."
+    assert body == (
+        "Spoštovani,\n\n"
+        "v priponki vam pošiljamo račun NP-00001.\n\n"
+        "Lep pozdrav,\n"
+        "Alfa d.o.o."
+    )
+    assert company.naziv not in subject + body
+
+
+@pytest.mark.parametrize(
+    ("number", "issuer"),
+    [("NP-00001", "Alfa d.o.o."), ("ST-2026-00002", "Beta d.o.o.")],
+)
+def test_sporocilo_ima_enako_predlogo_za_vsa_podjetja(number, issuer):
+    subject, body = _sporocilo_mesecnega_racuna(
+        Invoice(stevilka=number, izdajatelj_naziv=issuer)
+    )
+
+    assert subject == f"Račun {number} – {issuer}"
+    assert body == (
+        f"Spoštovani,\n\nv priponki vam pošiljamo račun {number}.\n\n"
+        f"Lep pozdrav,\n{issuer}"
+    )
+
+
+def _smtp_settings(settings):
+    settings.MARJAN_SMTP_HOST = "smtp.example.com"
+    settings.MARJAN_SMTP_PORT = 587
+    settings.MARJAN_SMTP_SECURITY = "STARTTLS"
+    settings.MARJAN_SMTP_TIMEOUT_SECONDS = 10
+    settings.MARJAN_KEYRING_SERVICE = "marjan-smtp"
+
+
+@pytest.mark.django_db
+def test_step6_post_poslje_pripravljeno_enkrat_in_ohrani_posnetke(
+    client, ready_company, settings, tmp_path, monkeypatch  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    invoice = Invoice.objects.get()
+    invoice.izdajatelj_naziv = "Alfa d.o.o."
+    invoice.save(update_fields=["izdajatelj_naziv"])
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = DeliveryAttempt.objects.get()
+    frozen = (
+        attempt.recipients_to,
+        attempt.recipients_cc,
+        attempt.recipients_bcc,
+        attempt.pdf_path,
+        attempt.pdf_checksum,
+    )
+    _smtp_settings(settings)
+    calls = []
+
+    def send(prepared_attempt, **kwargs):
+        calls.append((prepared_attempt.pk, kwargs))
+        return mark_accepted(
+            mark_submission_started(prepared_attempt), code="SMTP_ACCEPTED"
+        )
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    monkeypatch.setattr(
+        "archive.services.archive_pdf",
+        lambda *_args, **_kwargs: pytest.fail("Arhiviranje se ne sme izvesti."),
+    )
+
+    first = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+    second = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+
+    assert first.status_code == second.status_code == 302
+    assert len(calls) == 1
+    assert calls[0][1]["subject"] == "Račun NP-00001 – Alfa d.o.o."
+    assert calls[0][1]["body"].endswith("Lep pozdrav,\nAlfa d.o.o.")
+    assert calls[0][1]["smtp_config"].username == invoice.company.email_posiljatelj
+    assert calls[0][1]["credential_ref"].username == invoice.company.keychain_kljuc_posiljatelja
+    invoice.refresh_from_db()
+    attempt.refresh_from_db()
+    cycle.refresh_from_db()
+    assert invoice.status == Invoice.Status.POSLAN
+    assert attempt.result == DeliveryAttempt.Result.ACCEPTED
+    assert (
+        attempt.recipients_to,
+        attempt.recipients_cc,
+        attempt.recipients_bcc,
+        attempt.pdf_path,
+        attempt.pdf_checksum,
+    ) == frozen
+    assert (cycle.status, cycle.trenutni_korak) == (
+        MonthlyCycle.Status.V_TEKU,
+        MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert "Poslano" in content
+    assert "Pošiljanje je končano. Arhiviranje in končni zaključek še nista izvedena." in content
+    assert "Pripravi pošiljanje" not in content
+    assert "Pošlji pripravljene račune" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("terminal", ["failed", "unknown"])
+def test_step6_post_ne_ponovi_neuspesnega_ali_neznanega(
+    client, ready_company, settings, tmp_path, monkeypatch, terminal  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = mark_submission_started(DeliveryAttempt.objects.get())
+    if terminal == "failed":
+        mark_confirmed_failure(attempt, code="SMTP_REJECTED")
+    else:
+        mark_result_unknown(attempt, code="SMTP_RESULT_UNKNOWN")
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email",
+        lambda *_args, **_kwargs: pytest.fail("Končnega stanja se ne sme poslati znova."),
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+
+    assert response.status_code == 302
+    assert DeliveryAttempt.objects.count() == 1
+
+
+@pytest.mark.django_db
+def test_step6_post_ne_ponovi_dostave_v_teku(
+    client, ready_company, settings, tmp_path, monkeypatch  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = mark_submission_started(DeliveryAttempt.objects.get())
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email",
+        lambda *_args, **_kwargs: pytest.fail("Dostave v teku se ne sme poslati znova."),
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+
+    assert response.status_code == 302
+    assert DeliveryAttempt.objects.count() == 1
+    attempt.refresh_from_db()
+    assert attempt.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+
+
+@pytest.mark.django_db
+def test_send_delivery_izven_koraka_6_ne_klice_storitve(client, monkeypatch):
+    _review_cycle({})
+    monkeypatch.setattr(
+        "ui.views.poslji_dostavo_mesecnega_cikla",
+        lambda *_args: pytest.fail("Pošiljanje izven koraka 6 ni dovoljeno."),
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+
+    assert response.status_code == 200
+    assert "Pošiljanje je dovoljeno samo v koraku 6." in response.content.decode()
+
+
+@pytest.mark.django_db
+def test_get_ne_posilja(client, ready_company, settings, tmp_path, monkeypatch):  # noqa: F811
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    monkeypatch.setattr(
+        "ui.views.poslji_dostavo_mesecnega_cikla",
+        lambda *_args: pytest.fail("GET ne sme pošiljati."),
+    )
+
+    assert client.get("/mesecni-obracun/").status_code == 200
+
+
+@pytest.mark.django_db
+def test_napaka_nastavitve_enega_podjetja_ne_blokira_drugega(
+    client, monkeypatch
+):
+    cycle = MonthlyCycle.objects.create(
+        obdobje=date(2026, 9, 1),
+        datum_izdaje=date(2026, 9, 30),
+        trenutni_korak=MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+    bad_company = ustvari_podjetje("Napačno d.o.o.", "15012557")
+    good_company = ustvari_podjetje("Veljavno d.o.o.", "69165028")
+    invoices = [
+        Invoice.objects.create(
+            company=company,
+            document_type=Invoice.DocumentType.NP,
+            stevilka=f"NP-0000{index}",
+            izdajatelj_naziv=company.naziv,
+            datum_izdaje=date(2026, 9, 30),
+            obdobje_od=date(2026, 9, 1),
+            obdobje_do=date(2026, 9, 30),
+        )
+        for index, company in enumerate((bad_company, good_company), start=1)
+    ]
+    state = {
+        "selected_count": 2,
+        "sent_count": 0,
+        "failed_count": 0,
+        "unknown_count": 0,
+        "pending_count": 2,
+        "conflict_count": 0,
+        "complete": False,
+        "per_invoice": [
+            {
+                "invoice_id": invoice.pk,
+                "invoice_number": invoice.stevilka,
+                "issuer_label": invoice.izdajatelj_naziv,
+                "delivery_state": "DELIVERY_PREPARED",
+                "message": "Pripravljeno.",
+            }
+            for invoice in invoices
+        ],
+    }
+    monkeypatch.setattr(
+        "ui.views.stanje_dostave_mesecnega_cikla", lambda _cycle: state
+    )
+
+    def smtp_config(company):
+        if company.pk == bad_company.pk:
+            from delivery.configuration import SmtpConfigurationError
+
+            raise SmtpConfigurationError("password=NE_RAZKRIJ")
+        return SmtpConfig(
+            host="smtp.example.com",
+            port=587,
+            security=SmtpSecurity.STARTTLS,
+            timeout_seconds=10,
+            username=company.email_posiljatelj,
+        )
+
+    monkeypatch.setattr("ui.views.resolve_smtp_config", smtp_config)
+    monkeypatch.setattr(
+        "ui.views.resolve_keyring_credential_ref",
+        lambda company: KeyringCredentialRef(
+            "marjan-smtp", company.keychain_kljuc_posiljatelja
+        ),
+    )
+    calls = []
+    monkeypatch.setattr(
+        "ui.views.poslji_dostavo_mesecnega_cikla",
+        lambda called_cycle, inputs: calls.append((called_cycle.pk, inputs)) or state,
+    )
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email",
+        lambda *_args, **_kwargs: pytest.fail("UI ne sme neposredno klicati SMTP."),
+    )
+
+    response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+
+    assert response.status_code == 200
+    assert len(calls) == 1 and calls[0][0] == cycle.pk
+    assert len(calls[0][1]) == 1
+    sent_input = calls[0][1][0]
+    assert sent_input.invoice_id == invoices[1].pk
+    assert sent_input.smtp_config.username == good_company.email_posiljatelj
+    assert sent_input.credential_ref.username == good_company.keychain_kljuc_posiljatelja
+    assert sent_input.subject == "Račun NP-00002 – Veljavno d.o.o."
+    content = response.content.decode()
+    assert "Za račun NP-00001 SMTP nastavitev ni mogoče uporabiti." in content
+    assert "NE_RAZKRIJ" not in content

@@ -100,10 +100,11 @@
 <h2>Dostava</h2>
 <section class="review-summary" aria-label="Povzetek dostave"><span>Izbrani računi <strong>{{ delivery_state.selected_count }}</strong></span><span>Poslani <strong>{{ delivery_state.sent_count }}</strong></span><span>Neuspešni <strong>{{ delivery_state.failed_count }}</strong></span><span>Neznani <strong>{{ delivery_state.unknown_count }}</strong></span><span>Čakajoči <strong>{{ delivery_state.pending_count }}</strong></span><span>Konflikti <strong>{{ delivery_state.conflict_count }}</strong></span></section>
 <div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje / izdajatelj</th><th>Številka računa</th><th>Stanje dostave</th><th>Sporočilo</th></tr></thead><tbody>
-{% for item in delivery_state.per_invoice %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.invoice_number }}</td><td>{{ item.delivery_state }}</td><td>{{ item.message }}</td></tr>{% endfor %}
+{% for item in delivery_state.per_invoice %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.invoice_number }}</td><td>{% if item.delivery_state == 'DELIVERY_NOT_PREPARED' %}Ni pripravljeno{% elif item.delivery_state == 'DELIVERY_PREPARED' %}Pripravljeno za pošiljanje{% elif item.delivery_state == 'DELIVERY_IN_PROGRESS' %}Pošiljanje je v teku{% elif item.delivery_state == 'DELIVERY_SENT' %}Poslano{% elif item.delivery_state == 'DELIVERY_FAILED' %}Pošiljanje ni uspelo{% elif item.delivery_state == 'DELIVERY_UNKNOWN' %}Rezultat pošiljanja ni znan{% else %}Neskladje{% endif %}</td><td>{{ item.message }}</td></tr>{% endfor %}
 </tbody></table></div>
-<div class="form-note" role="note"><span class="material-symbols-outlined" aria-hidden="true">info</span>E-pošta še ni bila poslana.</div>
-<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="prepare_delivery" type="submit">Pripravi pošiljanje</button></form>
+{% if delivery_state.complete %}<div class="form-note" role="note"><span class="material-symbols-outlined" aria-hidden="true">info</span>Pošiljanje je končano. Arhiviranje in končni zaključek še nista izvedena.</div>{% elif delivery_can_send %}<div class="form-note" role="note"><span class="material-symbols-outlined" aria-hidden="true">info</span>Pripravljeni računi še niso poslani.</div>{% endif %}
+{% if delivery_can_prepare %}<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="prepare_delivery" type="submit">Pripravi pošiljanje</button></form>{% endif %}
+{% if delivery_can_send %}<form method="post" class="form-actions">{% csrf_token %}<button class="button-primary" name="action" value="send_delivery" type="submit">Pošlji pripravljene račune</button></form>{% endif %}
 {% endif %}
 {% else %}
 <header class="page-heading billing-heading">
