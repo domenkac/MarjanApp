@@ -7,14 +7,17 @@ import ssl
 from collections.abc import Callable
 from dataclasses import dataclass
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import Protocol
 
 from django.db import connection
 
 from .credentials import CredentialError, KeyringCredentialRef, load_password
 
-if TYPE_CHECKING:
-    from .services import PreparedEmail
+
+class PreparedOutboundEmail(Protocol):
+    message: object
+    envelope_sender: str
+    envelope_recipients: tuple[str, ...]
 
 
 class SmtpSecurity(StrEnum):
@@ -175,7 +178,7 @@ def test_smtp_connection(
 
 
 def send_prepared_email(
-    prepared: PreparedEmail,
+    prepared: PreparedOutboundEmail,
     config: SmtpConfig,
     credential_ref: KeyringCredentialRef,
     *,

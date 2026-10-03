@@ -71,3 +71,79 @@ class DeliveryAttempt(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("Delivery attempts are audit records and cannot be deleted.")
+
+
+class MonthlySummaryConfiguration(models.Model):
+    id = models.PositiveSmallIntegerField(primary_key=True, default=1, editable=False)
+    email = models.EmailField()
+    keychain_credential_key = models.CharField(max_length=255)
+    created_at = models.DateTimeField(auto_now_add=True)
+    updated_at = models.DateTimeField(auto_now=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(id=1),
+                name="monthly_summary_configuration_singleton",
+            )
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk not in (None, 1):
+            raise ValidationError("Monthly summary configuration must use pk=1.")
+        self.pk = 1
+        self.full_clean()
+        return super().save(*args, **kwargs)
+
+
+class MonthlySummaryAttempt(models.Model):
+    class Result(models.TextChoices):
+        PREPARED = "PREPARED", "Prepared"
+        SUBMISSION_STARTED = "SUBMISSION_STARTED", "Submission started"
+        ACCEPTED = "ACCEPTED", "Accepted"
+        CONFIRMED_FAILURE = "CONFIRMED_FAILURE", "Confirmed failure"
+        UNKNOWN = "UNKNOWN", "Unknown"
+
+    cycle = models.ForeignKey(
+        "invoicing.MonthlyCycle",
+        on_delete=models.PROTECT,
+        related_name="summary_attempts",
+    )
+    sequence = models.PositiveIntegerField()
+    prepared_at = models.DateTimeField(auto_now_add=True)
+    submission_started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    sender = models.EmailField()
+    recipient = models.EmailField()
+    subject = models.CharField(max_length=255)
+    body = models.TextField()
+    summary_snapshot = models.JSONField()
+    result = models.CharField(max_length=24, choices=Result, default=Result.PREPARED)
+    result_code = models.CharField(max_length=64, blank=True)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["cycle_id", "sequence"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["cycle", "sequence"],
+                name="uniq_monthly_summary_cycle_sequence",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sequence__gte=1),
+                name="monthly_summary_sequence_gte_1",
+            ),
+            models.UniqueConstraint(
+                fields=["cycle"],
+                condition=models.Q(result="ACCEPTED"),
+                name="uniq_accepted_monthly_summary_cycle",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Monthly summary attempts are audit records and cannot be overwritten.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Monthly summary attempts are audit records and cannot be deleted.")

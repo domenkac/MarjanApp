@@ -1,4 +1,5 @@
 import re
+from copy import deepcopy
 from dataclasses import dataclass
 from email.message import EmailMessage
 
@@ -11,9 +12,9 @@ from django.utils import timezone
 
 from contracts.models import RecipientContact
 from core.models import AuditLogEntry
-from invoicing.models import Invoice
+from invoicing.models import Invoice, MonthlyCycle
 
-from .models import DeliveryAttempt
+from .models import DeliveryAttempt, MonthlySummaryAttempt
 
 _CODE_RE = re.compile(r"^[A-Z0-9_]{1,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -39,6 +40,13 @@ class PreparedEmail:
     envelope_recipients: tuple[str, ...]
     invoice_id: int
     attempt_id: int
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedMonthlySummaryEmail:
+    message: EmailMessage
+    envelope_sender: str
+    envelope_recipients: tuple[str, ...]
 
 
 def has_sent_delivery_evidence(
@@ -482,6 +490,254 @@ def send_pdf_email(
     if result.submission_started and result.code == "SMTP_RESULT_UNKNOWN":
         return mark_result_unknown(started, code=result.code, message=result.message)
     return mark_confirmed_failure(started, code=result.code, message=result.message)
+
+
+def _monthly_summary_snapshot(cycle, final_state, prepared_at):
+    issues = []
+    for issue in final_state["issues"]:
+        recipients = {"to": [], "cc": [], "bcc": []}
+        if issue["invoice_id"] is not None:
+            latest = (
+                DeliveryAttempt.objects.filter(invoice_id=issue["invoice_id"])
+                .order_by("-sequence")
+                .first()
+            )
+            if latest is not None:
+                recipients = {
+                    "to": list(latest.recipients_to),
+                    "cc": list(latest.recipients_cc),
+                    "bcc": list(latest.recipients_bcc),
+                }
+        issues.append(
+            {
+                "company_id": issue["company_id"],
+                "issuer_label": issue["issuer_label"],
+                "invoice_id": issue["invoice_id"],
+                "invoice_number": issue["invoice_number"],
+                "category": issue["category"],
+                "message": issue["message"],
+                "delivery_result_code": issue["delivery_result_code"],
+                "delivery_result_message": issue["delivery_result_message"],
+                "recipients": recipients,
+            }
+        )
+    return {
+        "cycle_id": cycle.pk,
+        "period": final_state["period"].isoformat(),
+        "prepared_at": prepared_at.isoformat(),
+        "headline": final_state["headline"],
+        "requires_attention": final_state["requires_attention"],
+        "counts": {
+            "prepared": final_state["prepared_count"],
+            "sent": final_state["sent_count"],
+            "intentionally_unissued": final_state["intentionally_unissued_count"],
+            "failed": final_state["failed_count"],
+            "unknown": final_state["unknown_count"],
+        },
+        "archive": {
+            "complete": final_state["archive_complete"],
+            "verified_count": final_state["archive_verified_count"],
+            "pending_count": final_state["archive_pending_count"],
+        },
+        "per_company": deepcopy(final_state["per_company"]),
+        "issues": issues,
+    }
+
+
+def _monthly_summary_body(snapshot):
+    counts = snapshot["counts"]
+    archive = snapshot["archive"]
+    lines = [
+        snapshot["headline"],
+        "",
+        f"Obračunski mesec: {snapshot['period'][5:7]}/{snapshot['period'][:4]}",
+        f"Čas priprave poročila: {snapshot['prepared_at']}",
+        f"Pripravljeni računi: {counts['prepared']}",
+        f"Uspešno poslani računi: {counts['sent']}",
+        f"Namenoma neizdani računi: {counts['intentionally_unissued']}",
+        f"Neuspešni računi: {counts['failed']}",
+        f"Računi z neznanim rezultatom: {counts['unknown']}",
+        f"Arhiv: {'zaključen' if archive['complete'] else 'čaka'}",
+    ]
+    for company in snapshot["per_company"]:
+        lines.extend(
+            [
+                "",
+                f"Podjetje: {company['issuer_label']}",
+                f"Pripravljeni: {company['prepared_count']}",
+                f"Poslani: {company['sent_count']}",
+                f"Namenoma neizdani: {company['intentionally_unissued_count']}",
+                f"Neuspešni: {company['failed_count']}",
+                f"Neznani: {company['unknown_count']}",
+                f"Arhivirani: {company['archive_verified_count']}",
+            ]
+        )
+    if snapshot["issues"]:
+        lines.extend(["", "Težave:"])
+        for issue in snapshot["issues"]:
+            recipients = [
+                *issue["recipients"]["to"],
+                *issue["recipients"]["cc"],
+                *issue["recipients"]["bcc"],
+            ]
+            reason = issue["delivery_result_message"] or issue["message"]
+            if issue["delivery_result_code"]:
+                reason = f"{issue['delivery_result_code']}: {reason}"
+            lines.append(
+                f"- {issue['issuer_label']}; račun {issue['invoice_number'] or '-'}; "
+                f"prejemniki {', '.join(recipients) or '-'}; razlog: {reason}"
+            )
+    return "\n".join(lines) + "\n"
+
+
+def prepare_monthly_summary(cycle, configuration) -> MonthlySummaryAttempt:
+    from invoicing.services import stanje_zakljucne_kontrole_mesecnega_cikla
+
+    from .configuration import resolve_monthly_summary_configuration
+
+    if cycle.pk is None:
+        raise ValidationError("Cycle must be saved.")
+    configuration = resolve_monthly_summary_configuration(configuration)
+    final_state = stanje_zakljucne_kontrole_mesecnega_cikla(cycle)
+    if final_state["delivery_pending_count"] > 0:
+        raise ValidationError("Monthly summary cannot be prepared while invoice delivery is pending.")
+    prepared_at = timezone.localtime(timezone.now())
+    snapshot = _monthly_summary_snapshot(cycle, final_state, prepared_at)
+    subject = f"Mesečni postopek – {cycle.obdobje:%m/%Y}"
+    body = _monthly_summary_body(snapshot)
+    with transaction.atomic():
+        current_cycle = MonthlyCycle.objects.get(pk=cycle.pk)
+        _require_active_step_6(current_cycle)
+        latest = (
+            MonthlySummaryAttempt.objects.filter(cycle=current_cycle)
+            .order_by("-sequence")
+            .first()
+        )
+        if latest is not None:
+            if latest.result == MonthlySummaryAttempt.Result.ACCEPTED:
+                raise ValidationError("Monthly summary was already accepted.")
+            raise ValidationError("A monthly summary attempt already exists; use the retry service when allowed.")
+        return MonthlySummaryAttempt.objects.create(
+            cycle=current_cycle,
+            sequence=1,
+            sender=configuration.email,
+            recipient=configuration.email,
+            subject=subject,
+            body=body,
+            summary_snapshot=snapshot,
+        )
+
+
+def prepare_monthly_summary_retry(failed_attempt) -> MonthlySummaryAttempt:
+    if failed_attempt.pk is None:
+        raise ValidationError("Monthly summary attempt must be saved.")
+    with transaction.atomic():
+        current = MonthlySummaryAttempt.objects.select_related("cycle").get(
+            pk=failed_attempt.pk
+        )
+        _require_active_step_6(current.cycle)
+        latest = (
+            MonthlySummaryAttempt.objects.filter(cycle_id=current.cycle_id)
+            .order_by("-sequence")
+            .first()
+        )
+        if latest.pk != current.pk or current.result != MonthlySummaryAttempt.Result.CONFIRMED_FAILURE:
+            raise ValidationError("Only the latest confirmed failure can be retried.")
+        return MonthlySummaryAttempt.objects.create(
+            cycle_id=current.cycle_id,
+            sequence=current.sequence + 1,
+            sender=current.sender,
+            recipient=current.recipient,
+            subject=current.subject,
+            body=current.body,
+            summary_snapshot=deepcopy(current.summary_snapshot),
+        )
+
+
+def build_monthly_summary_email(attempt) -> PreparedMonthlySummaryEmail:
+    if attempt.pk is None:
+        raise ValidationError("Monthly summary attempt must be saved.")
+    current = MonthlySummaryAttempt.objects.get(pk=attempt.pk)
+    if current.result != MonthlySummaryAttempt.Result.PREPARED:
+        raise ValidationError("Only a prepared monthly summary can be composed.")
+    message = EmailMessage()
+    message["From"] = current.sender
+    message["To"] = current.recipient
+    message["Subject"] = current.subject
+    message.set_content(current.body)
+    return PreparedMonthlySummaryEmail(message, current.sender, (current.recipient,))
+
+
+def _transition_monthly_summary(attempt, *, expected, result, **values):
+    updated = MonthlySummaryAttempt.objects.filter(pk=attempt.pk, result=expected).update(
+        result=result, **values
+    )
+    if updated != 1:
+        raise ValidationError(f"Invalid monthly summary transition; expected {expected}.")
+    return MonthlySummaryAttempt.objects.get(pk=attempt.pk)
+
+
+def send_monthly_summary(
+    attempt,
+    smtp_config,
+    credential_ref,
+    *,
+    password_loader=None,
+    smtp_factory=None,
+):
+    from .credentials import load_password
+    from .transport import SmtpConfig, _default_smtp_factory, send_prepared_email
+
+    current = MonthlySummaryAttempt.objects.get(pk=attempt.pk)
+    if not isinstance(smtp_config, SmtpConfig):
+        raise ValidationError("A valid SMTP configuration is required.")
+    if current.sender != current.recipient:
+        raise ValidationError("Monthly summary sender and recipient must match.")
+    if smtp_config.username != current.sender:
+        raise ValidationError("SMTP username must match the monthly summary sender.")
+    prepared = build_monthly_summary_email(current)
+    started = current
+
+    def mark_started():
+        nonlocal started
+        started = _transition_monthly_summary(
+            current,
+            expected=MonthlySummaryAttempt.Result.PREPARED,
+            result=MonthlySummaryAttempt.Result.SUBMISSION_STARTED,
+            submission_started_at=timezone.now(),
+        )
+
+    result = send_prepared_email(
+        prepared,
+        smtp_config,
+        credential_ref,
+        on_submission_started=mark_started,
+        password_loader=password_loader or load_password,
+        smtp_factory=smtp_factory or _default_smtp_factory,
+    )
+    code, message = _sanitize(result.code, result.message)
+    if result.success:
+        final = MonthlySummaryAttempt.Result.ACCEPTED
+    elif result.submission_started and result.code == "SMTP_RESULT_UNKNOWN":
+        final = MonthlySummaryAttempt.Result.UNKNOWN
+    else:
+        final = MonthlySummaryAttempt.Result.CONFIRMED_FAILURE
+    return _transition_monthly_summary(
+        started,
+        expected=started.result,
+        result=final,
+        result_code=code,
+        message=message,
+        completed_at=timezone.now(),
+    )
+
+
+def _require_active_step_6(cycle):
+    if (
+        cycle.status != MonthlyCycle.Status.V_TEKU
+        or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
+    ):
+        raise ValidationError("Monthly cycle must remain active in Step 6.")
 
 
 def _transition(attempt, *, expected, result, **values) -> DeliveryAttempt:
