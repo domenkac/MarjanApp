@@ -50,7 +50,16 @@ from contracts.services import (
 from delivery.configuration import (
     SmtpConfigurationError,
     resolve_keyring_credential_ref,
+    resolve_monthly_summary_configuration,
+    resolve_monthly_summary_credential_ref,
+    resolve_monthly_summary_smtp_config,
     resolve_smtp_config,
+)
+from delivery.models import MonthlySummaryAttempt, MonthlySummaryConfiguration
+from delivery.services import (
+    prepare_monthly_summary,
+    prepare_monthly_summary_retry,
+    send_monthly_summary,
 )
 from delivery.transport import test_smtp_connection as check_smtp_connection
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
@@ -97,6 +106,7 @@ from .forms import (
     LeaseItemCorrectionForm,
     LeaseItemCreateForm,
     LeaseItemDetailsForm,
+    MonthlySummaryConfigurationForm,
     PropertyForm,
     RecipientContactForm,
     SampleConfirmationForm,
@@ -537,6 +547,70 @@ def nastavitve(request):
         request,
         "ui/nastavitve.html",
         _settings_context(companies=companies),
+    )
+
+
+def _monthly_summary_settings_context(*, form=None, success=False, action_errors=None):
+    configuration = MonthlySummaryConfiguration.objects.filter(pk=1).first()
+    return _settings_context(
+        form=form or MonthlySummaryConfigurationForm(instance=configuration),
+        configuration=configuration,
+        success=success,
+        action_errors=action_errors,
+    )
+
+
+@require_http_methods(["GET", "POST"])
+def nastavitve_zbirno_porocilo(request):
+    configuration = MonthlySummaryConfiguration.objects.filter(pk=1).first()
+    form = MonthlySummaryConfigurationForm(
+        request.POST or None,
+        instance=configuration or MonthlySummaryConfiguration(pk=1),
+    )
+    if request.method == "POST" and form.is_valid():
+        form.save()
+        response = redirect("ui:nastavitve_zbirno_porocilo")
+        response["Location"] += "?shranjeno=1"
+        return response
+    return render(
+        request,
+        "ui/monthly_summary_settings.html",
+        _monthly_summary_settings_context(
+            form=form, success=request.GET.get("shranjeno") == "1"
+        ),
+    )
+
+
+@require_POST
+def test_monthly_summary_smtp_connection(request):
+    try:
+        configuration = resolve_monthly_summary_configuration()
+        config = resolve_monthly_summary_smtp_config(configuration)
+        credential_ref = resolve_monthly_summary_credential_ref(configuration)
+    except SmtpConfigurationError:
+        return render(
+            request,
+            "ui/monthly_summary_settings.html",
+            _monthly_summary_settings_context(
+                action_errors=["Nastavitve zbirnega poročila niso veljavne."]
+            ),
+            status=400,
+        )
+    result = check_smtp_connection(config, credential_ref)
+    return render(
+        request,
+        "ui/monthly_summary_settings.html",
+        _monthly_summary_settings_context(
+            action_errors=None
+            if result.success
+            else [
+                _SMTP_RESULT_MESSAGES.get(
+                    result.code, "Preverjanje SMTP povezave ni uspelo."
+                )
+            ]
+        )
+        | {"smtp_test_success": result.success},
+        status=200 if result.success else 502,
     )
 
 
@@ -1213,6 +1287,58 @@ def mesecni_obracun(request):
         except Exception:  # noqa: BLE001 - never expose filesystem details
             review_error = "Arhiviranja ni bilo mogoče izvesti."
 
+    if request.method == "POST" and action == "send_monthly_summary":
+        error_code = None
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Zbirno poročilo je dovoljeno samo v koraku 6.")
+            latest_attempt = (
+                MonthlySummaryAttempt.objects.filter(cycle=cycle)
+                .order_by("-sequence")
+                .first()
+            )
+            if latest_attempt is None:
+                configuration = resolve_monthly_summary_configuration()
+                final_state = stanje_zakljucne_kontrole_mesecnega_cikla(cycle)
+                if final_state["delivery_pending_count"]:
+                    raise ValidationError("Čaka se zaključek dostave računov.")
+                attempt = prepare_monthly_summary(cycle, configuration)
+            elif latest_attempt.result == MonthlySummaryAttempt.Result.PREPARED:
+                configuration = resolve_monthly_summary_configuration()
+                if (
+                    configuration.email != latest_attempt.sender
+                    or configuration.email != latest_attempt.recipient
+                ):
+                    raise SmtpConfigurationError(
+                        "Nastavitve zbirnega poročila niso veljavne."
+                    )
+                attempt = latest_attempt
+            elif latest_attempt.result == MonthlySummaryAttempt.Result.CONFIRMED_FAILURE:
+                configuration = resolve_monthly_summary_configuration()
+                if (
+                    configuration.email != latest_attempt.sender
+                    or configuration.email != latest_attempt.recipient
+                ):
+                    raise SmtpConfigurationError(
+                        "Nastavitve zbirnega poročila niso veljavne."
+                    )
+                attempt = prepare_monthly_summary_retry(latest_attempt)
+            else:
+                raise ValidationError("Ponovno pošiljanje v trenutnem stanju ni dovoljeno.")
+            smtp_config = resolve_monthly_summary_smtp_config(configuration)
+            credential_ref = resolve_monthly_summary_credential_ref(configuration)
+            send_monthly_summary(attempt, smtp_config, credential_ref)
+        except SmtpConfigurationError:
+            error_code = "configuration"
+        except ValidationError:
+            error_code = "send"
+        except Exception:  # noqa: BLE001 - never expose SMTP or keyring details
+            error_code = "send"
+        response = redirect("ui:mesecni_obracun")
+        if error_code:
+            response["Location"] += f"?summary_error={error_code}"
+        return response
+
     if request.method == "POST" and not action:
         obdobje_od = form.cleaned_data.get("obdobje_od")
         obdobje_do = form.cleaned_data.get("obdobje_do")
@@ -1338,6 +1464,8 @@ def mesecni_obracun(request):
     delivery_can_send = False
     archive_state = None
     final_control_state = None
+    monthly_summary_configuration_valid = False
+    latest_monthly_summary_attempt = None
     archive_configuration_valid = False
     archive_can_run = False
     if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
@@ -1369,6 +1497,21 @@ def mesecni_obracun(request):
             pass
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
+        try:
+            resolve_monthly_summary_configuration()
+            monthly_summary_configuration_valid = True
+        except SmtpConfigurationError:
+            pass
+        latest_monthly_summary_attempt = (
+            MonthlySummaryAttempt.objects.filter(cycle=cycle)
+            .order_by("-sequence")
+            .first()
+        )
+        summary_error = request.GET.get("summary_error")
+        if summary_error == "configuration":
+            review_error = "Nastavitve zbirnega poročila niso veljavne."
+        elif summary_error == "send":
+            review_error = "Zbirnega poročila ni bilo mogoče poslati."
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -1398,6 +1541,8 @@ def mesecni_obracun(request):
             "delivery_can_send": delivery_can_send,
             "archive_state": archive_state,
             "final_control_state": final_control_state,
+            "monthly_summary_configuration_valid": monthly_summary_configuration_valid,
+            "latest_monthly_summary_attempt": latest_monthly_summary_attempt,
             "archive_configuration_valid": archive_configuration_valid,
             "archive_can_run": archive_can_run,
             "step4_complete": bool(

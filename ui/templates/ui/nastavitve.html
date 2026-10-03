@@ -6,6 +6,7 @@
   <a class="button-primary" href="{% url 'ui:podjetje_novo' %}">+ Dodaj podjetje</a>
 </header>
 <p class="form-note"><span class="material-symbols-outlined" aria-hidden="true">info</span>Spremembe podjetij ne spreminjajo že začetega mesečnega obračuna.</p>
+<section class="settings-card"><div class="card-heading"><span class="material-symbols-outlined" aria-hidden="true">outgoing_mail</span><h2>Zbirno mesečno poročilo</h2></div><p>Nastavite svoj e-naslov za zbirno poročilo celotnega mesečnega postopka.</p><a class="button-secondary" href="{% url 'ui:nastavitve_zbirno_porocilo' %}">Odpri nastavitve</a></section>
 <section class="settings-table-wrap">
 {% if companies %}
 <table class="settings-table"><thead><tr><th>Naziv</th><th>Davčna številka</th><th>Matična številka</th><th>Država</th><th>TRR</th><th>DDV</th><th>Status</th><th></th></tr></thead>

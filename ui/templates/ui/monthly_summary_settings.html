@@ -1,0 +1,14 @@
+{% extends "ui/base.html" %}
+{% block title %}Zbirno mesečno poročilo · Nastavitve{% endblock %}
+{% block content %}
+<header class="page-heading settings-heading"><div><p class="eyebrow">Nastavitve · Zbirno mesečno poročilo</p><h1>Zbirno mesečno poročilo</h1><p>Poročilo se pošlje s tega e-naslova na isti e-naslov.</p></div></header>
+{% if success %}<div class="form-success" role="status"><p>Nastavitve zbirnega poročila so shranjene.</p></div>{% endif %}
+{% if smtp_test_success %}<div class="form-success" role="status"><p>SMTP povezava in prijava sta uspešni.</p></div>{% endif %}
+{% if action_errors %}<div class="form-errors" role="alert">{% for error in action_errors %}<p>{{ error }}</p>{% endfor %}</div>{% endif %}
+<section class="settings-card">
+  <p>Geslo oziroma app-password je shranjen samo v Keychainu. Aplikacija ga ne shrani v podatkovno bazo in ga ne prikaže.</p>
+  <p>Ta nastavitev je ločena od e-naslovov računovodij pri podjetjih.</p>
+  <form method="post" novalidate>{% csrf_token %}{% include "ui/partials/form_fields.html" %}<div class="form-actions"><button class="button-primary" type="submit">Shrani nastavitve</button></div></form>
+  {% if configuration %}<form method="post" action="{% url 'ui:test_monthly_summary_smtp_connection' %}" class="form-actions">{% csrf_token %}<button class="button-secondary" type="submit">Preveri SMTP povezavo</button></form>{% endif %}
+</section>
+{% endblock %}

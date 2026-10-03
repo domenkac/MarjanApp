@@ -8,6 +8,20 @@ from archive.services import ArchiveRoots
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
+from delivery.models import MonthlySummaryConfiguration
+
+
+class MonthlySummaryConfigurationForm(forms.ModelForm):
+    class Meta:
+        model = MonthlySummaryConfiguration
+        fields = ("email", "keychain_credential_key")
+        labels = {  # noqa: RUF012
+            "email": "E-naslov za zbirno poročilo",
+            "keychain_credential_key": "Ključ poverilnice v Keychainu",
+        }
+        error_messages = {  # noqa: RUF012
+            "email": {"invalid": "Vnesite veljaven e-poštni naslov."},
+        }
 
 
 class ArchiveConfigurationForm(forms.Form):

@@ -20,6 +20,7 @@ from .views import (
     najemniki,
     nastavitve,
     nastavitve_arhiv,
+    nastavitve_zbirno_porocilo,
     nepremicnina_arhiviraj,
     nepremicnina_detail,
     nepremicnina_nova,
@@ -53,6 +54,7 @@ from .views import (
     storitev_detail,
     storitev_nova,
     storitve,
+    test_monthly_summary_smtp_connection,
     test_smtp_connection,
 )
 
@@ -90,6 +92,8 @@ urlpatterns = [
     path("pogodbe/najemniki/<int:tenant_id>/reaktiviraj/", najemnik_reaktiviraj, name="najemnik_reaktiviraj"),
     path("nastavitve/", nastavitve, name="nastavitve"),
     path("nastavitve/arhiv/", nastavitve_arhiv, name="nastavitve_arhiv"),
+    path("nastavitve/zbirno-porocilo/", nastavitve_zbirno_porocilo, name="nastavitve_zbirno_porocilo"),
+    path("nastavitve/zbirno-porocilo/test-smtp/", test_monthly_summary_smtp_connection, name="test_monthly_summary_smtp_connection"),
     path("nastavitve/ddv/", ddv_rezimi, name="ddv_rezimi"),
     path("nastavitve/ddv/nov/", ddv_rezim_nov, name="ddv_rezim_nov"),
     path("nastavitve/ddv/<int:regime_id>/", ddv_rezim_detail, name="ddv_rezim_detail"),
