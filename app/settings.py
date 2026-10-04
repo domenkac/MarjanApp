@@ -14,6 +14,8 @@ DEBUG = os.environ.get("DJANGO_DEBUG", "1").strip().lower() in {
     "on",
 }
 ALLOWED_HOSTS = ["127.0.0.1", "localhost"]
+TIME_ZONE = "Europe/Ljubljana"
+USE_TZ = True
 
 # Empty defaults fail closed in delivery.configuration before any network access.
 MARJAN_SMTP_HOST = os.environ.get("MARJAN_SMTP_HOST", "")
