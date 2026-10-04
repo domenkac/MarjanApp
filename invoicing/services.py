@@ -4,7 +4,7 @@ import re
 from calendar import monthrange
 from collections import Counter
 from dataclasses import dataclass
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from decimal import Decimal, InvalidOperation
 from enum import StrEnum
 from itertools import pairwise
@@ -3674,6 +3674,193 @@ def stanje_zakljucne_kontrole_mesecnega_cikla(cycle):
         "per_company": per_company,
         "issues": issues,
     }
+
+
+def _veljavno_dokazilo_zakljucka(cycle):
+    snapshot = cycle.completion_snapshot
+    if not (
+        cycle.status == MonthlyCycle.Status.ZAKLJUCEN
+        and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK
+        and cycle.completed_at
+        and isinstance(snapshot, dict)
+        and snapshot.get("schema_version") == 1
+        and snapshot.get("cycle_id") == cycle.pk
+        and snapshot.get("period") == cycle.obdobje.isoformat()
+        and snapshot.get("headline") == "Mesečni postopek uspešno zaključen"
+        and snapshot.get("all_required_work_successful") is True
+        and snapshot.get("requires_attention") is False
+        and isinstance(snapshot.get("per_company"), list)
+        and snapshot.get("issues") == []
+        and snapshot.get("summary_result") == "ACCEPTED"
+    ):
+        return False
+    counts = (
+        "prepared_count",
+        "sent_count",
+        "intentionally_unissued_count",
+        "failed_count",
+        "unknown_count",
+        "delivery_pending_count",
+        "archive_verified_count",
+        "archive_pending_count",
+        "conflict_count",
+    )
+    if any(
+        isinstance(snapshot.get(field), bool)
+        or not isinstance(snapshot.get(field), int)
+        or snapshot[field] < 0
+        for field in counts
+    ):
+        return False
+    if any(
+        snapshot[field] != 0
+        for field in (
+            "failed_count",
+            "unknown_count",
+            "delivery_pending_count",
+            "archive_pending_count",
+            "conflict_count",
+        )
+    ):
+        return False
+    if snapshot["archive_verified_count"] != snapshot["prepared_count"]:
+        return False
+    for field in ("summary_attempt_id", "summary_attempt_sequence"):
+        value = snapshot.get(field)
+        if isinstance(value, bool) or not isinstance(value, int) or value < 1:
+            return False
+    for field in ("summary_recipient", "summary_subject", "summary_result_code"):
+        value = snapshot.get(field)
+        if not isinstance(value, str) or not value.strip():
+            return False
+    completed_at = snapshot.get("summary_completed_at")
+    if not isinstance(completed_at, str) or not completed_at.strip():
+        return False
+    try:
+        datetime.fromisoformat(completed_at)
+    except ValueError:
+        return False
+    return True
+
+
+def _preveri_uspesno_zakljucno_kontrolo(state, cycle):
+    if (
+        state.get("cycle_id") != cycle.pk
+        or state.get("period") != cycle.obdobje
+        or state.get("all_required_work_successful") is not True
+        or state.get("requires_attention") is not False
+        or state.get("delivery_complete") is not True
+        or state.get("archive_complete") is not True
+        or state.get("headline") != "Mesečni postopek uspešno zaključen"
+        or any(
+            state.get(field) != 0
+            for field in (
+                "failed_count",
+                "unknown_count",
+                "delivery_pending_count",
+                "archive_pending_count",
+                "conflict_count",
+            )
+        )
+        or state.get("archive_verified_count") != state.get("prepared_count")
+        or state.get("issues") != []
+    ):
+        raise ValidationError("Mesečna končna kontrola še ni uspešno zaključena.")
+
+
+def _posnetek_zakljucka(cycle, state, summary_attempt):
+    snapshot = {
+        "schema_version": 1,
+        "cycle_id": cycle.pk,
+        "period": cycle.obdobje.isoformat(),
+        **{
+            field: state[field]
+            for field in (
+                "headline",
+                "all_required_work_successful",
+                "requires_attention",
+                "prepared_count",
+                "sent_count",
+                "intentionally_unissued_count",
+                "failed_count",
+                "unknown_count",
+                "delivery_pending_count",
+                "archive_verified_count",
+                "archive_pending_count",
+                "conflict_count",
+                "per_company",
+                "issues",
+            )
+        },
+        "summary_attempt_id": summary_attempt.pk,
+        "summary_attempt_sequence": summary_attempt.sequence,
+        "summary_recipient": summary_attempt.recipient,
+        "summary_subject": summary_attempt.subject,
+        "summary_completed_at": summary_attempt.completed_at.isoformat(),
+        "summary_result": "ACCEPTED",
+        "summary_result_code": summary_attempt.result_code,
+    }
+    return json.loads(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
+
+
+def zakljuci_mesecni_cikel(cycle):
+    from delivery.models import MonthlySummaryAttempt
+
+    if cycle.pk is None:
+        raise ValidationError("Mesečni cikel mora biti shranjen.")
+    current = MonthlyCycle.objects.get(pk=cycle.pk)
+    if current.status == MonthlyCycle.Status.ZAKLJUCEN:
+        if not _veljavno_dokazilo_zakljucka(current):
+            raise ValidationError("Zaključen mesečni cikel nima veljavnega dokazila zaključka.")
+        return current
+    if (
+        current.status != MonthlyCycle.Status.V_TEKU
+        or current.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
+    ):
+        raise NeveljavenPrehodMesecnegaCikla(
+            "Mesečni cikel je mogoče zaključiti samo v aktivnem koraku 6."
+        )
+
+    final_state = stanje_zakljucne_kontrole_mesecnega_cikla(current)
+    _preveri_uspesno_zakljucno_kontrolo(final_state, current)
+    summary_attempt = (
+        MonthlySummaryAttempt.objects.filter(cycle=current)
+        .order_by("-sequence")
+        .first()
+    )
+    if (
+        summary_attempt is None
+        or summary_attempt.result != MonthlySummaryAttempt.Result.ACCEPTED
+        or summary_attempt.completed_at is None
+    ):
+        raise ValidationError("Najnovejši zbirni poskus mora imeti rezultat ACCEPTED.")
+    snapshot = _posnetek_zakljucka(current, final_state, summary_attempt)
+
+    with transaction.atomic():
+        fresh = MonthlyCycle.objects.get(pk=current.pk)
+        if (
+            fresh.status != MonthlyCycle.Status.V_TEKU
+            or fresh.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
+        ):
+            raise NeveljavenPrehodMesecnegaCikla(
+                "Stanje mesečnega cikla se je med zaključevanjem spremenilo."
+            )
+        latest_attempt = (
+            MonthlySummaryAttempt.objects.filter(cycle=fresh)
+            .order_by("-sequence")
+            .first()
+        )
+        if (
+            latest_attempt is None
+            or latest_attempt.pk != summary_attempt.pk
+            or latest_attempt.result != MonthlySummaryAttempt.Result.ACCEPTED
+        ):
+            raise ValidationError("Zbirni poskus se je med zaključevanjem spremenil.")
+        fresh.status = MonthlyCycle.Status.ZAKLJUCEN
+        fresh.completed_at = timezone.now()
+        fresh.completion_snapshot = snapshot
+        fresh.save(update_fields=["status", "completed_at", "completion_snapshot"])
+    return fresh
 
 
 def arhiviraj_poslane_racune_mesecnega_cikla(cycle, roots):

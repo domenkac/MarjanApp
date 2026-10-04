@@ -22,6 +22,8 @@ class MonthlyCycle(models.Model):
         default=Korak.IZBIRA_MESECA,
     )
     status = models.CharField(max_length=9, choices=Status, default=Status.V_TEKU)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    completion_snapshot = models.JSONField(null=True, blank=True)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 
