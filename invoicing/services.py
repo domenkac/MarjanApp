@@ -2560,10 +2560,38 @@ def _decimal_iz_posnetka(value, label, *, max_digits=10, decimal_places=2):
     return number
 
 
-def _preveri_in_pripravi_zamrznjenega_kandidata(snapshot, candidate, review):
+def preveri_integriteto_zamrznjenega_mesecnega_posnetka(snapshot, batch):
+    if not isinstance(snapshot, dict):
+        raise ValidationError("Zamrznjeni posnetek ni veljaven objekt.")
+    if "candidates" not in snapshot or not isinstance(snapshot["candidates"], list):
+        raise ValidationError("Kandidati zamrznjenega posnetka morajo biti seznam.")
     if snapshot.get("schema_version") != CALCULATION_SNAPSHOT_VERSION:
         raise ValidationError("Razli\u010dica zamrznjenega posnetka ni podprta.")
     company = snapshot.get("company")
+    required = ("period_start", "period_end", "issue_date", "pdf_template_version")
+    if not isinstance(company, dict) or any(key not in snapshot for key in required):
+        raise ValidationError("Glava zamrznjenega posnetka je nepopolna.")
+    if company.get("id") != batch.company_id:
+        raise ValidationError("Podjetje zamrznjenega posnetka ni skladno s paketom.")
+    period_start = _datum_iz_posnetka(snapshot["period_start"], "Za\u010detek obdobja")
+    period_end = _datum_iz_posnetka(snapshot["period_end"], "Konec obdobja")
+    issue_date = _datum_iz_posnetka(snapshot["issue_date"], "Datum izdaje")
+    expected_end = period_start.replace(
+        day=monthrange(period_start.year, period_start.month)[1]
+    )
+    if (
+        period_start != batch.cycle.obdobje
+        or period_end != expected_end
+        or issue_date != batch.cycle.datum_izdaje
+    ):
+        raise ValidationError("Obdobje zamrznjenega posnetka ni skladno s ciklom.")
+    return company
+
+
+def preveri_integriteto_zamrznjenega_kandidata(snapshot, candidate, review):
+    company = preveri_integriteto_zamrznjenega_mesecnega_posnetka(
+        snapshot, review.batch
+    )
     tenant = candidate.get("tenant")
     signatory = company.get("signatory") if isinstance(company, dict) else None
     if not isinstance(company, dict) or not isinstance(tenant, dict) or not isinstance(signatory, dict):
@@ -2765,7 +2793,7 @@ def _nalozi_podatke_materializacije(
         )
     except MonthlyCandidateReview.DoesNotExist as exc:
         raise ValidationError("Manjka pregled zamrznjenega kandidata.") from exc
-    prepared = _preveri_in_pripravi_zamrznjenega_kandidata(
+    prepared = preveri_integriteto_zamrznjenega_kandidata(
         snapshot, candidate, review
     )
     if not Lease.objects.filter(pk=lease_id).exists():

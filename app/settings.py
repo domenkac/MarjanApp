@@ -35,6 +35,7 @@ INSTALLED_APPS = [
     "delivery",
     "rendering",
     "archive",
+    "accounting_export",
     "ui",
 ]
 MIDDLEWARE = ["django.middleware.csrf.CsrfViewMiddleware"]
