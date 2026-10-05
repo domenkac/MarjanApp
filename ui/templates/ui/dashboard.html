@@ -21,6 +21,15 @@
 
 {% if confirmation_tasks %}<section class="panel confirmation-tasks"><div class="panel-heading"><div><span class="material-symbols-outlined" aria-hidden="true">verified</span><h2>Potrebne potrditve</h2></div><span class="status-badge is-blocked">{{ confirmation_tasks|length }}</span></div><table class="settings-table"><thead><tr><th>Podjetje</th><th>DDV</th><th>Vzorec</th><th></th></tr></thead><tbody>{% for company, ddv, sample in confirmation_tasks %}<tr><td><strong>{{ company.naziv }}</strong></td><td>{% if ddv.stanje != 'valid' %}<span class="status-badge{% if ddv.stanje == 'stale' %} is-blocked{% endif %}">{% if ddv.stanje == 'stale' %}Zastarela{% else %}Manjka{% endif %}</span>{% else %}Veljavna{% endif %}</td><td>{% if sample.stanje != 'valid' %}<span class="status-badge{% if sample.stanje == 'stale' %} is-blocked{% endif %}">{% if sample.stanje == 'stale' %}Zastarela{% else %}Manjka{% endif %}</span>{% else %}Veljavna{% endif %}</td><td><a class="button-secondary compact" href="{% url 'ui:podjetje_detail' company.pk %}">Odpri</a></td></tr>{% endfor %}</tbody></table></section>{% endif %}
 
+{% if zadnji_zakljuceni_cikel %}<section class="panel">
+  <div class="panel-heading"><div><span class="material-symbols-outlined" aria-hidden="true">task_alt</span><h2>Zadnji zaključen mesečni obračun</h2></div></div>
+  {% if zadnji_zakljuceni_rezultat %}
+  <div class="form-note" role="status"><span class="material-symbols-outlined" aria-hidden="true">check_circle</span><strong>{{ zadnji_zakljuceni_rezultat.headline }}</strong></div>
+  <dl><dt>Mesec</dt><dd>{{ zadnji_zakljuceni_cikel.obdobje|date:"m/Y" }}</dd><dt>Zaključeno</dt><dd>{{ zadnji_zakljuceni_cikel.completed_at|date:"d. m. Y H:i:s" }}</dd><dt>Pripravljeni</dt><dd>{{ zadnji_zakljuceni_rezultat.prepared_count }}</dd><dt>Poslani</dt><dd>{{ zadnji_zakljuceni_rezultat.sent_count }}</dd><dt>Namenoma neizdani</dt><dd>{{ zadnji_zakljuceni_rezultat.intentionally_unissued_count }}</dd><dt>Arhiv preverjen</dt><dd>{{ zadnji_zakljuceni_rezultat.archive_verified_count }}</dd><dt>Prejemnik zbirnega poročila</dt><dd>{{ zadnji_zakljuceni_rezultat.summary_recipient }}</dd></dl>
+  {% if zadnji_zakljuceni_rezultat.per_company %}<div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje</th><th>Pripravljeni</th><th>Poslani</th><th>Namenoma neizdani</th><th>Arhiv preverjen</th></tr></thead><tbody>{% for item in zadnji_zakljuceni_rezultat.per_company %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.prepared_count }}</td><td>{{ item.sent_count }}</td><td>{{ item.intentionally_unissued_count }}</td><td>{{ item.archive_verified_count }}</td></tr>{% endfor %}</tbody></table></div>{% endif %}
+  {% else %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">warning</span>Podatkov zadnjega zaključenega mesečnega cikla ni mogoče zanesljivo prikazati.</div>{% endif %}
+</section>{% endif %}
+
 <div class="dashboard-grid">
   <section class="panel">
     <div class="panel-heading">
@@ -30,7 +39,7 @@
     <div class="empty-state">
       <span class="material-symbols-outlined" aria-hidden="true">inbox</span>
       <h3>Ni aktivnih opravil</h3>
-      <p>Trajno stanje mesečnih postopkov še ni prikazano.</p>
+      <p>Trenutno ni odprtega mesečnega postopka.</p>
     </div>
   </section>
 
@@ -40,7 +49,7 @@
     </div>
     <div class="delivery-state">
       <span class="status-dot" aria-hidden="true"></span>
-      <div><strong>Pošiljanje ni vključeno</strong><p>Dostava računov bo dodana v kasnejši fazi.</p></div>
+      <div><strong>Dostava je del mesečnega obračuna</strong><p>Stanje dostave je prikazano v aktivnem mesečnem postopku.</p></div>
     </div>
   </section>
 </div>

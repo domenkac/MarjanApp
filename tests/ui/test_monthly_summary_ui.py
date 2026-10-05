@@ -1,6 +1,7 @@
 from types import SimpleNamespace
 
 import pytest
+from django.core.exceptions import ValidationError
 from django.urls import reverse
 
 from delivery.credentials import KeyringCredentialRef
@@ -80,6 +81,27 @@ def attempt(cycle, result=MonthlySummaryAttempt.Result.PREPARED, sequence=1):
         body="Vsebina",
         summary_snapshot={},
         result=result,
+    )
+
+
+def successful_final_state():
+    state = final_state()
+    state.update(
+        headline="Mesečni postopek uspešno zaključen",
+        requires_attention=False,
+        all_required_work_successful=True,
+    )
+    return state
+
+
+def prepare_finalization_ui(monkeypatch, cycle, state):
+    monkeypatch.setattr(
+        "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda _cycle: state,
+    )
+    monkeypatch.setattr(
+        "ui.views.stanje_dostave_mesecnega_cikla",
+        lambda _cycle: {"per_invoice": []},
     )
 
 
@@ -376,3 +398,98 @@ def test_summary_send_error_is_safe(client, cycle, configuration, monkeypatch):
     assert existing.pk
     assert "Zbirnega poročila ni bilo mogoče poslati." in content
     assert "secret-value" not in content
+
+
+def test_step6_final_button_requires_successful_control_and_accepted_summary(
+    client, monkeypatch, cycle, configuration
+):
+    prepare_finalization_ui(monkeypatch, cycle, successful_final_state())
+    attempt(cycle, MonthlySummaryAttempt.Result.ACCEPTED)
+
+    content = client.get(reverse("ui:mesecni_obracun")).content.decode()
+
+    assert "Zaključi mesečni cikel" in content
+
+
+@pytest.mark.parametrize(
+    ("state", "result"),
+    [
+        (final_state(), MonthlySummaryAttempt.Result.ACCEPTED),
+        (successful_final_state(), MonthlySummaryAttempt.Result.PREPARED),
+    ],
+)
+def test_step6_final_button_stays_hidden_when_not_eligible(
+    client, monkeypatch, cycle, configuration, state, result
+):
+    prepare_finalization_ui(monkeypatch, cycle, state)
+    attempt(cycle, result)
+
+    content = client.get(reverse("ui:mesecni_obracun")).content.decode()
+
+    assert "Zaključi mesečni cikel" not in content
+
+
+def test_step6_get_never_finalizes(client, monkeypatch, cycle, configuration):
+    prepare_finalization_ui(monkeypatch, cycle, successful_final_state())
+    attempt(cycle, MonthlySummaryAttempt.Result.ACCEPTED)
+    monkeypatch.setattr(
+        "ui.views.zakljuci_mesecni_cikel",
+        lambda *_args: pytest.fail("GET ne sme zaključiti cikla."),
+    )
+
+    assert client.get(reverse("ui:mesecni_obracun")).status_code == 200
+
+
+def test_finalize_post_calls_only_finalization_service_once_and_redirects(
+    client, monkeypatch, cycle
+):
+    calls = []
+    monkeypatch.setattr(
+        "ui.views.zakljuci_mesecni_cikel",
+        lambda received: calls.append(received.pk),
+    )
+    for name in (
+        "poslji_dostavo_mesecnega_cikla",
+        "arhiviraj_poslane_racune_mesecnega_cikla",
+        "send_monthly_summary",
+    ):
+        monkeypatch.setattr(
+            f"ui.views.{name}",
+            lambda *_args, **_kwargs: pytest.fail(
+                "Finalizacija ne sme izvajati drugih operacij."
+            ),
+        )
+
+    response = client.post(
+        reverse("ui:mesecni_obracun"), {"action": "finalize_monthly_cycle"}
+    )
+
+    cycle.refresh_from_db()
+    assert calls == [cycle.pk]
+    assert response.status_code == 302
+    assert response.url == reverse("ui:dashboard")
+    assert cycle.status == MonthlyCycle.Status.V_TEKU
+
+
+def test_finalize_backend_rejection_keeps_cycle_open_and_shows_safe_error(
+    client, monkeypatch, cycle, configuration
+):
+    prepare_finalization_ui(monkeypatch, cycle, successful_final_state())
+    attempt(cycle, MonthlySummaryAttempt.Result.ACCEPTED)
+
+    def reject(_cycle):
+        raise ValidationError("/secret/path SMTP password=hidden")
+
+    monkeypatch.setattr("ui.views.zakljuci_mesecni_cikel", reject)
+
+    response = client.post(
+        reverse("ui:mesecni_obracun"), {"action": "finalize_monthly_cycle"}
+    )
+
+    cycle.refresh_from_db()
+    content = response.content.decode()
+    assert response.status_code == 200
+    assert cycle.status == MonthlyCycle.Status.V_TEKU
+    assert "Mesečnega cikla ni bilo mogoče zaključiti." in content
+    assert "/secret/path" not in content
+    assert "password" not in content

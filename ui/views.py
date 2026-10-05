@@ -72,6 +72,7 @@ from invoicing.services import (
     izdaj_zamrznjeni_mesecni_paket,
     izracunaj_mesecne_kandidate,
     nalozi_aktivni_mesecni_cikel,
+    nalozi_zadnji_zakljuceni_mesecni_rezultat,
     nastavi_izbiro_kandidata,
     odpri_zakljucek_mesecnega_cikla,
     poslji_dostavo_mesecnega_cikla,
@@ -88,6 +89,7 @@ from invoicing.services import (
     trenutni_mesecni_kandidat,
     trenutni_pregledi_mesecnega_cikla,
     uskladi_preglede_mesecnega_cikla,
+    zakljuci_mesecni_cikel,
     zamrzni_paket_za_potrditev,
 )
 from rendering.contexts import PdfRenderNapaka
@@ -1020,6 +1022,9 @@ def podpisnik_detail(request, signatory_id):
 @require_GET
 def dashboard(request):
     aktivni_cikel = nalozi_aktivni_mesecni_cikel()
+    zadnji_zakljuceni_cikel, zadnji_zakljuceni_rezultat = (
+        nalozi_zadnji_zakljuceni_mesecni_rezultat()
+    )
     counts = {
         "podjetja": Company.objects.filter(aktivno=True).count(),
         "najemniki": Tenant.objects.filter(aktiven=True).count(),
@@ -1045,6 +1050,8 @@ def dashboard(request):
             "active_page": "dashboard",
             "active_section": "dashboard",
             "aktivni_cikel": aktivni_cikel,
+            "zadnji_zakljuceni_cikel": zadnji_zakljuceni_cikel,
+            "zadnji_zakljuceni_rezultat": zadnji_zakljuceni_rezultat,
             "confirmation_tasks": confirmation_tasks,
         },
     )
@@ -1118,6 +1125,19 @@ def mesecni_obracun(request):
     form_is_valid = form.is_valid() if request.method == "POST" and not action else False
 
     review_actions = {"select_candidate", "deselect_candidate", "confirm_candidate"}
+    if request.method == "POST" and action == "finalize_monthly_cycle":
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Zaključek je dovoljen samo v aktivnem koraku 6.")
+            zakljuci_mesecni_cikel(cycle)
+        except (MesecniCikelNapaka, ValidationError):
+            review_error = (
+                "Mesečnega cikla ni bilo mogoče zaključiti. "
+                "Preverite prikazana stanja in poskusite znova."
+            )
+        else:
+            return redirect("ui:dashboard")
+
     if request.method == "POST" and action in review_actions:
         try:
             if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.PAKETNI_PREGLED:
@@ -1466,6 +1486,7 @@ def mesecni_obracun(request):
     final_control_state = None
     monthly_summary_configuration_valid = False
     latest_monthly_summary_attempt = None
+    monthly_cycle_can_finalize = False
     archive_configuration_valid = False
     archive_can_run = False
     if cycle and cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK:
@@ -1507,6 +1528,14 @@ def mesecni_obracun(request):
             .order_by("-sequence")
             .first()
         )
+        monthly_cycle_can_finalize = bool(
+            final_control_state
+            and final_control_state["all_required_work_successful"] is True
+            and final_control_state["requires_attention"] is False
+            and latest_monthly_summary_attempt
+            and latest_monthly_summary_attempt.result
+            == MonthlySummaryAttempt.Result.ACCEPTED
+        )
         summary_error = request.GET.get("summary_error")
         if summary_error == "configuration":
             review_error = "Nastavitve zbirnega poročila niso veljavne."
@@ -1543,6 +1572,7 @@ def mesecni_obracun(request):
             "final_control_state": final_control_state,
             "monthly_summary_configuration_valid": monthly_summary_configuration_valid,
             "latest_monthly_summary_attempt": latest_monthly_summary_attempt,
+            "monthly_cycle_can_finalize": monthly_cycle_can_finalize,
             "archive_configuration_valid": archive_configuration_valid,
             "archive_can_run": archive_can_run,
             "step4_complete": bool(

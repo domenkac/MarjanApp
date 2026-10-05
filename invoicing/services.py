@@ -3723,7 +3723,56 @@ def _veljavno_dokazilo_zakljucka(cycle):
         )
     ):
         return False
-    if snapshot["archive_verified_count"] != snapshot["prepared_count"]:
+    if (
+        snapshot["sent_count"] != snapshot["prepared_count"]
+        or snapshot["archive_verified_count"] != snapshot["prepared_count"]
+    ):
+        return False
+    company_count_fields = (
+        "prepared_count",
+        "sent_count",
+        "intentionally_unissued_count",
+        "failed_count",
+        "unknown_count",
+        "delivery_pending_count",
+        "archive_verified_count",
+        "archive_issue_count",
+    )
+    for item in snapshot["per_company"]:
+        if not isinstance(item, dict):
+            return False
+        company_id = item.get("company_id")
+        issuer_label = item.get("issuer_label")
+        if (
+            isinstance(company_id, bool)
+            or not isinstance(company_id, int)
+            or company_id < 1
+            or not isinstance(issuer_label, str)
+            or not issuer_label.strip()
+            or not isinstance(item.get("requires_attention"), bool)
+            or any(
+                isinstance(item.get(field), bool)
+                or not isinstance(item.get(field), int)
+                or item[field] < 0
+                for field in company_count_fields
+            )
+        ):
+            return False
+        if (
+            item["sent_count"] != item["prepared_count"]
+            or item["archive_verified_count"] != item["prepared_count"]
+            or item["failed_count"] != 0
+            or item["unknown_count"] != 0
+            or item["delivery_pending_count"] != 0
+            or item["archive_issue_count"] != 0
+            or item["requires_attention"] is not False
+        ):
+            return False
+    aggregate_fields = company_count_fields[:-1]
+    if any(
+        sum(item[field] for item in snapshot["per_company"]) != snapshot[field]
+        for field in aggregate_fields
+    ):
         return False
     for field in ("summary_attempt_id", "summary_attempt_sequence"):
         value = snapshot.get(field)
@@ -3741,6 +3790,18 @@ def _veljavno_dokazilo_zakljucka(cycle):
     except ValueError:
         return False
     return True
+
+
+def nalozi_zadnji_zakljuceni_mesecni_rezultat():
+    cycle = (
+        MonthlyCycle.objects.filter(status=MonthlyCycle.Status.ZAKLJUCEN)
+        .order_by("-completed_at", "-pk")
+        .first()
+    )
+    if cycle is None:
+        return None, None
+    snapshot = cycle.completion_snapshot if _veljavno_dokazilo_zakljucka(cycle) else None
+    return cycle, snapshot
 
 
 def _preveri_uspesno_zakljucno_kontrolo(state, cycle):

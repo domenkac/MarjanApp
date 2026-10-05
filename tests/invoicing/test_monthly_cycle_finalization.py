@@ -46,7 +46,21 @@ def _final_state(cycle, **overrides):
         "archive_verified_count": 2,
         "archive_pending_count": 0,
         "conflict_count": 0,
-        "per_company": [{"company_id": 7, "requires_attention": False}],
+        "per_company": [
+            {
+                "company_id": 7,
+                "issuer_label": "Alfa d.o.o.",
+                "prepared_count": 2,
+                "sent_count": 2,
+                "intentionally_unissued_count": 1,
+                "failed_count": 0,
+                "unknown_count": 0,
+                "delivery_pending_count": 0,
+                "archive_verified_count": 2,
+                "archive_issue_count": 0,
+                "requires_attention": False,
+            }
+        ],
         "issues": [],
     }
     state.update(overrides)
@@ -103,7 +117,7 @@ def test_successful_finalization_persists_authoritative_evidence(monkeypatch):
         "archive_verified_count": 2,
         "archive_pending_count": 0,
         "conflict_count": 0,
-        "per_company": [{"company_id": 7, "requires_attention": False}],
+        "per_company": _final_state(cycle)["per_company"],
         "issues": [],
         "summary_attempt_id": attempt.pk,
         "summary_attempt_sequence": 1,
