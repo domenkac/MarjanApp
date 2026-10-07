@@ -1,3 +1,4 @@
+import hashlib
 import re
 from copy import deepcopy
 from dataclasses import dataclass
@@ -6,7 +7,7 @@ from email.message import EmailMessage
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.validators import validate_email
-from django.db import transaction
+from django.db import connection, transaction
 from django.db.models import Max
 from django.utils import timezone
 
@@ -14,7 +15,11 @@ from contracts.models import RecipientContact
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, MonthlyCycle
 
-from .models import DeliveryAttempt, MonthlySummaryAttempt
+from .models import (
+    AccountantReportDeliveryAttempt,
+    DeliveryAttempt,
+    MonthlySummaryAttempt,
+)
 
 _CODE_RE = re.compile(r"^[A-Z0-9_]{1,64}$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -738,6 +743,210 @@ def _require_active_step_6(cycle):
         or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
     ):
         raise ValidationError("Monthly cycle must remain active in Step 6.")
+
+
+_SLOVENIAN_MONTHS = (
+    "januar", "februar", "marec", "april", "maj", "junij", "julij", "avgust",
+    "september", "oktober", "november", "december",
+)
+_ACCOUNTANT_FROZEN_FIELDS = (
+    "sender", "recipient", "subject", "body", "attachment_filename", "attachment_checksum",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class PreparedAccountantReportEmail:
+    message: EmailMessage
+    envelope_sender: str
+    envelope_recipients: tuple[str, ...]
+
+
+def _accountant_outside_transaction():
+    if connection.in_atomic_block:
+        raise ValidationError("Accountant delivery preparation and sending must run outside a DB transaction.")
+
+
+def _accountant_persisted(instance):
+    if instance.pk is None or instance._state.adding:
+        raise ValidationError("Accountant report or delivery attempt must be persisted.")
+
+
+def _accountant_report(report_id):
+    from accounting_export.models import AccountantReport
+
+    return AccountantReport.objects.only("company_id", "snapshot").get(pk=report_id)
+
+
+def _verify_accountant_pdf(report, local_root):
+    from accounting_export.archive import verify_accountant_report_pdf_artifact
+    from accounting_export.models import AccountantReportPdfArtifact
+
+    artifact = AccountantReportPdfArtifact.objects.filter(report_id=report.pk).first()
+    if artifact is None:
+        raise ValidationError("A fixed local accountant PDF artifact is required.")
+    verified = verify_accountant_report_pdf_artifact(artifact, local_root)
+    if not verified.success:
+        raise ValidationError(f"Fixed local accountant PDF is not verified: {verified.state}.")
+
+
+def _accountant_attachment(report, attempt=None):
+    from accounting_export.csv_renderer import (
+        accountant_report_csv_filename,
+        render_accountant_report_csv,
+    )
+
+    data = render_accountant_report_csv(report)
+    filename = accountant_report_csv_filename(report)
+    checksum = hashlib.sha256(data).hexdigest()
+    if attempt is not None and (filename, checksum) != (
+        attempt.attachment_filename, attempt.attachment_checksum,
+    ):
+        raise ValidationError("Accountant attachment differs from frozen filename or checksum.")
+    return data, filename, checksum
+
+
+def _accountant_identity_unchanged(report):
+    current = _accountant_report(report.pk)
+    if current.company_id != report.company_id or current.snapshot != report.snapshot:
+        raise ValidationError("Accountant report identity changed during preparation.")
+    return current
+
+
+def prepare_accountant_report_delivery(report, *, local_root) -> AccountantReportDeliveryAttempt:
+    from companies.models import Company
+
+    _accountant_outside_transaction()
+    _accountant_persisted(report)
+    persisted = _accountant_report(report.pk)
+    if AccountantReportDeliveryAttempt.objects.filter(report_id=persisted.pk).exists():
+        raise ValidationError("An accountant delivery attempt already exists; use the retry service when allowed.")
+    company = Company.objects.only("email_posiljatelj", "email_racunovodja").get(pk=persisted.company_id)
+    sender = _required_text(company.email_posiljatelj, "Sender")
+    recipient = _required_text(company.email_racunovodja, "Recipient")
+    validate_email(sender)
+    validate_email(recipient)
+    _verify_accountant_pdf(persisted, local_root)
+    _, filename, checksum = _accountant_attachment(persisted)
+    header = persisted.snapshot["header"]
+    year, month = header["period"].split("-")
+    period = f"{_SLOVENIAN_MONTHS[int(month) - 1]} - {year}"
+    subject = f"Kontrolni dokument za {header['company_name']} - {period}"
+    if len(subject) > 255 or "\r" in subject or "\n" in subject:
+        raise ValidationError("Invalid accountant email subject.")
+    body = f"V prilogi je kontrolni dokument za {header['company_name']} - {period}.\n"
+    with transaction.atomic():
+        current = _accountant_identity_unchanged(persisted)
+        current_company = Company.objects.only("email_posiljatelj", "email_racunovodja").get(pk=current.company_id)
+        if (current_company.email_posiljatelj, current_company.email_racunovodja) != (
+            company.email_posiljatelj, company.email_racunovodja,
+        ):
+            raise ValidationError("Company delivery settings changed during preparation.")
+        if AccountantReportDeliveryAttempt.objects.filter(report_id=current.pk).exists():
+            raise ValidationError("An accountant delivery attempt already exists.")
+        return AccountantReportDeliveryAttempt.objects.create(
+            report_id=current.pk, sequence=1, sender=sender, recipient=recipient,
+            subject=subject, body=body, attachment_filename=filename, attachment_checksum=checksum,
+        )
+
+
+def _require_accountant_retry(source):
+    latest = AccountantReportDeliveryAttempt.objects.filter(report_id=source.report_id).order_by("-sequence").first()
+    if latest is None or latest.pk != source.pk or source.result != AccountantReportDeliveryAttempt.Result.CONFIRMED_FAILURE:
+        raise ValidationError("Only the latest confirmed accountant delivery failure can be retried.")
+
+
+def prepare_accountant_report_delivery_retry(failed_attempt, *, local_root) -> AccountantReportDeliveryAttempt:
+    _accountant_outside_transaction()
+    _accountant_persisted(failed_attempt)
+    source = AccountantReportDeliveryAttempt.objects.get(pk=failed_attempt.pk)
+    _require_accountant_retry(source)
+    report = _accountant_report(source.report_id)
+    _verify_accountant_pdf(report, local_root)
+    _accountant_attachment(report, source)
+    frozen = {field: getattr(source, field) for field in _ACCOUNTANT_FROZEN_FIELDS}
+    with transaction.atomic():
+        _accountant_identity_unchanged(report)
+        current = AccountantReportDeliveryAttempt.objects.get(pk=source.pk)
+        _require_accountant_retry(current)
+        if current.report_id != source.report_id or current.sequence != source.sequence or any(
+            getattr(current, field) != value for field, value in frozen.items()
+        ):
+            raise ValidationError("Frozen accountant delivery metadata changed during retry preparation.")
+        return AccountantReportDeliveryAttempt.objects.create(
+            report_id=source.report_id, sequence=source.sequence + 1, **frozen,
+        )
+
+
+def build_accountant_report_email(attempt) -> PreparedAccountantReportEmail:
+    _accountant_outside_transaction()
+    _accountant_persisted(attempt)
+    current = AccountantReportDeliveryAttempt.objects.get(pk=attempt.pk)
+    if current.result != AccountantReportDeliveryAttempt.Result.PREPARED:
+        raise ValidationError("Only a prepared accountant delivery attempt can be composed.")
+    validate_email(current.sender)
+    validate_email(current.recipient)
+    data, filename, _ = _accountant_attachment(_accountant_report(current.report_id), current)
+    message = EmailMessage()
+    message["From"] = current.sender
+    message["To"] = current.recipient
+    message["Subject"] = current.subject
+    message.set_content(current.body)
+    message.add_attachment(data, maintype="text", subtype="csv", filename=filename)
+    return PreparedAccountantReportEmail(message, current.sender, (current.recipient,))
+
+
+def _transition_accountant_delivery(attempt, *, expected, result, **values):
+    updated = AccountantReportDeliveryAttempt.objects.filter(pk=attempt.pk, result=expected).update(
+        result=result, **values,
+    )
+    if updated != 1:
+        raise ValidationError(f"Invalid accountant delivery transition; expected {expected}.")
+    return AccountantReportDeliveryAttempt.objects.get(pk=attempt.pk)
+
+
+def send_accountant_report(
+    attempt, smtp_config, credential_ref, *, password_loader=None, smtp_factory=None,
+) -> AccountantReportDeliveryAttempt:
+    from .credentials import load_password
+    from .transport import SmtpConfig, _default_smtp_factory, send_prepared_email
+
+    _accountant_outside_transaction()
+    _accountant_persisted(attempt)
+    current = AccountantReportDeliveryAttempt.objects.get(pk=attempt.pk)
+    if not isinstance(smtp_config, SmtpConfig):
+        raise ValidationError("A valid SMTP configuration is required.")
+    if smtp_config.username != current.sender:
+        raise ValidationError("SMTP username must match the frozen accountant delivery sender.")
+    prepared = build_accountant_report_email(current)
+    started = current
+
+    def mark_started():
+        nonlocal started
+        started = _transition_accountant_delivery(
+            current, expected=AccountantReportDeliveryAttempt.Result.PREPARED,
+            result=AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED,
+            submission_started_at=timezone.now(),
+        )
+
+    result = send_prepared_email(
+        prepared, smtp_config, credential_ref, on_submission_started=mark_started,
+        password_loader=password_loader or load_password,
+        smtp_factory=smtp_factory or _default_smtp_factory,
+    )
+    code, message = _sanitize(result.code, result.message)
+    if result.success:
+        final = AccountantReportDeliveryAttempt.Result.ACCEPTED
+        expected = AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED
+    elif result.submission_started and result.code == "SMTP_RESULT_UNKNOWN":
+        final = AccountantReportDeliveryAttempt.Result.UNKNOWN
+        expected = AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED
+    else:
+        final = AccountantReportDeliveryAttempt.Result.CONFIRMED_FAILURE
+        expected = started.result
+    return _transition_accountant_delivery(
+        started, expected=expected, result=final, result_code=code, message=message,
+        completed_at=timezone.now(),
+    )
 
 
 def _transition(attempt, *, expected, result, **values) -> DeliveryAttempt:

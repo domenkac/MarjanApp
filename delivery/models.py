@@ -147,3 +147,54 @@ class MonthlySummaryAttempt(models.Model):
 
     def delete(self, *args, **kwargs):
         raise ValidationError("Monthly summary attempts are audit records and cannot be deleted.")
+
+
+class AccountantReportDeliveryAttempt(models.Model):
+    class Result(models.TextChoices):
+        PREPARED = "PREPARED", "Prepared"
+        SUBMISSION_STARTED = "SUBMISSION_STARTED", "Submission started"
+        ACCEPTED = "ACCEPTED", "Accepted"
+        CONFIRMED_FAILURE = "CONFIRMED_FAILURE", "Confirmed failure"
+        UNKNOWN = "UNKNOWN", "Unknown"
+
+    report = models.ForeignKey(
+        "accounting_export.AccountantReport",
+        on_delete=models.PROTECT,
+        related_name="delivery_attempts",
+    )
+    sequence = models.PositiveIntegerField()
+    prepared_at = models.DateTimeField(auto_now_add=True)
+    submission_started_at = models.DateTimeField(null=True, blank=True)
+    completed_at = models.DateTimeField(null=True, blank=True)
+    sender = models.EmailField()
+    recipient = models.EmailField()
+    subject = models.CharField(max_length=255)
+    body = models.TextField()
+    attachment_filename = models.CharField()
+    attachment_checksum = models.CharField(max_length=64)
+    result = models.CharField(max_length=24, choices=Result, default=Result.PREPARED)
+    result_code = models.CharField(max_length=64, blank=True)
+    message = models.TextField(blank=True)
+
+    class Meta:
+        ordering = ["report_id", "sequence"]  # noqa: RUF012
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["report", "sequence"], name="uniq_accountant_delivery_sequence",
+            ),
+            models.CheckConstraint(
+                condition=models.Q(sequence__gte=1), name="accountant_delivery_sequence_gte_1",
+            ),
+            models.UniqueConstraint(
+                fields=["report"], condition=models.Q(result="ACCEPTED"),
+                name="uniq_accepted_accountant_delivery",
+            ),
+        ]
+
+    def save(self, *args, **kwargs):
+        if self.pk:
+            raise ValidationError("Accountant delivery attempts are audit records and cannot be overwritten.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Accountant delivery attempts are audit records and cannot be deleted.")
