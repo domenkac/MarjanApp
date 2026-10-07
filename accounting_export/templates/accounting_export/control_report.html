@@ -1,0 +1,27 @@
+<!doctype html>
+<html lang="sl"><head><meta charset="utf-8">
+<style>
+@page { size: A4; margin: 15mm; @bottom-center { content: "Stran " counter(page) " od " counter(pages); font-size: 8pt; } }
+body { font: 9pt sans-serif; color: #222; line-height: 1.35; }
+h1 { font-size: 18pt; } h2 { font-size: 12pt; margin-top: 7mm; }
+table { width: 100%; border-collapse: collapse; table-layout: fixed; }
+thead { display: table-header-group; } th { background: #eee; text-align: left; }
+th, td { border-bottom: 1px solid #bbb; padding: 2mm; vertical-align: top; overflow-wrap: anywhere; }
+tr { break-inside: avoid; } .amount { text-align: right; }
+.detail { font-size: 8pt; margin-top: 1mm; }
+</style></head><body>
+<h1>Kontrolni dokument za računovodjo</h1>
+<p><strong>{{ company_name }}</strong><br>Davčna številka: {{ company_tax_number }}<br>Matična številka: {{ company_registration_number }}<br>Obdobje poročila: {{ period }}<br>Datum izdelave: {{ generated_date }}</p>
+<h2>Izdani dokumenti</h2>
+<table><thead><tr><th>Dokument / pogodba</th><th>Prejemnik</th><th>Datumi / DDV režim</th><th class="amount">Osnova</th><th class="amount">DDV</th><th class="amount">Skupaj</th></tr></thead><tbody>
+{% for row in issued_rows %}<tr><td>{{ row.invoice_number }}<br>Tip: {{ row.document_type }}<br>Pogodba: {{ row.contract_reference }}</td><td>{{ row.recipient_name }}<div class="detail">Davčna: {{ row.recipient_tax_number }}<br>Matična: {{ row.recipient_registration_number }}</div></td><td>Izdaja: {{ row.issue_date }}<br>Storitev: {{ row.service_period_start }} – {{ row.service_period_end }}<div class="detail">{{ row.vat_display }}</div></td><td class="amount">{{ row.net_amount }}</td><td class="amount">{{ row.vat_amount }}</td><td class="amount">{{ row.gross_amount }}</td></tr>{% endfor %}
+</tbody></table>
+<h2>DDV rekapitulacija</h2>
+<table><thead><tr><th>Skupina / stopnja DDV</th><th class="amount">Osnova</th><th class="amount">DDV</th><th class="amount">Skupaj</th></tr></thead><tbody>
+{% for row in recap_rows %}<tr><td>{{ row.vat_display }}</td><td class="amount">{{ row.net_amount }}</td><td class="amount">{{ row.vat_amount }}</td><td class="amount">{{ row.gross_amount }}</td></tr>{% endfor %}
+</tbody></table>
+<h2>Neizdano</h2>
+<table><thead><tr><th>Prejemnik</th><th>Pogodba</th><th>Razlog</th></tr></thead><tbody>
+{% for row in unissued_rows %}<tr><td>{{ row.recipient_name }}<div class="detail">Davčna: {{ row.recipient_tax_number }}<br>Matična: {{ row.recipient_registration_number }}</div></td><td>{{ row.contract_reference }}</td><td>{{ row.reason }}</td></tr>{% endfor %}
+</tbody></table>
+</body></html>
