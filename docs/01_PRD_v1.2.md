@@ -538,14 +538,47 @@ Poleg BCC kopije vsakega računa se računovodji pošlje rekapitulacijski dokume
 
 ### 9.1 Vsebina
 
+Kontrolni dokument je strukturiran izpis za eno podjetje in eno poročano
+obdobje. Omogoča računovodji preverjanje popolnosti izdanih dokumentov,
+njihovih skupnih zneskov, DDV rekapitulacije in nezaračunanih pogodb z razlogi.
+
 | Sklop | Polja |
 |---|---|
-| Glava | Podjetje (naziv, davčna, matična), obdobje, datum izdelave |
-| Vrstice | Številka · tip (`NP`/`ST`/`STORNO`/`DOBROPIS`) · prejemnik · davčna · matična · datum izdaje · obdobje storitve · DDV režim · osnova · DDV · skupaj |
+| Podatki poročila | Podjetje (naziv, davčna, matična), obdobje, datum izdelave |
+| Računi | Številka · tip (`NP`/`ST`/`STORNO`/`DOBROPIS`) · prejemnik · davčna · matična · oznaka pogodbe · datum izdaje · obdobje storitve · DDV režim · osnova · DDV · skupaj |
 | Rekapitulacija | Vsota po rekapitulacijskih skupinah in stopnjah |
 | Neizdano | Pogodbe, ki ta mesec niso bile zaračunane, z razlogom |
 
-Razdelek "Neizdano" omogoča ločevanje med "najemnik ne plačuje" in "račun se je izgubil".
+Razdelek `NEIZDANO` omogoča ločevanje med primerom, ko pogodba z navedenim razlogom
+ni bila zaračunana, in primerom, ko bi račun lahko manjkal.
+
+#### Računi z več DDV režimi
+
+En izdan dokument je v kontrolnem CSV vedno predstavljen z natanko eno
+vrstico tipa `RACUN`.
+
+Polja `osnova`, `ddv` in `skupaj` vsebujejo skupne zneske celotnega
+izdanega dokumenta in se zaradi več DDV režimov ne podvajajo.
+
+Polje `ddv_rezim` vsebuje deterministično sestavljen seznam vseh DDV
+režimov, ki jih predstavlja nespremenljivi posnetek izdanega dokumenta.
+To pravilo velja tudi za dokument z enim DDV režimom.
+
+Posamezen režim se zapiše v obliki:
+
+`{nacin_obracuna} {stopnja} % [{rekapitulacijska_skupina}]`
+
+Več režimov se loči z:
+
+` | `
+
+Primer:
+
+`OBDAVCENO 22,00 % [OBD_22] | OPROSCENO 0,00 % [OPR_44]`
+
+Rekapitulacija ostaja ločen sklop poročila in vsebuje vsote po
+rekapitulacijskih skupinah in stopnjah. `NI_PREDMET` ni vključen v
+davčno rekapitulacijo, ostane pa v skupnih zneskih izdanega dokumenta.
 
 ### 9.2 Oblika in dostava
 
@@ -573,9 +606,74 @@ Mesec v imenu datoteke je dvomestna številka (razvrščanje), mesec v zadevi e-
 | Datumi | `dd.mm.llll` |
 | Glava | Prva vrstica z imeni stolpcev |
 
-Stolpci: `vrstica_tip; stevilka_racuna; tip; prejemnik; davcna_stevilka; maticna_stevilka; oznaka_pogodbe; datum_izdaje; obdobje_od; obdobje_do; ddv_rezim; osnova; ddv; skupaj`
+CSV je pravokotna tabela z eno shemo za vse tipe vrstic.
 
-`vrstica_tip` ima vrednosti `RACUN`, `REKAPITULACIJA`, `NEIZDANO` — ena datoteka, ena shema.
+Podatki poročila (podjetje, obdobje in datum izdelave) so eksplicitni
+stolpci in se ponovijo v vsaki podatkovni vrstici. S tem ostane prva
+vrstica datoteke običajna CSV glava, vsaka posamezna vrstica pa je
+samostojno razumljiva tudi pri uvozu ali filtriranju.
+
+Stolpci:
+
+`podjetje; podjetje_davcna_stevilka; podjetje_maticna_stevilka; obdobje_porocila; datum_izdelave; vrstica_tip; stevilka_racuna; tip; prejemnik; davcna_stevilka; maticna_stevilka; oznaka_pogodbe; datum_izdaje; obdobje_od; obdobje_do; ddv_rezim; osnova; ddv; skupaj; razlog`
+
+`vrstica_tip` ima vrednosti:
+
+- `RACUN`
+- `REKAPITULACIJA`
+- `NEIZDANO`
+
+#### Vrstica `RACUN`
+
+Ena vrstica predstavlja en izdan dokument.
+
+Poleg podatkov poročila in `vrstica_tip` so izpolnjena polja
+`stevilka_racuna`, `tip`, `prejemnik`, `davcna_stevilka`,
+`maticna_stevilka`, `oznaka_pogodbe`, `datum_izdaje`, `obdobje_od`,
+`obdobje_do`, `ddv_rezim`, `osnova`, `ddv` in `skupaj` glede na
+nespremenljivi posnetek izdanega dokumenta. Polje `razlog` je prazno.
+
+Pri mešanem DDV se uporablja pravilo iz §9.1; dokument se zaradi več
+DDV režimov ne razdeli na več vrstic.
+
+#### Vrstica `REKAPITULACIJA`
+
+Ena vrstica predstavlja eno kombinacijo rekapitulacijske skupine in
+DDV stopnje.
+
+V `ddv_rezim` se zapiše:
+
+`{rekapitulacijska_skupina} / {stopnja} %`
+
+Polja `osnova`, `ddv` in `skupaj` vsebujejo vsote te rekapitulacijske
+skupine in stopnje.
+
+Poleg podatkov poročila in `vrstica_tip` so izpolnjena samo polja
+`ddv_rezim`, `osnova`, `ddv` in `skupaj`. Polja `stevilka_racuna`,
+`tip`, `prejemnik`, `davcna_stevilka`, `maticna_stevilka`,
+`oznaka_pogodbe`, `datum_izdaje`, `obdobje_od`, `obdobje_do` in
+`razlog` ostanejo prazna.
+
+`NI_PREDMET` se v rekapitulaciji ne izpiše.
+
+#### Vrstica `NEIZDANO`
+
+Ena vrstica predstavlja eno pogodbo iz zamrznjenega mesečnega paketa,
+ki v poročanem mesecu ni bila zaračunana, z navedenim razlogom.
+
+Poleg podatkov poročila in `vrstica_tip` se izpolnijo:
+
+- `prejemnik`,
+- `davcna_stevilka`,
+- `maticna_stevilka`,
+- `oznaka_pogodbe`,
+- `razlog`.
+
+Polja `stevilka_racuna`, `tip`, `datum_izdaje`, `obdobje_od`,
+`obdobje_do`, `ddv_rezim`, `osnova`, `ddv` in `skupaj` ostanejo prazna.
+Razlog se zapiše samo v `razlog`, ne v `ddv_rezim` ali drug nepovezan stolpec.
+
+Ena datoteka uporablja eno samo zgoraj določeno shemo.
 
 Aplikacija poleg CSV arhivira **PDF izvod lokalno** kot fiksen posnetek poročanega.
 
