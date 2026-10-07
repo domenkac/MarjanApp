@@ -9,6 +9,13 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from accounting_export.task_state import accountant_control_dashboard_tasks
+from accounting_export.workflow import (
+    FEEDBACK as ACCOUNTANT_FEEDBACK,
+)
+from accounting_export.workflow import (
+    accountant_control_action_tasks,
+    deliver_accountant_control_report,
+)
 from archive.configuration import (
     ArchiveConfigurationError,
     resolve_archive_roots,
@@ -1054,9 +1061,29 @@ def dashboard(request):
             "zadnji_zakljuceni_cikel": zadnji_zakljuceni_cikel,
             "zadnji_zakljuceni_rezultat": zadnji_zakljuceni_rezultat,
             "confirmation_tasks": confirmation_tasks,
-            "accountant_control_tasks": accountant_control_dashboard_tasks(),
+            "accountant_control_tasks": accountant_control_action_tasks(accountant_control_dashboard_tasks()),
+            "accountant_feedback": ACCOUNTANT_FEEDBACK.get(request.GET.get("accountant_result"), ""),
         },
     )
+
+
+@require_POST
+def accountant_control_send(request):
+    try:
+        year = int(request.POST.get("year", ""))
+        month = int(request.POST.get("month", ""))
+        company_id = int(request.POST.get("company_id", ""))
+        period = date(year, month, 1)
+    except (TypeError, ValueError, OverflowError):
+        code = "INVALID_ACTION"
+    else:
+        try:
+            code = deliver_accountant_control_report(company_id=company_id, period=period).code
+        except Exception:  # noqa: BLE001 - never expose filesystem, SMTP or Keychain details
+            code = "ACTION_FAILED"
+    response = redirect("ui:dashboard")
+    response["Location"] += f"?accountant_result={code}"
+    return response
 
 
 @require_GET

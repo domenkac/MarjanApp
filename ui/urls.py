@@ -1,6 +1,7 @@
 from django.urls import path
 
 from .views import (
+    accountant_control_send,
     dashboard,
     ddv_rezim_aktiviraj,
     ddv_rezim_deaktiviraj,
@@ -62,6 +63,7 @@ app_name = "ui"
 
 urlpatterns = [
     path("", dashboard, name="dashboard"),
+    path("racunovodstvo/poslji/", accountant_control_send, name="accountant_control_send"),
     path("pogodbe/", pogodbe, name="pogodbe"),
     path("pogodbe/nova/", pogodba_nova, name="pogodba_nova"),
     path("pogodbe/<int:lease_id>/", pogodba_detail, name="pogodba_detail"),

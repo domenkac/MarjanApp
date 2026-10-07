@@ -55,6 +55,8 @@ class CompanyTaskState:
     latest_attempt_result: str | None
     stale: bool
     issue_code: str
+    action_label: str = ""
+    action_blocked_message: str = ""
 
     @property
     def state_label(self):

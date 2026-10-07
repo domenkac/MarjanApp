@@ -36,6 +36,7 @@
       <div><span class="material-symbols-outlined" aria-hidden="true">task_alt</span><h2>Aktivna opravila</h2></div>
       {% if accountant_control_tasks %}<span class="status-badge">{{ accountant_control_tasks|length }}</span>{% else %}<span class="status-badge">Ni aktivnih</span>{% endif %}
     </div>
+    {% if accountant_feedback %}<p class="form-note" role="status">{{ accountant_feedback }}</p>{% endif %}
     {% for accountant_control_task in accountant_control_tasks %}
     <article>
     <h3>Kontrolni dokument za računovodjo · {{ accountant_control_task.period|date:"m/Y" }}</h3>
@@ -48,7 +49,16 @@
     </dl>
     {% if accountant_control_task.issue_label %}<p class="form-note" role="status">{{ accountant_control_task.issue_label }}</p>{% endif %}
     {% if accountant_control_task.companies %}<table class="settings-table"><thead><tr><th>Podjetje</th><th>Kontrolni dokument</th></tr></thead><tbody>
-      {% for company in accountant_control_task.companies %}<tr><td><strong>{{ company.label }}</strong></td><td>{{ company.state_label }}</td></tr>{% endfor %}
+      {% for company in accountant_control_task.companies %}<tr><td><strong>{{ company.label }}</strong></td><td>{{ company.state_label }}
+        {% if company.action_blocked_message %}<p class="form-note">{{ company.action_blocked_message }}</p>{% endif %}
+        {% if company.action_label %}<form method="post" action="{% url 'ui:accountant_control_send' %}">
+          {% csrf_token %}
+          <input type="hidden" name="year" value="{{ accountant_control_task.period|date:'Y' }}">
+          <input type="hidden" name="month" value="{{ accountant_control_task.period|date:'n' }}">
+          <input type="hidden" name="company_id" value="{{ company.company_id }}">
+          <button type="submit" class="button-secondary compact">{{ company.action_label }}</button>
+        </form>{% endif %}
+      </td></tr>{% endfor %}
     </tbody></table>{% endif %}
     <p>Opravilo ne blokira izdaje računov ali mesečnega obračuna.</p>
     </article>

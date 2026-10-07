@@ -74,7 +74,9 @@ def test_dashboard_states(client, company, monkeypatch, expected, label):
     assert 'href="/mesecni-obracun/"' in content
     assert "Začni mesečni obračun" in content
     task_panel = content.split("Aktivna opravila", 1)[1].split("</section>", 1)[0]
-    assert "<form" not in task_panel and "<button" not in task_panel and "<a " not in task_panel
+    assert "<a " not in task_panel
+    if task.active:
+        assert "csrfmiddlewaretoken" in task_panel and "<form" in task_panel
 
 
 @pytest.mark.parametrize("result,label", [
@@ -138,5 +140,5 @@ def test_dashboard_renders_multiple_periods_and_filters_completed_history(client
             assert task.issue_label in content
         for row in task.companies:
             assert row.label in content and row.state_label in content
-    assert "<a " not in content and "<button" not in content and "<form" not in content
+    assert "<a " not in content and "csrfmiddlewaretoken" in content
     assert before == {model: list(model.objects.values()) for model in before}
