@@ -212,7 +212,7 @@ def _unissued_rows(batch):
 def create_accountant_report(*, company, period: date) -> AccountantReport:
     if period.day != 1:
         raise ValidationError("Accountant report period must be the first day of a month.")
-    generated_at = timezone.now()
+    generated_at = timezone.localtime(timezone.now())
     batch = _completed_monthly_batch(company, period)
     invoices = _issued_invoices(company, period)
     header = _header(invoices, period, generated_at)

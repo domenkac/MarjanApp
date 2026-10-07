@@ -1,9 +1,10 @@
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 import pytest
 from django.core.exceptions import ValidationError
 
+from accounting_export.csv_renderer import render_accountant_report_csv
 from accounting_export.models import AccountantReport
 from accounting_export.services import create_accountant_report
 from archive.models import ArchivedFile
@@ -227,6 +228,37 @@ def _frozen_non_issue(company, *, user_reason=None, system_reason=None, period=d
         non_issue_reason=user_reason or "",
     )
     return lease, candidate, batch
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize(
+    ("instant", "expected_timestamp", "expected_date"),
+    [
+        (
+            datetime(2026, 8, 1, 23, 30, tzinfo=UTC),
+            "2026-08-02T01:30:00+02:00",
+            "02.08.2026",
+        ),
+        (
+            datetime(2026, 1, 15, 23, 30, tzinfo=UTC),
+            "2026-01-16T00:30:00+01:00",
+            "16.01.2026",
+        ),
+    ],
+)
+def test_snapshot_persists_local_creation_offset_and_csv_calendar_date(
+    company, monkeypatch, instant, expected_timestamp, expected_date
+):
+    _line(_invoice(company))
+    monkeypatch.setattr("accounting_export.services.timezone.now", lambda: instant)
+
+    report = create_accountant_report(company=company, period=date(2026, 9, 1))
+    report.refresh_from_db()
+
+    assert report.snapshot["header"]["generated_at"] == expected_timestamp
+    assert report.generated_at == instant
+    assert report.schema_version == report.snapshot["schema_version"] == 1
+    assert expected_date.encode() in render_accountant_report_csv(report)
 
 
 @pytest.mark.django_db
