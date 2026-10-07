@@ -31,18 +31,25 @@ def _next_month(period: date) -> date:
     return date(period.year + (period.month == 12), period.month % 12 + 1, 1)
 
 
-def _issued_invoices(company, period):
-    return list(
+def issued_invoice_queryset(*, company_ids, period, period_end=None):
+    """Canonical issued-document selection, shared by snapshots and task checks."""
+    return (
         Invoice.objects.filter(
-            company=company,
+            company_id__in=company_ids,
             datum_izdaje__gte=period,
-            datum_izdaje__lt=_next_month(period),
+            datum_izdaje__lt=period_end if period_end is not None else _next_month(period),
         )
         .exclude(stevilka__isnull=True)
         .exclude(stevilka="")
         .exclude(status__in=_NON_ISSUED_STATUSES)
-        .prefetch_related("invoiceline_set")
         .order_by("datum_izdaje", "stevilka", "pk")
+    )
+
+
+def _issued_invoices(company, period):
+    return list(
+        issued_invoice_queryset(company_ids=[company.pk], period=period)
+        .prefetch_related("invoiceline_set")
     )
 
 

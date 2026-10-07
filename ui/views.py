@@ -8,6 +8,7 @@ from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from accounting_export.task_state import accountant_control_dashboard_tasks
 from archive.configuration import (
     ArchiveConfigurationError,
     resolve_archive_roots,
@@ -1053,6 +1054,7 @@ def dashboard(request):
             "zadnji_zakljuceni_cikel": zadnji_zakljuceni_cikel,
             "zadnji_zakljuceni_rezultat": zadnji_zakljuceni_rezultat,
             "confirmation_tasks": confirmation_tasks,
+            "accountant_control_tasks": accountant_control_dashboard_tasks(),
         },
     )
 

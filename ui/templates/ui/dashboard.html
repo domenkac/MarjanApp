@@ -34,13 +34,31 @@
   <section class="panel">
     <div class="panel-heading">
       <div><span class="material-symbols-outlined" aria-hidden="true">task_alt</span><h2>Aktivna opravila</h2></div>
-      <span class="status-badge">Ni aktivnih</span>
+      {% if accountant_control_tasks %}<span class="status-badge">{{ accountant_control_tasks|length }}</span>{% else %}<span class="status-badge">Ni aktivnih</span>{% endif %}
     </div>
+    {% for accountant_control_task in accountant_control_tasks %}
+    <article>
+    <h3>Kontrolni dokument za računovodjo · {{ accountant_control_task.period|date:"m/Y" }}</h3>
+    <span class="status-badge{% if accountant_control_task.warning %} is-blocked{% endif %}">{{ accountant_control_task.state_label }}</span>
+    {% if accountant_control_task.warning %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">warning</span><strong>{{ accountant_control_task.state_label }}</strong> – kontrolni dokument ni aktualno poslan za vsa podjetja.</div>{% endif %}
+    <dl>
+      <dt>Poročano obdobje</dt><dd>{{ accountant_control_task.period|date:"m/Y" }}</dd>
+      <dt>Rok</dt><dd>{{ accountant_control_task.deadline|date:"d. m. Y" }}</dd>
+      <dt>Efektivni rok</dt><dd>{{ accountant_control_task.effective_deadline|date:"d. m. Y" }}</dd>
+    </dl>
+    {% if accountant_control_task.issue_label %}<p class="form-note" role="status">{{ accountant_control_task.issue_label }}</p>{% endif %}
+    {% if accountant_control_task.companies %}<table class="settings-table"><thead><tr><th>Podjetje</th><th>Kontrolni dokument</th></tr></thead><tbody>
+      {% for company in accountant_control_task.companies %}<tr><td><strong>{{ company.label }}</strong></td><td>{{ company.state_label }}</td></tr>{% endfor %}
+    </tbody></table>{% endif %}
+    <p>Opravilo ne blokira izdaje računov ali mesečnega obračuna.</p>
+    </article>
+    {% empty %}
     <div class="empty-state">
       <span class="material-symbols-outlined" aria-hidden="true">inbox</span>
       <h3>Ni aktivnih opravil</h3>
       <p>Trenutno ni odprtega mesečnega postopka.</p>
     </div>
+    {% endfor %}
   </section>
 
   <section class="panel">
