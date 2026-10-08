@@ -3,20 +3,28 @@ from copy import deepcopy
 from datetime import date
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.test import Client
 from django.utils import timezone
 
 from archive.configuration import ArchiveConfigurationError
+from archive.models import ArchiveConfiguration
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
+from core.models import AuditLogEntry
 from delivery.credentials import KeyringCredentialRef
 from delivery.models import DeliveryAttempt
 from delivery.services import (
+    UNKNOWN_RESOLUTION_FIELD,
+    UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+    UNKNOWN_RESOLUTION_SENT_VERIFIED,
+    UNKNOWN_RESOLUTION_UNRESOLVED,
     mark_accepted,
     mark_confirmed_failure,
     mark_result_unknown,
     mark_submission_started,
+    resolve_unknown_user_confirmed_not_sent_and_prepare_retry,
 )
 from delivery.transport import SmtpConfig, SmtpSecurity
 from invoicing.models import (
@@ -1436,6 +1444,278 @@ def test_sporocilo_ima_enako_predlogo_za_vsa_podjetja(number, issuer):
         f"Spoštovani,\n\nv priponki vam pošiljamo račun {number}.\n\n"
         f"Lep pozdrav,\n{issuer}"
     )
+
+
+def _unknown_ui_snapshot():
+    return {
+        model: list(model.objects.order_by("pk").values())
+        for model in (
+            Invoice, InvoiceLine, MonthlyCycle, MonthlyBatch, MonthlyCandidateReview,
+            NumberSequence, DeliveryAttempt, AuditLogEntry,
+        )
+    }
+
+
+@pytest.fixture
+def unknown_delivery(ready_company, settings, tmp_path):  # noqa: F811
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = mark_result_unknown(
+        mark_submission_started(DeliveryAttempt.objects.get()), code="SMTP_RESULT_UNKNOWN"
+    )
+    unrelated = Invoice.objects.values().get(pk=attempt.invoice_id)
+    unrelated.pop("id")
+    unrelated["stevilka"] = "NP-99999"
+    unrelated["lease_id"] = None
+    unrelated["obdobje_od"] = date(2025, 1, 1)
+    unrelated["obdobje_do"] = date(2025, 1, 31)
+    Invoice.objects.create(**unrelated)
+    ArchiveConfiguration.objects.create(
+        local_root=str(tmp_path / "local"), icloud_root=str(tmp_path / "icloud"),
+        verified_at=timezone.now(),
+    )
+    return cycle, attempt
+
+
+@pytest.mark.django_db
+def test_unknown_resolution_get_is_read_only_and_shows_both_decisions(
+    client, unknown_delivery, monkeypatch
+):
+    _cycle, attempt = unknown_delivery
+    before = _unknown_ui_snapshot()
+    forbidden = lambda *a, **k: pytest.fail("GET must not resolve delivery")
+    monkeypatch.setattr("ui.views.resolve_unknown_as_sent", forbidden)
+    monkeypatch.setattr("ui.views.resolve_unknown_user_confirmed_not_sent_and_prepare_retry", forbidden)
+    response = client.get("/mesecni-obracun/", {
+        "action": "unknown_sent", "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Checked",
+    })
+    content = response.content.decode()
+    assert "Rezultat pošiljanja ni znan." in content
+    assert "Preverite mapo Poslano pri ponudniku e-pošte." in content
+    assert "Potrdi, da je bilo poslano" in content
+    assert "Potrdi, da ni bilo poslano" in content
+    assert f'name="invoice_id" value="{attempt.invoice_id}"' in content
+    assert f'name="attempt_id" value="{attempt.pk}"' in content
+    assert 'name="reason" required' in content
+    assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("state", ["not_prepared", "prepared", "started", "sent", "failed", "conflict"])
+def test_other_delivery_states_have_no_unknown_form(
+    client, ready_company, settings, tmp_path, state  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    if state != "not_prepared":
+        pripravi_dostavo_mesecnega_cikla(cycle)
+        attempt = DeliveryAttempt.objects.get()
+        if state in {"started", "sent", "failed"}:
+            attempt = mark_submission_started(attempt)
+        if state == "sent":
+            mark_accepted(attempt, code="SMTP_ACCEPTED")
+        elif state == "failed":
+            mark_confirmed_failure(attempt, code="SMTP_REJECTED")
+        elif state == "conflict":
+            Invoice.objects.filter(pk=attempt.invoice_id).update(checksum="f" * 64)
+    content = client.get("/mesecni-obracun/").content.decode()
+    assert 'value="unknown_sent"' not in content
+    assert 'value="unknown_not_sent"' not in content
+    assert 'name="reason"' not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+def test_unknown_resolution_csrf_rejected_without_mutation(unknown_delivery, action):
+    _cycle, attempt = unknown_delivery
+    before = _unknown_ui_snapshot()
+    response = Client(enforce_csrf_checks=True).post("/mesecni-obracun/", {
+        "action": action, "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Checked",
+    })
+    assert response.status_code == 403
+    assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+@pytest.mark.parametrize("invalid", ["empty", "blank", "missing_reason", "wrong_invoice", "wrong_attempt", "malformed", "missing_id", "nonlatest", "outside_step6", "outside_package"])
+def test_unknown_resolution_invalid_post_is_prg_without_mutation(
+    client, unknown_delivery, action, invalid
+):
+    cycle, attempt = unknown_delivery
+    data = {
+        "action": action, "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Checked",
+    }
+    if invalid == "empty":
+        data["reason"] = ""
+    elif invalid == "blank":
+        data["reason"] = "   "
+    elif invalid == "missing_reason":
+        data.pop("reason")
+    elif invalid == "wrong_invoice":
+        data["invoice_id"] = Invoice.objects.exclude(pk=attempt.invoice_id).get().pk
+    elif invalid == "wrong_attempt":
+        data["attempt_id"] = 999999
+    elif invalid == "malformed":
+        data["attempt_id"] = "invalid"
+    elif invalid == "missing_id":
+        data.pop("invoice_id")
+    elif invalid == "nonlatest":
+        retry = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+        retry.pop("id")
+        retry["sequence"] += 1
+        DeliveryAttempt.objects.create(**retry)
+    elif invalid == "outside_step6":
+        MonthlyCycle.objects.filter(pk=cycle.pk).update(trenutni_korak=5)
+    elif invalid == "outside_package":
+        outsider = Invoice.objects.exclude(pk=attempt.invoice_id).get()
+        retry = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+        retry.pop("id")
+        retry["invoice_id"] = outsider.pk
+        outside_attempt = DeliveryAttempt.objects.create(**retry)
+        data.update(invoice_id=outsider.pk, attempt_id=outside_attempt.pk)
+    before = _unknown_ui_snapshot()
+    response = client.post("/mesecni-obracun/", data)
+    assert response.status_code == 302
+    assert response["Location"] == "/mesecni-obracun/?unknown_error=1"
+    assert _unknown_ui_snapshot() == before
+    if invalid != "outside_step6":
+        assert "Odločitve ni bilo mogoče shraniti." in client.get(response["Location"]).content.decode()
+
+
+@pytest.mark.django_db(transaction=True)
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+def test_unknown_resolution_audits_once_preserves_data_and_recomputes(
+    client, unknown_delivery, monkeypatch, action
+):
+    _cycle, attempt = unknown_delivery
+    before = _unknown_ui_snapshot()
+    forbidden = lambda *a, **k: pytest.fail("Resolution must not use SMTP or Keychain")
+    for target in (
+        "delivery.services.send_pdf_email", "delivery.transport.send_prepared_email",
+        "delivery.credentials.load_password", "keyring.get_password",
+        "ui.views.resolve_smtp_config", "ui.views.resolve_keyring_credential_ref",
+    ):
+        monkeypatch.setattr(target, forbidden)
+    data = {
+        "action": action, "invoice_id": attempt.invoice_id, "attempt_id": attempt.pk,
+        "reason": "  Preverjeno pri ponudniku.  ", "status": "POSLAN",
+    }
+    response = client.post("/mesecni-obracun/", data)
+    assert response.status_code == 302 and response["Location"] == "/mesecni-obracun/"
+    sent = action == "unknown_sent"
+    invoice = Invoice.objects.get(pk=attempt.invoice_id)
+    assert invoice.status == (Invoice.Status.POSLAN if sent else Invoice.Status.IZBRAN_ZA_POSILJANJE)
+    audit = AuditLogEntry.objects.get(polje=UNKNOWN_RESOLUTION_FIELD)
+    assert audit.object_id == attempt.pk
+    assert audit.content_type == ContentType.objects.get_for_model(DeliveryAttempt)
+    assert audit.dejanje == AuditLogEntry.Dejanje.SPREMEMBA
+    assert (audit.stara_vrednost, audit.nova_vrednost, audit.razlog) == (
+        UNKNOWN_RESOLUTION_UNRESOLVED,
+        UNKNOWN_RESOLUTION_SENT_VERIFIED if sent else UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
+        "Preverjeno pri ponudniku.",
+    )
+    assert DeliveryAttempt.objects.values().get(pk=attempt.pk) == before[DeliveryAttempt][0]
+    assert DeliveryAttempt.objects.count() == (1 if sent else 2)
+    after = _unknown_ui_snapshot()
+    for model in (InvoiceLine, MonthlyCycle, MonthlyBatch, MonthlyCandidateReview, NumberSequence):
+        assert after[model] == before[model]
+    for row in before[Invoice]:
+        if row["id"] == invoice.pk:
+            row["status"] = invoice.status
+    assert after[Invoice] == before[Invoice]
+    if not sent:
+        retry = DeliveryAttempt.objects.get(sequence=2)
+        assert retry.result == DeliveryAttempt.Result.PREPARED
+        for field in ("sender", "recipients_to", "recipients_cc", "recipients_bcc", "pdf_path", "pdf_checksum"):
+            assert getattr(retry, field) == getattr(attempt, field)
+    refreshed = client.get(response["Location"])
+    state = refreshed.context["delivery_state"]
+    assert state["unknown_count"] == 0
+    assert state["per_invoice"][0]["delivery_state"] == ("DELIVERY_SENT" if sent else "DELIVERY_PREPARED")
+    final = refreshed.context["final_control_state"]
+    assert final["unknown_count"] == 0
+    assert final["delivery_pending_count"] == (0 if sent else 1)
+    assert refreshed.context["archive_can_run"] == sent
+    assert refreshed.context["delivery_can_send"] != sent
+    assert 'value="unknown_sent"' not in refreshed.content.decode()
+    stable = _unknown_ui_snapshot()
+    for repeated_action in ("unknown_sent", "unknown_not_sent"):
+        response = client.post("/mesecni-obracun/", {**data, "action": repeated_action})
+        assert response.status_code == 302 and "unknown_error" in response["Location"]
+        assert _unknown_ui_snapshot() == stable
+    if sent:
+        assert client.post("/mesecni-obracun/", {"action": "archive_sent_invoices"}).status_code == 302
+        final = client.get("/mesecni-obracun/").context["final_control_state"]
+        assert final["all_required_work_successful"] and final["unknown_count"] == 0
+
+
+@pytest.mark.django_db
+def test_unknown_not_sent_retry_uses_later_normal_send(
+    client, unknown_delivery, settings, monkeypatch
+):
+    _cycle, attempt = unknown_delivery
+    _smtp_settings(settings)
+    calls = []
+
+    def send(prepared, **kwargs):
+        calls.append(prepared.pk)
+        return mark_accepted(mark_submission_started(prepared), code="SMTP_ACCEPTED")
+
+    monkeypatch.setattr("delivery.services.send_pdf_email", send)
+    response = client.post("/mesecni-obracun/", {
+        "action": "unknown_not_sent", "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Preverjeno: ni poslano.",
+    })
+    assert response.status_code == 302 and not calls
+    retry = DeliveryAttempt.objects.get(sequence=2)
+    assert client.post("/mesecni-obracun/", {"action": "send_delivery"}).status_code == 302
+    assert calls == [retry.pk]
+    assert Invoice.objects.get(pk=attempt.invoice_id).status == Invoice.Status.POSLAN
+    assert DeliveryAttempt.objects.get(pk=retry.pk).result == DeliveryAttempt.Result.ACCEPTED
+    assert client.get("/mesecni-obracun/").context["delivery_state"]["sent_count"] == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+def test_unknown_resolution_stale_after_backend_resolution(client, unknown_delivery, action):
+    _cycle, attempt = unknown_delivery
+    resolve_unknown_user_confirmed_not_sent_and_prepare_retry(attempt, reason="Earlier decision")
+    before = _unknown_ui_snapshot()
+    response = client.post("/mesecni-obracun/", {
+        "action": action, "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Stale decision",
+    })
+    assert response.status_code == 302 and "unknown_error" in response["Location"]
+    assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+def test_unknown_resolution_accepts_valid_csrf_token(unknown_delivery, action):
+    _cycle, attempt = unknown_delivery
+    csrf_client = Client(enforce_csrf_checks=True)
+    csrf_client.get("/mesecni-obracun/")
+    response = csrf_client.post("/mesecni-obracun/", {
+        "csrfmiddlewaretoken": csrf_client.cookies["csrftoken"].value,
+        "action": action, "invoice_id": attempt.invoice_id,
+        "attempt_id": attempt.pk, "reason": "Preverjeno.",
+    })
+    assert response.status_code == 302 and response["Location"] == "/mesecni-obracun/"
+    assert AuditLogEntry.objects.filter(polje=UNKNOWN_RESOLUTION_FIELD).count() == 1
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("action", ["unknown_sent", "unknown_not_sent"])
+def test_unknown_resolution_without_active_cycle_is_rejected(client, action):
+    before = _unknown_ui_snapshot()
+    response = client.post("/mesecni-obracun/", {
+        "action": action, "invoice_id": 1, "attempt_id": 1, "reason": "Preverjeno.",
+    })
+    assert response.status_code == 302 and "unknown_error" in response["Location"]
+    assert _unknown_ui_snapshot() == before
 
 
 def _smtp_settings(settings):

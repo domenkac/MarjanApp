@@ -67,10 +67,16 @@ from delivery.configuration import (
     resolve_monthly_summary_smtp_config,
     resolve_smtp_config,
 )
-from delivery.models import MonthlySummaryAttempt, MonthlySummaryConfiguration
+from delivery.models import (
+    DeliveryAttempt,
+    MonthlySummaryAttempt,
+    MonthlySummaryConfiguration,
+)
 from delivery.services import (
     prepare_monthly_summary,
     prepare_monthly_summary_retry,
+    resolve_unknown_as_sent,
+    resolve_unknown_user_confirmed_not_sent_and_prepare_retry,
     send_monthly_summary,
 )
 from delivery.transport import test_smtp_connection as check_smtp_connection
@@ -1208,6 +1214,11 @@ def mesecni_obracun(request):
     nadaljevanje = None
     sporocilo_napake = None
     review_error = None
+    if request.GET.get("unknown_error"):
+        review_error = (
+            "Odločitve ni bilo mogoče shraniti. Vnesite razlog in preverite "
+            "trenutno stanje računa ter zadnjega poskusa dostave."
+        )
     review_error_identity = None
     form_is_valid = form.is_valid() if request.method == "POST" and not action else False
 
@@ -1316,6 +1327,32 @@ def mesecni_obracun(request):
                 return redirect("ui:mesecni_obracun")
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
+    if request.method == "POST" and action in {"unknown_sent", "unknown_not_sent"}:
+        response = redirect("ui:mesecni_obracun")
+        try:
+            if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
+                raise ValidationError("Odločitev je dovoljena samo v koraku 6.")
+            invoice_id = int(request.POST.get("invoice_id", ""))
+            attempt_id = int(request.POST.get("attempt_id", ""))
+            delivery = stanje_dostave_mesecnega_cikla(cycle)
+            if not any(
+                item["invoice_id"] == invoice_id
+                and item["latest_attempt_id"] == attempt_id
+                and item["delivery_state"] == StanjeMesecneDostave.DELIVERY_UNKNOWN
+                for item in delivery["per_invoice"]
+            ):
+                raise ValidationError("Poskus ni neznana dostava trenutnega paketa.")
+            attempt = DeliveryAttempt.objects.get(pk=attempt_id, invoice_id=invoice_id)
+            resolver = (
+                resolve_unknown_as_sent
+                if action == "unknown_sent"
+                else resolve_unknown_user_confirmed_not_sent_and_prepare_retry
+            )
+            resolver(attempt, reason=request.POST.get("reason", ""))
+        except (MesecniCikelNapaka, ValidationError, ValueError, DeliveryAttempt.DoesNotExist):
+            response["Location"] += "?unknown_error=1"
+        return response
+
     if request.method == "POST" and action == "prepare_delivery":
         try:
             if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
