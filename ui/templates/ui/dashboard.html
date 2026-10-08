@@ -30,6 +30,8 @@
   {% else %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">warning</span>Podatkov zadnjega zaključenega mesečnega cikla ni mogoče zanesljivo prikazati.</div>{% endif %}
 </section>{% endif %}
 
+<p><a class="button-secondary compact" href="{% url 'ui:accountant_arbitrary_export' %}">Izpis za poljubno obdobje</a></p>
+
 <div class="dashboard-grid">
   <section class="panel">
     <div class="panel-heading">

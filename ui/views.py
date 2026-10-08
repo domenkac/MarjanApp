@@ -1,13 +1,17 @@
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal
+from urllib.parse import urlencode
 
 from django.core.exceptions import ValidationError
 from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
+from django.urls import reverse
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from accounting_export.arbitrary_export import prepare_arbitrary_accountant_exports
+from accounting_export.csv_renderer import render_arbitrary_accountant_csv
 from accounting_export.task_state import accountant_control_dashboard_tasks
 from accounting_export.workflow import (
     FEEDBACK as ACCOUNTANT_FEEDBACK,
@@ -109,6 +113,8 @@ from rendering.services import (
 )
 
 from .forms import (
+    AccountantArbitraryDownloadForm,
+    AccountantArbitraryExportForm,
     ArchiveConfigurationForm,
     CompanyForm,
     IzbiraMesecaForm,
@@ -1083,6 +1089,58 @@ def accountant_control_send(request):
             code = "ACTION_FAILED"
     response = redirect("ui:dashboard")
     response["Location"] += f"?accountant_result={code}"
+    return response
+
+
+@require_GET
+def accountant_arbitrary_export(request):
+    form = AccountantArbitraryExportForm(request.GET if request.GET else None)
+    results = []
+    if form.is_bound and form.is_valid():
+        values = form.cleaned_data
+        try:
+            prepared = prepare_arbitrary_accountant_exports(
+                date_from=values["od"], date_to=values["do"],
+                company_ids=[company.pk for company in values["podjetja"]],
+            )
+        except ValidationError:
+            form.add_error(None, "Izpisa ni mogoče pripraviti. Preverite izbrane podatke.")
+        else:
+            for item in prepared.companies:
+                download_url = ""
+                if item.export is not None:
+                    parameters = urlencode({
+                        "od": values["od"].isoformat(), "do": values["do"].isoformat(),
+                        "company_id": item.company_id,
+                    })
+                    download_url = f"{reverse('ui:accountant_arbitrary_csv')}?{parameters}"
+                results.append({"result": item, "download_url": download_url})
+    return render(request, "ui/accountant_arbitrary_export.html", {
+        "form": form, "results": results,
+        "active_page": "dashboard", "active_section": "dashboard",
+    })
+
+
+@require_GET
+def accountant_arbitrary_csv(request):
+    form = AccountantArbitraryDownloadForm(request.GET)
+    if not form.is_valid():
+        return HttpResponse("Neveljavni podatki za izpis.", status=400, content_type="text/plain; charset=utf-8")
+    values = form.cleaned_data
+    try:
+        prepared = prepare_arbitrary_accountant_exports(
+            date_from=values["od"], date_to=values["do"],
+            company_ids=[values["company_id"].pk],
+        )
+    except ValidationError:
+        return HttpResponse("Neveljavni podatki za izpis.", status=400, content_type="text/plain; charset=utf-8")
+    result = prepared.companies[0]
+    if result.export is None:
+        return HttpResponse(result.message, status=400, content_type="text/plain; charset=utf-8")
+    response = HttpResponse(
+        render_arbitrary_accountant_csv(result.export), content_type="text/csv; charset=utf-8",
+    )
+    response["Content-Disposition"] = f'attachment; filename="{result.export.filename}"'
     return response
 
 

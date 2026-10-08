@@ -1,0 +1,42 @@
+{% extends "ui/base.html" %}
+
+{% block title %}Izpis za poljubno obdobje · Marjan{% endblock %}
+
+{% block content %}
+<header class="page-heading">
+  <div>
+    <p class="eyebrow">Računovodstvo</p>
+    <h1>Izpis za poljubno obdobje</h1>
+    <p>Izberite obdobje in podjetja za kontrolni CSV izdanih dokumentov.</p>
+  </div>
+  <a class="button-secondary" href="{% url 'ui:dashboard' %}">Nadzorna plošča</a>
+</header>
+
+<section class="panel">
+  <form method="get" action="{% url 'ui:accountant_arbitrary_export' %}">
+    {{ form.non_field_errors }}
+    {% for field in form %}
+    <p>{{ field.label_tag }} {{ field }} {{ field.errors }}</p>
+    {% endfor %}
+    <button type="submit" class="button-primary">Pripravi izpis</button>
+  </form>
+</section>
+
+{% if results %}
+<section class="panel">
+  <div class="panel-heading"><h2>Izpisi po podjetjih</h2></div>
+  <table class="settings-table">
+    <thead><tr><th>Podjetje</th><th>Izdani dokumenti</th><th>Izpis</th></tr></thead>
+    <tbody>
+      {% for item in results %}
+      <tr>
+        <td><strong>{{ item.result.company_label }}</strong></td>
+        <td>{% if item.result.export %}{{ item.result.export.issued_count }}{% else %}—{% endif %}</td>
+        <td>{% if item.download_url %}<a class="button-secondary compact" href="{{ item.download_url }}">Prenesi CSV</a>{% else %}{{ item.result.message }}{% endif %}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endif %}
+{% endblock %}

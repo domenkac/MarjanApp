@@ -53,7 +53,8 @@ def _issued_invoices(company, period):
     )
 
 
-def _header(invoices, period, generated_at):
+def issued_snapshot_header(invoices, *, period_label, generated_at):
+    """Build issuer metadata exclusively from one historical invoice identity."""
     if not invoices:
         raise ValidationError(
             "Accountant report has no issued invoice snapshot for its historical header."
@@ -75,12 +76,13 @@ def _header(invoices, period, generated_at):
         "company_name": name,
         "company_tax_number": tax_number,
         "company_registration_number": registration_number,
-        "period": period.strftime("%Y-%m"),
+        "period": period_label,
         "generated_at": generated_at.isoformat(),
     }
 
 
-def _issued_and_recap_rows(invoices):
+def issued_and_recap_rows(invoices):
+    """Build issued rows and VAT recap from invoice and prefetched line snapshots."""
     issued_rows = []
     recap = defaultdict(lambda: [Decimal("0.00"), Decimal("0.00"), Decimal("0.00")])
     for invoice in invoices:
@@ -222,8 +224,10 @@ def create_accountant_report(*, company, period: date) -> AccountantReport:
     generated_at = timezone.localtime(timezone.now())
     batch = _completed_monthly_batch(company, period)
     invoices = _issued_invoices(company, period)
-    header = _header(invoices, period, generated_at)
-    issued_rows, recap_rows = _issued_and_recap_rows(invoices)
+    header = issued_snapshot_header(
+        invoices, period_label=period.strftime("%Y-%m"), generated_at=generated_at
+    )
+    issued_rows, recap_rows = issued_and_recap_rows(invoices)
     snapshot = {
         "schema_version": SCHEMA_VERSION,
         "header": header,

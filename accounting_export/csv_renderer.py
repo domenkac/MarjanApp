@@ -1,6 +1,7 @@
-"""Render the persisted accountant snapshot using the PRD control CSV schema."""
+"""Render accountant snapshots using the shared PRD control CSV schema."""
 
 import csv
+import json
 import re
 from datetime import date, datetime
 from io import StringIO
@@ -81,6 +82,10 @@ def _metadata(header: dict) -> dict:
         date.fromisoformat(f"{period}-01")
     except ValueError as exc:
         raise _invalid("header.period") from exc
+    return _metadata_for_period(header, period)
+
+
+def _metadata_for_period(header: dict, period: str) -> dict:
     generated_at = _text(header, "generated_at", "header")
     try:
         if "T" not in generated_at:
@@ -123,6 +128,17 @@ def render_accountant_report_csv(report: AccountantReport) -> bytes:
     """Return BOM-prefixed UTF-8 CSV, reading only the loaded immutable snapshot."""
     snapshot = _snapshot(report)
     metadata = _metadata(snapshot["header"])
+    return _render_rows(snapshot, metadata)
+
+
+def render_arbitrary_accountant_csv(export) -> bytes:
+    """Render an in-memory export through the same schema and row serializer."""
+    snapshot = json.loads(export.snapshot_json)
+    metadata = _metadata_for_period(snapshot["header"], export.period_value)
+    return _render_rows(snapshot, metadata)
+
+
+def _render_rows(snapshot: dict, metadata: dict) -> bytes:
     output = StringIO(newline="")
     writer = csv.DictWriter(output, fieldnames=_COLUMNS, delimiter=";", lineterminator="\r\n")
     writer.writeheader()

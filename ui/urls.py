@@ -1,6 +1,8 @@
 from django.urls import path
 
 from .views import (
+    accountant_arbitrary_csv,
+    accountant_arbitrary_export,
     accountant_control_send,
     dashboard,
     ddv_rezim_aktiviraj,
@@ -63,6 +65,8 @@ app_name = "ui"
 
 urlpatterns = [
     path("", dashboard, name="dashboard"),
+    path("racunovodstvo/izpis/", accountant_arbitrary_export, name="accountant_arbitrary_export"),
+    path("racunovodstvo/izpis/csv/", accountant_arbitrary_csv, name="accountant_arbitrary_csv"),
     path("racunovodstvo/poslji/", accountant_control_send, name="accountant_control_send"),
     path("pogodbe/", pogodbe, name="pogodbe"),
     path("pogodbe/nova/", pogodba_nova, name="pogodba_nova"),

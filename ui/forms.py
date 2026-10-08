@@ -4,11 +4,54 @@ from datetime import date
 from django import forms
 from django.utils import timezone
 
+from accounting_export.arbitrary_export import validate_arbitrary_date_range
 from archive.services import ArchiveRoots
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from delivery.models import MonthlySummaryConfiguration
+
+
+class AccountantExportPeriodForm(forms.Form):
+    od = forms.DateField(
+        label="Od", input_formats=["%Y-%m-%d"],
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+        error_messages={"invalid": "Vnesite veljaven datum."},
+    )
+    do = forms.DateField(
+        label="Do", input_formats=["%Y-%m-%d"],
+        widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
+        error_messages={"invalid": "Vnesite veljaven datum."},
+    )
+
+    def clean(self):
+        cleaned = super().clean()
+        if "od" in cleaned and "do" in cleaned:
+            validate_arbitrary_date_range(cleaned["od"], cleaned["do"])
+        return cleaned
+
+
+class AccountantCompanyMultipleChoiceField(forms.ModelMultipleChoiceField):
+    def label_from_instance(self, obj):
+        return obj.naziv
+
+
+class AccountantArbitraryExportForm(AccountantExportPeriodForm):
+    podjetja = AccountantCompanyMultipleChoiceField(
+        label="Podjetja", queryset=Company.objects.order_by("-aktivno", "naziv", "pk"),
+        error_messages={
+            "required": "Izberite vsaj eno podjetje.",
+            "invalid_choice": "Izberite veljavna podjetja.",
+            "invalid_pk_value": "Izberite veljavna podjetja.",
+        },
+    )
+
+
+class AccountantArbitraryDownloadForm(AccountantExportPeriodForm):
+    company_id = forms.ModelChoiceField(
+        label="Podjetje", queryset=Company.objects.all(),
+        error_messages={"invalid_choice": "Izberite veljavno podjetje."},
+    )
 
 
 class MonthlySummaryConfigurationForm(forms.ModelForm):
