@@ -1,5 +1,6 @@
 import hashlib
 import io
+import json
 import sqlite3
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -60,6 +61,7 @@ def test_snapshot_content_checksums_and_sqlite_integrity(locations, tmp_path):
         assert archive.testzip() is None
         names = set(archive.namelist())
         assert names == {
+            "manifest.json",
             "database/db.sqlite3",
             "archive/",
             "archive/2026/",
@@ -72,6 +74,20 @@ def test_snapshot_content_checksums_and_sqlite_integrity(locations, tmp_path):
             "media/attachments/lease.pdf",
         }
         data = archive.read("database/db.sqlite3")
+        manifest = json.loads(archive.read("manifest.json"))
+        assert manifest == {
+            "format_version": 1,
+            "database_checksum": snapshot.database_checksum,
+            "created_at": snapshot.created_at.isoformat(),
+            "trigger": snapshot.trigger,
+            "source_roots": dict(
+                zip(
+                    ("local_root", "icloud_root", "dropbox_root"),
+                    map(str, locations[:3]),
+                    strict=True,
+                )
+            ),
+        }
         assert hashlib.sha256(data).hexdigest() == snapshot.database_checksum
         database = tmp_path / "checked.sqlite3"
         database.write_bytes(data)

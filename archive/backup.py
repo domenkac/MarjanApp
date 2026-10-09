@@ -1,6 +1,7 @@
-"""Verified, append-only filesystem snapshots. No restore or retention operations."""
+"""Verified, append-only filesystem snapshots."""
 
 import hashlib
+import json
 import os
 import shutil
 import sqlite3
@@ -130,9 +131,14 @@ def _add_tree(output, root, prefix):
 
 
 def _verify_zip(path, database_checksum):
+    from .restore import _entries, read_manifest
+
     with ZipFile(path) as archive:
+        _entries(archive)
         if archive.testzip() is not None:
             raise BackupError("ZIP verification failed.")
+        if read_manifest(archive)["database_checksum"] != database_checksum:
+            raise BackupError("Manifest database checksum differs.")
         digest = hashlib.sha256()
         with archive.open("database/db.sqlite3") as source:
             for chunk in iter(lambda: source.read(1024 * 1024), b""):
@@ -184,6 +190,9 @@ def create_backup_snapshot(*, trigger):
             database = Path(work) / "db.sqlite3"
             _copy_database(database)
             database_checksum = _hash_file(database)
+            from .restore import snapshot_source_roots
+
+            source_roots = snapshot_source_roots(database)
             with NamedTemporaryFile(
                 dir=roots.dropbox_root, prefix=".marjanapp-backup-", delete=False
             ) as stream:
@@ -191,6 +200,19 @@ def create_backup_snapshot(*, trigger):
                 with ZipFile(
                     stream, "w", compression=ZIP_DEFLATED, allowZip64=True
                 ) as output:
+                    output.writestr(
+                        "manifest.json",
+                        json.dumps(
+                            {
+                                "format_version": 1,
+                                "database_checksum": database_checksum,
+                                "created_at": created_at.isoformat(),
+                                "trigger": trigger,
+                                "source_roots": source_roots,
+                            },
+                            sort_keys=True,
+                        ),
+                    )
                     output.write(database, "database/db.sqlite3")
                     _add_tree(output, roots.local_root, "archive")
                     _add_tree(output, media, "media")
