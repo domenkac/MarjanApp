@@ -3,6 +3,7 @@
 {% block title %}Izbira meseca · Marjan{% endblock %}
 
 {% block content %}
+{% if backup_error %}<p class="form-note" role="alert">Mesečno stanje je shranjeno. Varnostne kopije ni bilo mogoče ustvariti in preveriti. Preverite nastavitve arhiva in ustvarite kopijo ročno.</p>{% endif %}
 {% include "ui/partials/monthly_stepper.html" %}
 
 {% if sporocilo_napake %}

@@ -364,7 +364,7 @@ def test_neveljaven_datum_izdaje_ohrani_obdobje_iz_oddanega_meseca(client):
     assert "01. 02. 2031 – 28. 02. 2031" in response.content.decode()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_veljavna_izbira_uporabi_prg_in_ne_ustvari_racuna(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     response = client.post(
@@ -373,14 +373,14 @@ def test_veljavna_izbira_uporabi_prg_in_ne_ustvari_racuna(client):
     )
 
     assert response.status_code == 302
-    assert response.url == "/mesecni-obracun/"
+    assert response.url == "/mesecni-obracun/?backup_error=1"
     cycle = MonthlyCycle.objects.get()
     assert cycle.trenutni_korak == 2
     assert MonthlyBatch.objects.count() == 1
     assert Invoice.objects.count() == 0
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 @pytest.mark.parametrize("datum_izdaje", ["2024-02-01", "2024-03-12"])
 def test_prestopni_februar_ostane_obdobje_storitve_ne_glede_na_datum_izdaje(
     client,
@@ -397,7 +397,7 @@ def test_prestopni_februar_ostane_obdobje_storitve_ne_glede_na_datum_izdaje(
     assert MonthlyCycle.objects.get().obdobje == date(2024, 2, 1)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_nov_brskalnik_obnovi_mesec_datum_in_drugi_korak(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     response = client.post(
@@ -427,7 +427,7 @@ def test_nov_brskalnik_obnovi_mesec_datum_in_drugi_korak(client):
     assert "sessionid" not in nov_brskalnik.cookies
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_konflikten_post_na_drugem_koraku_prikaze_napako_brez_obrazca(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     client.post(
@@ -448,7 +448,7 @@ def test_konflikten_post_na_drugem_koraku_prikaze_napako_brez_obrazca(client):
     assert MonthlyCycle.objects.get().datum_izdaje == date(2031, 2, 12)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_step2_prikaze_trajne_rezultate_in_brez_starega_placeholderja(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     client.post(
@@ -469,7 +469,7 @@ def test_step2_prikaze_trajne_rezultate_in_brez_starega_placeholderja(client):
     assert "XML" not in content
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_step2_brez_uspesnega_podjetja_ne_nadaljuje(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     client.post(
@@ -485,7 +485,7 @@ def test_step2_brez_uspesnega_podjetja_ne_nadaljuje(client):
     assert MonthlyCycle.objects.get().trenutni_korak == 2
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_vsa_uspesna_podjetja_nadaljujejo_na_step3_in_oznacijo_step2_zeleno(client):
     ustvari_podjetje("Aktivno podjetje d.o.o.", "15012557")
     client.post(
@@ -507,7 +507,7 @@ def test_vsa_uspesna_podjetja_nadaljujejo_na_step3_in_oznacijo_step2_zeleno(clie
     assert "XML" not in content
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_delni_step2_je_attention_in_se_lahko_ponovi_brez_pomika_nazaj(client):
     ustvari_podjetje("Alfa d.o.o.", "15012557")
     ustvari_podjetje("Beta d.o.o.", "69165028")

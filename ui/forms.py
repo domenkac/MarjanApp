@@ -5,7 +5,7 @@ from django import forms
 from django.utils import timezone
 
 from accounting_export.arbitrary_export import validate_arbitrary_date_range
-from archive.services import ArchiveRoots
+from archive.configuration import ArchiveConfigurationError, validate_archive_locations
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
@@ -77,16 +77,22 @@ class ArchiveConfigurationForm(forms.Form):
         help_text="Vnesite absolutno pot do obstoječe mape.",
     )
 
+    dropbox_root = forms.CharField(
+        label="Dropbox varnostne kopije",
+        help_text="Vnesite absolutno pot do obstoječe mape.",
+    )
+
     def clean(self):
         cleaned = super().clean()
-        if "local_root" not in cleaned or "icloud_root" not in cleaned:
+        if not all(name in cleaned for name in ("local_root", "icloud_root", "dropbox_root")):
             return cleaned
         try:
-            roots = ArchiveRoots(cleaned["local_root"], cleaned["icloud_root"])
-        except ValueError as error:
+            roots = validate_archive_locations(cleaned["local_root"], cleaned["icloud_root"], cleaned["dropbox_root"])
+        except ArchiveConfigurationError as error:
             raise forms.ValidationError(str(error)) from None
         cleaned["local_root"] = str(roots.local_root)
         cleaned["icloud_root"] = str(roots.icloud_root)
+        cleaned["dropbox_root"] = str(roots.dropbox_root)
         return cleaned
 
 

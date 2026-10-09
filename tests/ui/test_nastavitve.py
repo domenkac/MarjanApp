@@ -152,7 +152,7 @@ def test_archive_reactivate_and_conflict_are_controlled(client, settings, tmp_pa
     assert "Aktivno podjetje s to davčno številko že obstaja" in conflict.content.decode()
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_settings_changes_do_not_change_cycle_membership(client):
     first = create_company()
     cycle = shrani_prvi_korak(date(2031, 2, 1), date(2031, 2, 12))

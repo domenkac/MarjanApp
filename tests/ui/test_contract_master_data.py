@@ -175,7 +175,7 @@ def test_tenant_archive_reactivate_and_archived_visible(client):
     assert tenant.aktiven is True
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_security_invalid_ids_no_delete_and_monthly_isolation(client):
     company_ = company()
     cycle = shrani_prvi_korak(date(2031, 2, 1), date(2031, 2, 12))

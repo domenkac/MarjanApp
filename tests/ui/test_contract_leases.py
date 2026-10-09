@@ -340,7 +340,7 @@ def test_item_archive_reactivate_and_parent_failure(client):
     assert item.arhivirana is False
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_security_no_delete_invalid_ids_csrf_and_monthly_isolation(client):
     lease = make_hierarchy()
     cycle = shrani_prvi_korak(date(2031, 2, 1), date(2031, 2, 12))

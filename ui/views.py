@@ -1,6 +1,7 @@
 from calendar import monthrange
 from datetime import date
 from decimal import Decimal
+from pathlib import Path
 from urllib.parse import urlencode
 
 from django.core.exceptions import ValidationError
@@ -20,12 +21,13 @@ from accounting_export.workflow import (
     accountant_control_action_tasks,
     deliver_accountant_control_report,
 )
+from archive.backup import create_backup_snapshot
 from archive.configuration import (
     ArchiveConfigurationError,
     resolve_archive_roots,
     verify_and_save_archive_roots,
 )
-from archive.models import ArchiveConfiguration
+from archive.models import ArchiveConfiguration, BackupSnapshot
 from catalogs.models import ServiceCatalogItem, VatRegime
 from catalogs.services import (
     deaktiviraj_ddv_rezim,
@@ -638,11 +640,17 @@ def test_monthly_summary_smtp_connection(request):
 
 @require_http_methods(["GET", "POST"])
 def nastavitve_arhiv(request):
+    if request.method == "POST" and request.POST.get("action") == "create_backup":
+        result = create_backup_snapshot(trigger=BackupSnapshot.Trigger.MANUAL)
+        response = redirect("ui:nastavitve_arhiv")
+        response["Location"] += "?backup=" + ("success" if result.success else "failed")
+        return response
     configuration = ArchiveConfiguration.objects.filter(pk=1).first()
     initial = (
         {
             "local_root": configuration.local_root,
             "icloud_root": configuration.icloud_root,
+            "dropbox_root": configuration.dropbox_root,
         }
         if configuration
         else None
@@ -652,12 +660,14 @@ def nastavitve_arhiv(request):
     if request.method == "POST" and form.is_valid():
         try:
             configuration = verify_and_save_archive_roots(
-                form.cleaned_data["local_root"], form.cleaned_data["icloud_root"]
+                form.cleaned_data["local_root"], form.cleaned_data["icloud_root"],
+                form.cleaned_data["dropbox_root"]
             )
         except ArchiveConfigurationError as error:
             form.add_error(None, str(error))
         else:
             success = True
+    latest_backup = BackupSnapshot.objects.first()
     return render(
         request,
         "ui/archive_settings.html",
@@ -665,6 +675,10 @@ def nastavitve_arhiv(request):
             form=form,
             configuration=configuration,
             success=success,
+            latest_backup=latest_backup,
+            latest_backup_filename=Path(latest_backup.path).name if latest_backup else "",
+            backup_success=request.GET.get("backup") == "success",
+            backup_failed=request.GET.get("backup") == "failed",
         ),
     )
 
@@ -1067,6 +1081,7 @@ def dashboard(request):
         "ui/dashboard.html",
         {
             "counts": counts,
+            "backup_error": request.GET.get("backup_error") == "1",
             "active_page": "dashboard",
             "active_section": "dashboard",
             "aktivni_cikel": aktivni_cikel,
@@ -1227,14 +1242,17 @@ def mesecni_obracun(request):
         try:
             if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
                 raise ValidationError("Zaključek je dovoljen samo v aktivnem koraku 6.")
-            zakljuci_mesecni_cikel(cycle)
+            completed = zakljuci_mesecni_cikel(cycle)
         except (MesecniCikelNapaka, ValidationError):
             review_error = (
                 "Mesečnega cikla ni bilo mogoče zaključiti. "
                 "Preverite prikazana stanja in poskusite znova."
             )
         else:
-            return redirect("ui:dashboard")
+            response = redirect("ui:dashboard")
+            if getattr(completed, "backup_result", None) and not completed.backup_result.success:
+                response["Location"] += "?backup_error=1"
+            return response
 
     if request.method == "POST" and action in review_actions:
         try:
@@ -1498,11 +1516,14 @@ def mesecni_obracun(request):
                 form.cleaned_data["obdobje_od"],
                 form.cleaned_data["datum_izdaje"],
             )
-        except MesecniCikelNapaka as exc:
+        except (MesecniCikelNapaka, ValidationError) as exc:
             sporocilo_napake = str(exc)
         else:
             preveri_predhodno_kontrolo(cycle)
-            return redirect("ui:mesecni_obracun")
+            response = redirect("ui:mesecni_obracun")
+            if getattr(cycle, "backup_result", None) and not cycle.backup_result.success:
+                response["Location"] += "?backup_error=1"
+            return response
 
     batches = []
     summary = None
@@ -1669,6 +1690,7 @@ def mesecni_obracun(request):
         request,
         "ui/mesecni_obracun.html",
         {
+            "backup_error": request.GET.get("backup_error") == "1",
             "form": form,
             "podjetja": podjetja,
             "nadaljevanje": nadaljevanje,

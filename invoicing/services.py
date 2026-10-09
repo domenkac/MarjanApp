@@ -16,6 +16,7 @@ from django.db import IntegrityError, transaction
 from django.db.models import Q
 from django.utils import timezone
 
+from archive.models import BackupSnapshot
 from catalogs.models import ESLOG_KODE_DDV, VatRegime
 from companies.models import Company, NumberSequence
 from companies.services import (
@@ -46,6 +47,7 @@ from core.validators import (
 from delivery.credentials import KeyringCredentialRef
 from delivery.transport import SmtpConfig
 
+from .backup_hooks import monthly_backup
 from .models import (
     Invoice,
     InvoiceLine,
@@ -182,6 +184,7 @@ def _obnovi_zmagovalca(obdobje: date, datum_izdaje: date) -> MonthlyCycle:
     raise IntegrityError("Mesečnega cikla po konfliktu ni mogoče obnoviti.")
 
 
+@monthly_backup(BackupSnapshot.Trigger.PRE_MONTHLY)
 def zacni_ali_nadaljuj_mesecni_cikel(
     obdobje: date, datum_izdaje: date
 ) -> MonthlyCycle:
@@ -196,6 +199,7 @@ def zacni_ali_nadaljuj_mesecni_cikel(
         return _obnovi_zmagovalca(obdobje, datum_izdaje)
 
 
+@monthly_backup(BackupSnapshot.Trigger.PRE_MONTHLY)
 def shrani_prvi_korak(obdobje: date, datum_izdaje: date) -> MonthlyCycle:
     obdobje = normaliziraj_obdobje(obdobje)
     try:
@@ -3892,6 +3896,7 @@ def _posnetek_zakljucka(cycle, state, summary_attempt):
     return json.loads(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
+@monthly_backup(BackupSnapshot.Trigger.POST_MONTHLY)
 def zakljuci_mesecni_cikel(cycle):
     from delivery.models import MonthlySummaryAttempt
 

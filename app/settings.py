@@ -4,6 +4,9 @@ from pathlib import Path
 from django.core.management.utils import get_random_secret_key
 
 BASE_DIR = Path(__file__).resolve().parent.parent
+MEDIA_ROOT = Path(
+    os.environ.get("MARJAN_MEDIA_ROOT", BASE_DIR / "media")
+).expanduser().resolve()
 
 # ponytail: restart changes this key; set DJANGO_SECRET_KEY if sessions are added.
 SECRET_KEY = os.environ.get("DJANGO_SECRET_KEY") or get_random_secret_key()

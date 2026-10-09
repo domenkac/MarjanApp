@@ -1,13 +1,20 @@
 {% extends "ui/base.html" %}
 {% block title %}Arhiv · Nastavitve{% endblock %}
 {% block content %}
-<header class="page-heading settings-heading"><div><p class="eyebrow">Nastavitve · Arhiv</p><h1>Lokacije arhiva</h1><p>Obe obstoječi mapi morata imeti absolutno pot.</p></div></header>
-{% if success %}<div class="form-success" role="status"><p>Obe lokaciji sta preverjeni in shranjeni.</p></div>{% endif %}
+<header class="page-heading settings-heading"><div><p class="eyebrow">Nastavitve · Arhiv</p><h1>Lokacije arhiva</h1><p>Vse tri obstoječe mape morajo imeti absolutno pot.</p></div></header>
+{% if success %}<div class="form-success" role="status"><p>Vse tri lokacije so preverjene in shranjene.</p></div>{% endif %}
 <section class="settings-card">
   <form method="post" novalidate>{% csrf_token %}
     {% include "ui/partials/form_fields.html" %}
     <div class="form-actions"><button class="button-primary" type="submit">Preveri in shrani</button></div>
   </form>
   {% if configuration %}<p>Preverjeno: {{ configuration.verified_at|date:"d. m. Y H:i:s" }}</p>{% endif %}
+</section>
+<section class="settings-card">
+  <h2>Varnostne kopije</h2>
+  {% if backup_success %}<p role="status">Varnostna kopija je ustvarjena in preverjena.</p>{% endif %}
+  {% if backup_failed %}<p role="alert">Varnostne kopije ni bilo mogoče ustvariti in preveriti. Preverite lokacije in dostopnost datotek.</p>{% endif %}
+  {% if latest_backup %}<p>Zadnja uspešna kopija: {{ latest_backup.created_at|date:"d. m. Y H:i:s" }} · {{ latest_backup_filename }}</p>{% else %}<p>Uspešne varnostne kopije še ni.</p>{% endif %}
+  <form method="post">{% csrf_token %}<button type="submit" class="button-primary" name="action" value="create_backup">Ustvari varnostno kopijo</button></form>
 </section>
 {% endblock %}

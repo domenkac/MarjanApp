@@ -1,12 +1,13 @@
 import os
+from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from django.conf import settings
 from django.db import connection
 from django.utils import timezone
 
 from .models import ArchiveConfiguration
-from .services import ArchiveRoots
 
 _PROBE_BYTES = b"MarjanApp archive location verification\n"
 
@@ -15,7 +16,29 @@ class ArchiveConfigurationError(ValueError):
     pass
 
 
+@dataclass(frozen=True, slots=True)
+class ArchiveLocations:
+    local_root: Path
+    icloud_root: Path
+    dropbox_root: Path
+
+    def __post_init__(self):
+        paths = [
+            Path(value)
+            for value in (self.local_root, self.icloud_root, self.dropbox_root)
+        ]
+        if not all(path.is_absolute() for path in paths):
+            raise ValueError("Vse poti morajo biti absolutne.")
+        paths = [path.resolve() for path in paths]
+        if len(set(paths)) != 3:
+            raise ValueError("Vse tri lokacije morajo biti različne.")
+        for name, path in zip(("local_root", "icloud_root", "dropbox_root"), paths):
+            object.__setattr__(self, name, path)
+
+
 def _roots(local_root, icloud_root):
+    from .services import ArchiveRoots
+
     if not str(local_root).strip() or not str(icloud_root).strip():
         raise ArchiveConfigurationError("Obe poti arhiva sta obvezni.")
     try:
@@ -24,11 +47,46 @@ def _roots(local_root, icloud_root):
         raise ArchiveConfigurationError(str(error)) from None
 
 
-def resolve_archive_roots() -> ArchiveRoots:
+def resolve_archive_roots():
     configuration = ArchiveConfiguration.objects.filter(pk=1).first()
     if configuration is None:
         raise ArchiveConfigurationError("Lokacije arhiva niso konfigurirane.")
     return _roots(configuration.local_root, configuration.icloud_root)
+
+
+def resolve_archive_locations() -> ArchiveLocations:
+    configuration = ArchiveConfiguration.objects.filter(pk=1).first()
+    if configuration is None:
+        raise ArchiveConfigurationError("Lokacije arhiva niso konfigurirane.")
+    return validate_archive_locations(
+        configuration.local_root, configuration.icloud_root, configuration.dropbox_root
+    )
+
+
+def validate_archive_locations(local_root, icloud_root, dropbox_root):
+    if not all(str(value).strip() for value in (local_root, icloud_root, dropbox_root)):
+        raise ArchiveConfigurationError("Vse tri poti so obvezne.")
+    try:
+        roots = ArchiveLocations(local_root, icloud_root, dropbox_root)
+        media = Path(settings.MEDIA_ROOT)
+        if not media.is_absolute():
+            raise ValueError("MEDIA_ROOT must be absolute.")
+        # Safety comparison must also work before MEDIA_ROOT exists.
+        paths = [
+            roots.local_root,
+            roots.icloud_root,
+            roots.dropbox_root,
+            media.resolve(),
+        ]
+        for index, path in enumerate(paths):
+            for other in paths[index + 1 :]:
+                if path.is_relative_to(other) or other.is_relative_to(path):
+                    raise ValueError("Backup locations must not overlap.")
+        return roots
+    except (ValueError, OSError, RuntimeError):
+        raise ArchiveConfigurationError(
+            "Poti morajo biti veljavne, absolutne in se ne smejo prekrivati."
+        ) from None
 
 
 def _verify_root(root: Path, label: str) -> None:
@@ -45,6 +103,8 @@ def _verify_root(root: Path, label: str) -> None:
             os.fsync(output.fileno())
         if temporary.read_bytes() != _PROBE_BYTES:
             raise OSError
+        temporary.unlink()
+        temporary = None
     except OSError:
         raise ArchiveConfigurationError(
             f"{label} ni dostopen za varen zapis in branje."
@@ -57,19 +117,23 @@ def _verify_root(root: Path, label: str) -> None:
                 pass
 
 
-def verify_and_save_archive_roots(local_root, icloud_root) -> ArchiveConfiguration:
-    if connection.in_atomic_block:
+def verify_and_save_archive_roots(
+    local_root, icloud_root, dropbox_root
+) -> ArchiveConfiguration:
+    if connection.in_atomic_block or not connection.get_autocommit():
         raise ArchiveConfigurationError(
             "Preverjanje lokacij ne sme potekati v transakciji baze."
         )
-    roots = _roots(local_root, icloud_root)
+    roots = validate_archive_locations(local_root, icloud_root, dropbox_root)
     _verify_root(roots.local_root, "Lokalni arhiv")
     _verify_root(roots.icloud_root, "iCloud arhiv")
+    _verify_root(roots.dropbox_root, "Dropbox mapa")
     configuration, _ = ArchiveConfiguration.objects.update_or_create(
         pk=1,
         defaults={
             "local_root": str(roots.local_root),
             "icloud_root": str(roots.icloud_root),
+            "dropbox_root": str(roots.dropbox_root),
             "verified_at": timezone.now(),
         },
     )

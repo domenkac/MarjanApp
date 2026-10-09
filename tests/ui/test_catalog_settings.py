@@ -302,7 +302,7 @@ def test_service_catalog_create_edit_state_and_vat_label(client):
     assert item.aktivna is True
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_service_default_change_does_not_change_lease_item_or_cycle_membership(client):
     old_regime = create_vat(sifra="STAR", naziv="Star")
     new_regime = create_vat(sifra="NOV", naziv="Nov")

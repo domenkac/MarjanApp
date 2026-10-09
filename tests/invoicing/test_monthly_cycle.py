@@ -87,7 +87,7 @@ def test_db_zavrne_podvojeno_clanstvo_podjetja():
         MonthlyBatch.objects.create(cycle=cycle, company=company)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_prvi_zagon_posname_aktivna_podjetja_samo_enkrat():
     aktivno = ustvari_podjetje("Alfa d.o.o.", "15012557")
     neaktivno = ustvari_podjetje("Beta d.o.o.", "69165028", aktivno=False)
@@ -109,7 +109,7 @@ def test_prvi_zagon_posname_aktivna_podjetja_samo_enkrat():
     assert MonthlyBatch.objects.count() == 1
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_drugi_mesec_ni_tiho_ustvarjen_in_zakljuceno_obdobje_se_ne_ponovi():
     ustvari_podjetje("Alfa d.o.o.", "15012557")
     zacni_ali_nadaljuj_mesecni_cikel(date(2026, 8, 1), date(2026, 8, 1))
@@ -122,7 +122,7 @@ def test_drugi_mesec_ni_tiho_ustvarjen_in_zakljuceno_obdobje_se_ne_ponovi():
     assert MonthlyCycle.objects.count() == 1
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_shranjevanje_prvega_koraka_ne_ustvari_racuna_ali_zaporedja():
     ustvari_podjetje("Alfa d.o.o.", "15012557")
 
@@ -134,7 +134,7 @@ def test_shranjevanje_prvega_koraka_ne_ustvari_racuna_ali_zaporedja():
     assert NumberSequence.objects.count() == 0
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_identicen_retry_je_idempotenten_konflikten_datum_pa_zavrnjen():
     ustvari_podjetje("Alfa d.o.o.", "15012557")
     cycle = shrani_prvi_korak(date(2026, 8, 18), date(2026, 8, 12))
@@ -149,7 +149,7 @@ def test_identicen_retry_je_idempotenten_konflikten_datum_pa_zavrnjen():
     assert cycle.trenutni_korak == 2
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_zacetek_primerja_datum_ob_navadnem_nadaljevanju():
     ustvari_podjetje("Alfa d.o.o.", "15012557")
     cycle = zacni_ali_nadaljuj_mesecni_cikel(
@@ -169,7 +169,7 @@ def test_zacetek_primerja_datum_ob_navadnem_nadaljevanju():
     assert cycle.datum_izdaje == date(2026, 8, 12)
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_integrityerror_obnova_primerja_podatke_zmagovalca(monkeypatch):
     cycle = MonthlyCycle.objects.create(
         obdobje=date(2026, 8, 1),
@@ -189,7 +189,7 @@ def test_integrityerror_obnova_primerja_podatke_zmagovalca(monkeypatch):
     assert isti.pk == cycle.pk
 
 
-@pytest.mark.django_db
+@pytest.mark.django_db(transaction=True)
 def test_prvi_korak_brez_aktivnih_podjetij_ne_ustvari_cikla():
     with pytest.raises(NiAktivnihPodjetij):
         shrani_prvi_korak(date(2026, 8, 1), date(2026, 8, 12))
