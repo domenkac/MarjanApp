@@ -19,7 +19,7 @@ def postavka(**spremembe):
     podjetje = Company()
     nepremicnina = Property(company=podjetje)
     enota = Unit(property=nepremicnina)
-    najemnik = Tenant()
+    najemnik = Tenant(tip=Tenant.Tip.PRAVNA_OSEBA, identificiran_za_ddv=False)
     pogodba = Lease(
         unit=enota,
         tenant=najemnik,
@@ -27,6 +27,8 @@ def postavka(**spremembe):
         status=Lease.Status.AKTIVNA,
     )
     rezim = VatRegime(
+        sifra="TEST_STANDARD",
+        zahteva_polni_odbitek=False,
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
         stopnja=Decimal("22.00"),
         klavzula="",

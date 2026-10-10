@@ -362,6 +362,7 @@ def test_datum_prenehanja_status_arhiviranje_in_poslovna_fk():
 
 def ustvari_rezim(zahteva_referenco=False):
     return VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22",
         naziv="DDV 22 %",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
@@ -638,6 +639,7 @@ def test_drug_rezim_na_isti_pogodbi_ne_blokira():
     postavka.arhivirana = True
     postavka.save(update_fields=["arhivirana"])
     drug_rezim = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV9",
         naziv="DDV 9 %",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

@@ -22,6 +22,7 @@ def vat_data(**changes):
         "klavzula": "",
         "rekapitulacijska_skupina": "DDV 22 %",
         "zahteva_referenco": "",
+        "zahteva_polni_odbitek": "False",
         "velja_od": "2026-01-01",
         "velja_do": "",
     }
@@ -33,6 +34,7 @@ def create_vat(**changes):
     data = vat_data()
     data["stopnja"] = Decimal(data["stopnja"])
     data["zahteva_referenco"] = bool(data["zahteva_referenco"])
+    data["zahteva_polni_odbitek"] = data["zahteva_polni_odbitek"] == "True"
     data["velja_od"] = date.fromisoformat(data["velja_od"])
     data["velja_do"] = (
         date.fromisoformat(data["velja_do"]) if data["velja_do"] else None

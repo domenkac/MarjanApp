@@ -65,6 +65,7 @@ def postavka(db):
         tip_pogoja_indeksacije=Lease.TipPogojaIndeksacije.VEDNO,
     )
     rezim = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22",
         naziv="Splošna stopnja",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

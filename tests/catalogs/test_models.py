@@ -12,6 +12,7 @@ from catalogs.models import ServiceCatalogItem, VatRegime
 def podatki_rezima(**spremembe):
     podatki = {
         "sifra": "DDV22",
+        "zahteva_polni_odbitek": False,
         "naziv": "DDV 22 %",
         "nacin_obracuna": VatRegime.NacinObracuna.OBDAVCENO,
         "stopnja": Decimal("22.00"),

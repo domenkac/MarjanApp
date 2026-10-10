@@ -24,7 +24,7 @@ from companies.models import (
 from core.models import AuditLogEntry
 from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
 
-FINGERPRINT_DDV_VERSION = 1
+FINGERPRINT_DDV_VERSION = 2
 FINGERPRINT_VZORCA_VERSION = 1
 
 
@@ -95,6 +95,7 @@ def _ddv_podatki(company: Company) -> dict:
                         postavka.vat_regime.rekapitulacijska_skupina
                     ),
                     "zahteva_referenco": postavka.vat_regime.zahteva_referenco,
+                    "zahteva_polni_odbitek": postavka.vat_regime.zahteva_polni_odbitek,
                 },
             }
             for postavka in postavke

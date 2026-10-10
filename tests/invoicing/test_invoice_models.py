@@ -114,6 +114,7 @@ def test_invoice_polja_izbire_in_privzeti_status(company):
         "prejemnik_naslov",
         "prejemnik_drzava_koda",
         "prejemnik_identificiran_za_ddv",
+        "prejemnik_polni_odbitek",
         "prejemnik_davcna_stevilka",
         "prejemnik_ddv_identifikacijska_stevilka",
         "prejemnik_maticna_stevilka",
@@ -277,6 +278,8 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
         "ddv_znesek",
         "skupaj",
         "ddv_nacin_obracuna",
+        "ddv_rezim_sifra",
+        "ddv_zahteva_polni_odbitek",
         "ddv_klavzula",
         "ddv_rekap_skupina",
         "ddv_eslog_koda",
@@ -302,6 +305,7 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
 def test_invoice_line_povezave_so_protected(company):
     lease = ustvari_pogodbo(company)
     vat_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22",
         naziv="Splošna stopnja",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
@@ -331,6 +335,7 @@ def test_invoice_line_povezave_so_protected(company):
 def test_snapshot_vrstice_ostane_po_spremembi_lease_item_in_ddv(company):
     lease = ustvari_pogodbo(company)
     vat_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22",
         naziv="Splošna stopnja",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

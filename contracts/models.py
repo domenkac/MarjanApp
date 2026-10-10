@@ -236,6 +236,21 @@ class Lease(models.Model):
                 "Prag spremembe je obvezen za ta tip indeksacije."
             )
 
+        if self.pk and self.tenant_id:
+            from .vat_eligibility import preveri_postavko_ddv
+
+            previous_tenant = Lease.objects.filter(pk=self.pk).values_list(
+                "tenant_id", flat=True
+            ).first()
+            if previous_tenant != self.tenant_id:
+                for item in self.leaseitem_set.filter(arhivirana=False).select_related(
+                    "vat_regime"
+                ):
+                    try:
+                        preveri_postavko_ddv(item, tenant=self.tenant)
+                    except ValidationError as exc:
+                        napake.setdefault("tenant", []).extend(exc.messages)
+
         if napake:
             raise ValidationError(napake)
 
@@ -275,6 +290,14 @@ class LeaseItem(models.Model):
     def clean(self):
         super().clean()
         napake = {}
+
+        if self.vat_regime_id and self.lease_id:
+            from .vat_eligibility import preveri_postavko_ddv
+
+            try:
+                preveri_postavko_ddv(self)
+            except ValidationError as exc:
+                napake["vat_regime"] = exc.messages
 
         if self.vat_regime_id and self.vat_regime.zahteva_referenco:
             if not (self.referenca_listine or "").strip():

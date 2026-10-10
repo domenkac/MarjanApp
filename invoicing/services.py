@@ -34,6 +34,10 @@ from contracts.services import (
     efektivna_veljavnost_postavke,
     izracunaj_postavko,
 )
+from contracts.vat_eligibility import (
+    preveri_postavko_ddv,
+    preveri_upravicenost_prejemnika,
+)
 from core.eslog_konfiguracija import razresi_eslog_konfiguracijo
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
@@ -593,6 +597,12 @@ def _source_validation_issues(lease, items):
                     )
 
         regime = item.vat_regime
+        try:
+            preveri_postavko_ddv(item, tenant=tenant)
+        except ValidationError as exc:
+            issues.append(_validation_issue(
+                "DDV_PREJEMNIK_NEUPRAVICEN", item, "vat_regime", exc.messages[0]
+            ))
         if regime.nacin_obracuna not in VatRegime.NacinObracuna.values:
             issues.append(
                 _validation_issue(
@@ -984,6 +994,8 @@ POSLOVNA_POLJA_RACUNA = {
 POSLOVNA_POLJA_VRSTICE = {field.name for field in InvoiceLine._meta.concrete_fields} - {
     "id",
     "invoice",
+    "ddv_rezim_sifra",
+    "ddv_zahteva_polni_odbitek",
 }
 
 
@@ -1093,6 +1105,7 @@ def pripravi_osnutek_np(
         prejemnik_naslov=tenant.naslov,
         prejemnik_drzava_koda=tenant.drzava_koda,
         prejemnik_identificiran_za_ddv=tenant.identificiran_za_ddv,
+        prejemnik_polni_odbitek=tenant.ddv_zavezanec_s_polnim_odbitkom,
         prejemnik_davcna_stevilka=tenant.davcna_stevilka,
         prejemnik_ddv_identifikacijska_stevilka=(
             tenant.ddv_identifikacijska_stevilka
@@ -1155,6 +1168,16 @@ def _potrdi_osnutek_np(
             raise ValueError("NP vrstica mora imeti postavko iste pogodbe.")
         if vrstica.skupaj != vrstica.osnova + vrstica.ddv_znesek:
             raise ValueError("NP vrstica: vsota osnove in DDV se ne ujema s skupaj.")
+        preveri_postavko_ddv(vrstica.lease_item)
+        preveri_upravicenost_prejemnika(
+            sifra=vrstica.ddv_rezim_sifra,
+            zahteva_polni_odbitek=vrstica.ddv_zahteva_polni_odbitek,
+            tip=invoice.prejemnik_tip,
+            identificiran_za_ddv=invoice.prejemnik_identificiran_za_ddv,
+            polni_odbitek=invoice.prejemnik_polni_odbitek,
+            najemnik=invoice.prejemnik_naziv,
+            postavka=f"#{vrstica.lease_item_id}",
+        )
 
     for vrstica in vrstice:
         _preveri_eslog_kodo(
@@ -1235,6 +1258,7 @@ _SNAPSHOT_POLJA_KOREKCIJE = (
     "prejemnik_tip",
     "prejemnik_drzava_koda",
     "prejemnik_identificiran_za_ddv",
+    "prejemnik_polni_odbitek",
     "izdajatelj_naziv",
     "izdajatelj_naslov",
     "izdajatelj_davcna_stevilka",
@@ -1285,6 +1309,8 @@ def _storno_vrstica(originalna: InvoiceLine, storno: Invoice) -> InvoiceLine:
         ddv_znesek=-originalna.ddv_znesek,
         skupaj=-originalna.skupaj,
         ddv_nacin_obracuna=originalna.ddv_nacin_obracuna,
+        ddv_rezim_sifra=originalna.ddv_rezim_sifra,
+        ddv_zahteva_polni_odbitek=originalna.ddv_zahteva_polni_odbitek,
         ddv_klavzula=originalna.ddv_klavzula,
         ddv_rekap_skupina=originalna.ddv_rekap_skupina,
         ddv_eslog_koda=originalna.ddv_eslog_koda,
@@ -1308,6 +1334,8 @@ def _kljuc_storno_vrstice(vrstica: InvoiceLine) -> tuple:
         vrstica.ddv_znesek,
         vrstica.skupaj,
         vrstica.ddv_nacin_obracuna,
+        vrstica.ddv_rezim_sifra,
+        vrstica.ddv_zahteva_polni_odbitek,
         vrstica.ddv_klavzula,
         vrstica.ddv_rekap_skupina,
         vrstica.ddv_eslog_koda,
@@ -1719,6 +1747,8 @@ def _izracunaj_vrstice_np(
             InvoiceLine(
                 lease=pogodba,
                 lease_item=postavka,
+                ddv_rezim_sifra=postavka.vat_regime.sifra,
+                ddv_zahteva_polni_odbitek=postavka.vat_regime.zahteva_polni_odbitek,
                 opis=(
                     f"{postavka.naziv_postavke} za obdobje "
                     f"{obdobje_od:%d.%m.%Y} – {obdobje_do:%d.%m.%Y}\n"
@@ -1788,7 +1818,7 @@ def izracunaj_kandidata(
     return RacunKandidat(vrstice, skupaj, True, tuple(izjeme))
 
 
-CALCULATION_SNAPSHOT_VERSION = 3
+CALCULATION_SNAPSHOT_VERSION = 4
 
 
 def _decimal_string(value: Decimal | None) -> str | None:
@@ -1997,9 +2027,12 @@ def _lifecycle_exceptions(lease, period_start, period_end):
     return exceptions
 
 
-def _candidate_fingerprint(candidate, *, company, period_start, period_end, issue_date):
+def _candidate_fingerprint(
+    candidate, *, company, period_start, period_end, issue_date,
+    schema_version=CALCULATION_SNAPSHOT_VERSION,
+):
     value = {
-        "schema_version": CALCULATION_SNAPSHOT_VERSION,
+        "schema_version": schema_version,
         "period_start": period_start,
         "period_end": period_end,
         "issue_date": issue_date,
@@ -2179,6 +2212,8 @@ def _calculation_snapshot(batch, cycle, issues):
             "vat": _decimal_string(line.ddv_znesek),
             "total": _decimal_string(line.skupaj),
             "vat_method": line.ddv_nacin_obracuna,
+            "vat_regime_code": line.ddv_rezim_sifra,
+            "requires_full_deduction": line.ddv_zahteva_polni_odbitek,
             "vat_clause": line.ddv_klavzula,
             "vat_summary_group": line.ddv_rekap_skupina,
             "proportional": line.je_sorazmerno,
@@ -2231,6 +2266,7 @@ def _calculation_snapshot(batch, cycle, issues):
                 "registration_number": tenant.maticna_stevilka,
                 "vat_registered": tenant.identificiran_za_ddv,
                 "email": tenant.email,
+                "full_deduction": tenant.ddv_zavezanec_s_polnim_odbitkom,
             },
             "recipient_contacts": [
                 {
@@ -2284,10 +2320,15 @@ def _calculation_snapshot(batch, cycle, issues):
 
 
 def aktivni_izracuni_mesecnega_cikla(cycle: MonthlyCycle):
+    versions = [CALCULATION_SNAPSHOT_VERSION]
+    if cycle.trenutni_korak in (
+        MonthlyCycle.Korak.POTRDITEV_PAKETA, MonthlyCycle.Korak.ZAKLJUCEK
+    ):
+        versions.append(3)  # Old frozen batches: only exact issued retries may succeed.
     return cycle.batches.filter(
         preflight_status=MonthlyBatch.PreflightStatus.PASSED,
         calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
-        calculation_schema_version=CALCULATION_SNAPSHOT_VERSION,
+        calculation_schema_version__in=versions,
     )
 
 
@@ -2349,6 +2390,28 @@ def trenutni_pregledi_mesecnega_cikla(cycle: MonthlyCycle) -> list[MonthlyCandid
     ]
 
 
+def _preveri_ddv_dokazila_kandidata(candidate):
+    tenant = candidate.get("tenant")
+    lines = candidate.get("lines")
+    if not isinstance(tenant, dict) or not isinstance(lines, list):
+        raise ValidationError("Manjkajo posnetna dokazila o upravičenosti prejemnika.")
+    for line in lines:
+        if (
+            not isinstance(line, dict)
+            or not isinstance(line.get("vat_regime_code"), str)
+            or not line["vat_regime_code"].strip()
+        ):
+            raise ValidationError("Manjka posnetna šifra DDV režima postavke.")
+        preveri_upravicenost_prejemnika(
+            sifra=line["vat_regime_code"],
+            zahteva_polni_odbitek=line.get("requires_full_deduction"),
+            tip=tenant.get("type"), identificiran_za_ddv=tenant.get("vat_registered"),
+            polni_odbitek=tenant.get("full_deduction"),
+            najemnik=tenant.get("name", tenant.get("id")),
+            postavka=f"#{line.get('lease_item_id')}",
+        )
+
+
 def _preveri_izdajni_snapshot(candidate: dict) -> None:
     lines = candidate.get("lines")
     totals = candidate.get("totals")
@@ -2367,6 +2430,7 @@ def _preveri_izdajni_snapshot(candidate: dict) -> None:
         raise ValidationError("Posnetek izbranega kandidata ni veljaven.") from exc
     if line_net != net or line_vat != vat or line_total != total or net + vat != total:
         raise ValidationError("Vsote v posnetku izbranega kandidata niso skladne.")
+    _preveri_ddv_dokazila_kandidata(candidate)
 
 
 def zamrzni_paket_za_potrditev(cycle: MonthlyCycle) -> MonthlyCycle:
@@ -2564,12 +2628,21 @@ def _decimal_iz_posnetka(value, label, *, max_digits=10, decimal_places=2):
     return number
 
 
-def preveri_integriteto_zamrznjenega_mesecnega_posnetka(snapshot, batch):
+def preveri_integriteto_zamrznjenega_mesecnega_posnetka(
+    snapshot, batch, *, allow_legacy_snapshot=False
+):
     if not isinstance(snapshot, dict):
         raise ValidationError("Zamrznjeni posnetek ni veljaven objekt.")
     if "candidates" not in snapshot or not isinstance(snapshot["candidates"], list):
         raise ValidationError("Kandidati zamrznjenega posnetka morajo biti seznam.")
-    if snapshot.get("schema_version") != CALCULATION_SNAPSHOT_VERSION:
+    if (
+        type(snapshot.get("schema_version")) is not int
+        or snapshot["schema_version"] != batch.calculation_schema_version
+    ):
+        raise ValidationError("Različica zamrznjenega posnetka se ne ujema z različico paketa.")
+    if snapshot.get("schema_version") != CALCULATION_SNAPSHOT_VERSION and not (
+        allow_legacy_snapshot and snapshot.get("schema_version") == 3
+    ):
         raise ValidationError("Razli\u010dica zamrznjenega posnetka ni podprta.")
     company = snapshot.get("company")
     required = ("period_start", "period_end", "issue_date", "pdf_template_version")
@@ -2592,9 +2665,11 @@ def preveri_integriteto_zamrznjenega_mesecnega_posnetka(snapshot, batch):
     return company
 
 
-def preveri_integriteto_zamrznjenega_kandidata(snapshot, candidate, review):
+def preveri_integriteto_zamrznjenega_kandidata(
+    snapshot, candidate, review, *, allow_legacy_snapshot=False
+):
     company = preveri_integriteto_zamrznjenega_mesecnega_posnetka(
-        snapshot, review.batch
+        snapshot, review.batch, allow_legacy_snapshot=allow_legacy_snapshot
     )
     tenant = candidate.get("tenant")
     signatory = company.get("signatory") if isinstance(company, dict) else None
@@ -2621,9 +2696,12 @@ def preveri_integriteto_zamrznjenega_kandidata(snapshot, candidate, review):
         period_start=snapshot["period_start"],
         period_end=snapshot["period_end"],
         issue_date=snapshot["issue_date"],
+        schema_version=snapshot["schema_version"],
     )
     if candidate["candidate_fingerprint"] != expected_fingerprint:
         raise ValidationError("Prstni odtis zamrznjenega kandidata ni veljaven.")
+    if snapshot["schema_version"] == CALCULATION_SNAPSHOT_VERSION:
+        _preveri_ddv_dokazila_kandidata(candidate)
     if candidate["pdf_template_version"] != snapshot["pdf_template_version"]:
         raise ValidationError("Razli\u010dica PDF-predloge kandidata ni skladna s paketom.")
     for checksum in (company["logo_checksum"], signatory["signature_checksum"]):
@@ -2652,6 +2730,8 @@ def preveri_integriteto_zamrznjenega_kandidata(snapshot, candidate, review):
                 "ddv_znesek": _decimal_iz_posnetka(line["vat"], f"DDV vrstice {index}"),
                 "skupaj": _decimal_iz_posnetka(line["total"], f"Skupaj vrstice {index}"),
                 "ddv_nacin_obracuna": line["vat_method"],
+                "ddv_rezim_sifra": line.get("vat_regime_code", ""),
+                "ddv_zahteva_polni_odbitek": line.get("requires_full_deduction"),
                 "ddv_klavzula": line["vat_clause"],
                 "ddv_rekap_skupina": line["vat_summary_group"],
                 "je_sorazmerno": line["proportional"],
@@ -2704,6 +2784,7 @@ def _polja_racuna_iz_zamrznjenega_posnetka(batch, candidate, prepared, review):
         "prejemnik_naziv": tenant["name"], "prejemnik_tip": tenant["type"],
         "prejemnik_naslov": tenant["address"], "prejemnik_drzava_koda": tenant["country"],
         "prejemnik_identificiran_za_ddv": tenant["vat_registered"],
+        "prejemnik_polni_odbitek": tenant.get("full_deduction"),
         "prejemnik_davcna_stevilka": tenant["tax_number"],
         "prejemnik_ddv_identifikacijska_stevilka": tenant["vat_id"],
         "prejemnik_maticna_stevilka": tenant["registration_number"],
@@ -2740,6 +2821,7 @@ def _racun_se_natancno_ujema(invoice, fields, lines):
             line["skupaj"], line["ddv_nacin_obracuna"],
             line["ddv_klavzula"], line["ddv_rekap_skupina"], "",
             line["je_sorazmerno"], None, None,
+            line["ddv_rezim_sifra"], line["ddv_zahteva_polni_odbitek"],
         )
         for line in lines
     ]
@@ -2748,6 +2830,7 @@ def _racun_se_natancno_ujema(invoice, fields, lines):
         "ddv_znesek", "skupaj", "ddv_nacin_obracuna", "ddv_klavzula",
         "ddv_rekap_skupina", "ddv_eslog_koda", "je_sorazmerno",
         "razlog_rocnega_popravka", "izvirno_izracunana_vrednost",
+        "ddv_rezim_sifra", "ddv_zahteva_polni_odbitek",
     ))
     return actual == expected
 
@@ -2798,7 +2881,14 @@ def _nalozi_podatke_materializacije(
     except MonthlyCandidateReview.DoesNotExist as exc:
         raise ValidationError("Manjka pregled zamrznjenega kandidata.") from exc
     prepared = preveri_integriteto_zamrznjenega_kandidata(
-        snapshot, candidate, review
+        snapshot, candidate, review,
+        allow_legacy_snapshot=Invoice.objects.filter(
+            company_id=batch.company_id, lease_id=lease_id,
+            document_type=Invoice.DocumentType.NP,
+            obdobje_od=batch.cycle.obdobje,
+            obdobje_do=_datum_iz_posnetka(snapshot.get("period_end"), "Konec obdobja"),
+            stevilka__isnull=False,
+        ).exists(),
     )
     if not Lease.objects.filter(pk=lease_id).exists():
         raise ValidationError("Pogodba zamrznjenega kandidata ne obstaja več.")

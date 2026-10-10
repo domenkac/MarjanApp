@@ -240,6 +240,7 @@ def izdani_racun(db, tmp_path, settings):
         rok_placila_dni=15,
     )
     regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R1",
         naziv="DDV 22",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

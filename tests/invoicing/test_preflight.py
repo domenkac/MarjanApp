@@ -103,6 +103,7 @@ def ready_company(db, settings, tmp_path):
         rok_placila_dni=15,
     )
     regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R22",
         naziv="DDV 22",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
@@ -502,12 +503,12 @@ def test_previous_month_archived_not_issued_evidence(ready_company, reason, expe
     ) is expected
 
 
-def test_snapshot_v3_fingerprint_and_pdf_contract(ready_company, settings):
+def test_snapshot_v4_fingerprint_and_pdf_contract(ready_company, settings):
     candidate = _calculate(ready_company)[0]
 
-    assert CALCULATION_SNAPSHOT_VERSION == 3
-    assert ready_company["batch"].calculation_schema_version == 3
-    assert ready_company["batch"].calculation_snapshot["schema_version"] == 3
+    assert CALCULATION_SNAPSHOT_VERSION == 4
+    assert ready_company["batch"].calculation_schema_version == 4
+    assert ready_company["batch"].calculation_snapshot["schema_version"] == 4
     assert candidate["pdf_template_version"] == settings.PDF_TEMPLATE_VERSION
     assert len(candidate["candidate_fingerprint"]) == 64
     assert candidate["lease_state"] == {
@@ -695,7 +696,7 @@ def test_step4_partial_calculation_upgrades_old_schema(ready_company):
 
     assert [batch.pk for batch in result] == [data["batch"].pk]
     assert data["cycle"].trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
-    assert data["batch"].calculation_schema_version == 3
+    assert data["batch"].calculation_schema_version == 4
     assert len(data["batch"].calculation_snapshot["candidates"][0][
         "candidate_fingerprint"
     ]) == 64

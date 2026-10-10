@@ -156,6 +156,9 @@ def izracunaj_postavko(
     if osnova is None:
         return None
 
+    from .vat_eligibility import preveri_postavko_ddv
+
+    preveri_postavko_ddv(postavka)
     rezim = postavka.vat_regime
     if rezim.nacin_obracuna == VatRegime.NacinObracuna.OBDAVCENO:
         ddv_znesek = zaokrozi(osnova * rezim.stopnja / Decimal(100))

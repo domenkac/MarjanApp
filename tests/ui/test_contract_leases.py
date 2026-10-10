@@ -54,6 +54,7 @@ def make_hierarchy(**lease_changes):
 
 def make_vat(sifra="DDV22", aktiven=True, zahteva_referenco=False):
     return VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra=sifra, naziv=sifra,
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
         stopnja=Decimal("22.00"), rekapitulacijska_skupina=sifra,

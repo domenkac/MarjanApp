@@ -116,6 +116,7 @@ def test_zastarela_ddv_potrditev_blokira_predpogoje(pogodba):
     company = pogodba.unit.property.company
     postavka = dodaj_postavko(pogodba)
     drug_rezim = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R-drugi",
         naziv="DDV 9,5",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

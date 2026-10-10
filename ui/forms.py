@@ -391,6 +391,13 @@ class LeaseItemCorrectionForm(forms.Form):
 
 
 class VatRegimeForm(forms.ModelForm):
+    zahteva_polni_odbitek = forms.TypedChoiceField(
+        label="Zahteva polni odbitek DDV",
+        choices=(("", "Izberite"), ("True", "Da"), ("False", "Ne")),
+        coerce=lambda value: value == "True",
+        error_messages={"required": "Izberite Da ali Ne za zahtevo polnega odbitka."},
+    )
+
     class Meta:
         model = VatRegime
         fields = (
@@ -401,6 +408,7 @@ class VatRegimeForm(forms.ModelForm):
             "klavzula",
             "rekapitulacijska_skupina",
             "zahteva_referenco",
+            "zahteva_polni_odbitek",
             "velja_od",
             "velja_do",
         )

@@ -58,6 +58,7 @@ def poracun_podatki():
         rok_placila_dni=15,
     )
     vat_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22",
         naziv="Splošna stopnja",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

@@ -354,8 +354,13 @@ def test_dashboard_query_count_constant_across_periods_and_companies(reported, d
 def test_schema3_reader_independent_of_current_writer(company, monkeypatch):
     from accounting_export import task_state
 
-    _ensure_completed_batch(company)
-    monkeypatch.setattr("invoicing.services.CALCULATION_SNAPSHOT_VERSION", 4)
+    batch = _ensure_completed_batch(company)
+    snapshot = deepcopy(batch.calculation_snapshot)
+    snapshot["schema_version"] = 3
+    MonthlyBatch.objects.filter(pk=batch.pk).update(
+        calculation_schema_version=3, calculation_snapshot=snapshot,
+    )
+    monkeypatch.setattr("invoicing.services.CALCULATION_SNAPSHOT_VERSION", 5)
     try:
         reload(task_state)
         assert state().ready
@@ -367,6 +372,7 @@ def test_schema3_reader_independent_of_current_writer(company, monkeypatch):
 @pytest.mark.parametrize("batch_version,snapshot_version", [
     (3, 3), (4, 4), (3, 4), (4, 3), (None, 3),
     (3, True), (3, "3"), (3, None),
+    (5, 5),
 ])
 def test_persisted_version_contract(company, batch_version, snapshot_version):
     batch = _ensure_completed_batch(company)
@@ -376,7 +382,7 @@ def test_persisted_version_contract(company, batch_version, snapshot_version):
         calculation_schema_version=batch_version, calculation_snapshot=snapshot,
     )
     task = state()
-    assert task.ready == (batch_version == snapshot_version == 3)
+    assert task.ready == (batch_version == snapshot_version and batch_version in {3, 4})
     if not task.ready:
         assert task.issue_code == "MONTHLY_SNAPSHOT_NOT_READY"
         assert task.state != "ZAKLJUCENO"

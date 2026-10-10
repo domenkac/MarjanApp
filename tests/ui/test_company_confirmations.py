@@ -55,6 +55,7 @@ def confirmation_ui_data(db, settings, tmp_path):
         datum_zacetka=date(2020, 1, 1), rok_placila_dni=15,
     )
     regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R1", naziv="DDV 22", nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
         stopnja=Decimal("22.00"), rekapitulacijska_skupina="DDV 22 %",
         eslog_koda="S", velja_od=date(2020, 1, 1),
@@ -103,6 +104,7 @@ def test_vat_post_is_csrf_protected_and_preserves_history(client, confirmation_u
 def test_review_excludes_unrelated_archived_and_unused_rows(client, confirmation_ui_data):
     data = confirmation_ui_data
     unused = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="NEUP", naziv="Neuporabljen", nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO,
         stopnja=Decimal(0), rekapitulacijska_skupina="O", eslog_koda="E",
         velja_od=date(2020, 1, 1),

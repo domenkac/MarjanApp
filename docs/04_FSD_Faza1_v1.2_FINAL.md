@@ -129,12 +129,17 @@ Storitev pri `ST` vedno vzame leto iz `datum_izdaje.year`; DB pogoj `leto > 0` j
 | `klavzula` | TextField | required, kadar `nacin_obracuna` ∈ {`OPROSCENO`, `OBRNJENA_DAVCNA`} |
 | `rekapitulacijska_skupina` | CharField | required |
 | `zahteva_referenco` | BooleanField | default `False` |
+| `zahteva_polni_odbitek` | BooleanField | `null=True`, brez privzetega `False`; ob vnosu obvezna izrecna izbira Da/Ne; `NULL` pomeni nerazrešeno staro razvrstitev in blokira uporabo |
 | `velja_od` | DateField | required |
 | `velja_do` | DateField | `null=True` |
 | `eslog_koda` | CharField | optional v fazi 1, polni se v fazi 2 |
 | `aktiven` | BooleanField | default `True` |
 
 **Pravilo:** `clean()` prepreči `aktiven=False`, dokler obstaja aktivna `LeaseItem` s to referenco (dopolnilo 10). *Zakaj:* napako je ceneje preprečiti ob viru (en klik v adminu) kot loviti mesec dni kasneje kot izjemo v paketnem pregledu.
+
+**T1 (potrjeno 2026-10-09; PRD §6.3/P0-9).** Zahteva polnega odbitka je neodvisna od `nacin_obracuna` in `zahteva_referenco`. `OBDAVCENO_45` mora imeti `True`; nepravilna nastavitev se zavrne. `OBDAVCENO_STANDARD=False` ohrani obdavčitev parkirišč, garaž in trajno instalirane opreme tudi za prejemnike brez polnega odbitka. Iz drugih režimov se davčnih pogojev ne sklepa.
+
+**Varna migracija.** `catalogs.0002` doda nullable polje brez backfilla; `0003` preveri šifro, način `OBDAVCENO`, stopnjo `22.00`, skupino `OBD_22` in zahtevo reference (`True` za 45, `False` za STANDARD). Samo ti preverjeni vrstici samodejno razvrsti. Če obstajajo nerazrešene vrstice, tudi neaktivne, migracija pred spremembo katerekoli razvrstitve ustavi izvajanje ter navede `id:šifra`. Izrecna uporabnikova preslikava po stopnji 0002 omogoči nadaljevanje; kopiranje privzetega `False` ni dovoljeno. Spremenjene/preimenovane vrstice in preostali režimi zahtevajo odločitev. Končna odstranitev nullable stanja ni del T1.
 
 **ServiceCatalogItem**
 
@@ -225,6 +230,8 @@ Storitev pri `ST` vedno vzame leto iz `datum_izdaje.year`; DB pogoj `leto > 0` j
 
 Pravilo (`clean()`): kadar `lease.ima_klavzulo_indeksacije=True`, `indeks_ob_osnovi` in `datum_osnove_indeksacije` ne smeta biti prazna — prepreči se ob shranjevanju (dopolnilo 14).
 
+**Upravičenost prejemnika T1.** `LeaseItem.clean()` pokliče skupno domensko pravilo. Pri `zahteva_polni_odbitek=True` morajo hkrati veljati `Tenant.tip=PRAVNA_OSEBA`, `identificiran_za_ddv=True` in `ddv_zavezanec_s_polnim_odbitkom=True`. Napaka navede najemnika, postavko in režim. Isti validator se uporabi ob spremembi najemnika pogodbe za njene nearhivirane postavke, pri izračunu in v predhodni kontroli. Sprememba dejanskega statusa najemnika se ne prepove; nezdružljiva prihodnja uporaba se blokira.
+
 **IndexationEvent**
 
 *Zakaj na `LeaseItem`, ne na `Lease`.* Pogodba ima lahko več postavk z različnimi DDV režimi (pisarna + parkirno mesto); indeksacija na nivoju cele pogodbe ne bi bila jasna, ko imata postavki različno osnovo.
@@ -283,6 +290,7 @@ Pravilo (`clean()`): kadar `lease.ima_klavzulo_indeksacije=True`, `indeks_ob_osn
 | `obdobje_od` / `obdobje_do` | DateField ×2 | required |
 | `rok_placila` | DateField | izračunan ob potrditvi |
 | `prejemnik_naziv` / `_naslov` / `_davcna_stevilka` / `_maticna_stevilka` | CharField ×4 | **posnetek** |
+| `prejemnik_polni_odbitek` | BooleanField, `null=True`, `editable=False` | **posnetek** statusa prejemnika; stari neznani podatki se ne dopolnijo iz živega najemnika |
 | `izdajatelj_naziv` / `_naslov` / `_davcna_stevilka` / `_maticna_stevilka` / `_trr` | CharField ×5 | **posnetek** |
 | `izdajatelj_podpisnik_ime` / `_funkcija` / `_slika_pot` | CharField ×3 | **posnetek** veljavne verzije `Signatory` |
 | `oznaka_pogodbe` | CharField | `null=True` pri `ST` |
@@ -320,6 +328,8 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `ddv_znesek` | DecimalField(10,2) | |
 | `skupaj` | DecimalField(10,2) | |
 | `ddv_nacin_obracuna` | CharField | **posnetek** |
+| `ddv_rezim_sifra` | CharField, `editable=False` | **posnetek** šifre; zgodovinsko neznana vrednost ostane prazna |
+| `ddv_zahteva_polni_odbitek` | BooleanField, `null=True`, `editable=False` | **posnetek** zahteve režima; zgodovinsko neznana vrednost ostane `NULL` |
 | `ddv_klavzula` | TextField | **posnetek** |
 | `ddv_rekap_skupina` | CharField | **posnetek** |
 | `je_sorazmerno` | BooleanField | default `False`; `True` pri sorazmernem obračunu (§2.2) |
@@ -327,6 +337,10 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `izvirno_izracunana_vrednost` | DecimalField(10,2) | `null=True` |
 
 `lease_item` ne nadomešča posnetnih polj: zgodovinske vrednosti vrstice se vedno berejo iz `opis`, `osnova`, `ddv_*` in drugih posnetkov na `InvoiceLine`. Vsaka vrstica, ki izvira iz `LeaseItem`, mora referenco nastaviti; to vključuje NP in poračun indeksacije. Ročna ST vrstica brez izvora v `LeaseItem` sme imeti `lease_item=NULL`.
+
+**Dokazi pred izdajo T1.** Izračun različice 4 hrani `tenant.full_deduction`, vrstica pa `vat_regime_code` in `requires_full_deduction`. Vsi so del prstnega odtisa. Zamrznitev izbranega kandidata in njegova materializacija preverita izrecne boolean vrednosti ter upravičenost pred dodelitvijo številke; manjkajoči ali napačno tipizirani dokazi se zavrnejo. Neposredna pot potrditve NP preveri tako trenutni izvor kot shranjene dokaze osnutka. Novi dokazi se kopirajo v račun in vrstice; domenske storitve jih ne dovolijo ročno spreminjati. Storno kopira dokaze izvirnika, vključno z zgodovinskim neznanim stanjem.
+
+**Stari paketi.** Različica 3 brez dokazov ne dovoljuje nove izdaje ali porabe številke. Dovoljena je samo natančno preverjena ponovitev že oštevilčenega računa brez novih zapisov ali sprememb zgodovine. Posnetki se ne dopolnijo s trenutnimi matičnimi podatki. Postopek obnove starega neizdanega paketa v koraku 5 zahteva ločeno potrditev uporabnika; T1 ga ne uvaja. Sprememba zahteve polnega odbitka spremeni prstni odtis DDV-nastavitev različice 2 in s tem zastarelost uporabnikovih potrditev.
 
 ### 1.5 `core`
 

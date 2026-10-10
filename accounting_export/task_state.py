@@ -13,7 +13,7 @@ from invoicing.models import MonthlyBatch, MonthlyCycle
 
 from .services import issued_invoice_queryset
 
-_SUPPORTED_MONTHLY_SNAPSHOT_VERSIONS = frozenset({3})
+_SUPPORTED_MONTHLY_SNAPSHOT_VERSIONS = frozenset({3, 4})
 
 class TaskState(models.TextChoices):
     ODPRTO = "ODPRTO", "Odprto"

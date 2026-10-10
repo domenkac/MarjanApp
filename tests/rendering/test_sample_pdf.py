@@ -34,6 +34,7 @@ def test_sample_pdf_uses_production_template_without_db_side_effects(
     settings.RENDERING_ROOT = tmp_path / "rendered"
     lease = izdani_racun.lease
     ni_predmet = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="NI_TEST",
         naziv="Ni predmet",
         nacin_obracuna=VatRegime.NacinObracuna.NI_PREDMET,

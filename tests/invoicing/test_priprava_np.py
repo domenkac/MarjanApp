@@ -96,6 +96,7 @@ def dodaj_postavko(
         "NI_PREDMET": "O",
     }
     rezim = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra=f"R{VatRegime.objects.count() + 1}",
         naziv=nacin,
         nacin_obracuna=nacin,

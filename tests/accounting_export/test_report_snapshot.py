@@ -183,6 +183,7 @@ def _frozen_non_issue(company, *, user_reason=None, system_reason=None, period=d
             "country": "SI",
             "vat_registered": True,
             "tax_number": "87654321",
+            "full_deduction": False,
             "vat_id": "SI87654321",
             "registration_number": "7654321000",
         },
@@ -197,6 +198,8 @@ def _frozen_non_issue(company, *, user_reason=None, system_reason=None, period=d
             "vat_clause": "",
             "vat_summary_group": "STANDARD",
             "proportional": False,
+            "vat_regime_code": "OBDAVCENO_STANDARD",
+            "requires_full_deduction": False,
         }],
         "totals": (
             {"net": "0.00", "vat": "0.00", "total": "0.00"}
@@ -228,6 +231,33 @@ def _frozen_non_issue(company, *, user_reason=None, system_reason=None, period=d
         non_issue_reason=user_reason or "",
     )
     return lease, candidate, batch
+
+
+@pytest.mark.django_db
+def test_historical_schema3_report_preserves_unknown_eligibility(company):
+    invoice = _invoice(company)
+    _line(invoice)
+    _lease_obj, candidate, batch = _frozen_non_issue(company, user_reason="Stari razlog")
+    old_fingerprint = candidate.pop("candidate_fingerprint")
+    candidate["tenant"].pop("full_deduction")
+    for line in candidate["lines"]:
+        line.pop("vat_regime_code")
+        line.pop("requires_full_deduction")
+    snapshot = batch.calculation_snapshot
+    snapshot["schema_version"] = 3
+    candidate["candidate_fingerprint"] = _candidate_fingerprint(
+        candidate, company=snapshot["company"], period_start=snapshot["period_start"],
+        period_end=snapshot["period_end"], issue_date=snapshot["issue_date"], schema_version=3,
+    )
+    batch.calculation_schema_version = 3
+    batch.save(update_fields=["calculation_snapshot", "calculation_schema_version"])
+    MonthlyCandidateReview.objects.filter(batch=batch, candidate_fingerprint=old_fingerprint).update(
+        candidate_fingerprint=candidate["candidate_fingerprint"]
+    )
+    report = create_accountant_report(company=company, period=date(2026, 9, 1))
+    assert report.snapshot["unissued_rows"][0]["reason"] == "Stari razlog"
+    invoice.refresh_from_db()
+    assert invoice.prejemnik_polni_odbitek is None
 
 
 @pytest.mark.django_db
@@ -625,6 +655,7 @@ def test_report_snapshot_stays_historical_and_instance_operations_are_append_onl
 def test_live_tenant_lease_item_and_vat_changes_do_not_change_report(company):
     lease = _lease(company)
     regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="DDV22", naziv="DDV 22", nacin_obracuna="OBDAVCENO",
         stopnja=Decimal("22.00"), rekapitulacijska_skupina="STANDARD",
         velja_od=date(2026, 1, 1),

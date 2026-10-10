@@ -162,13 +162,13 @@ def _completed_monthly_batch(company, period):
         batch.cycle.status != MonthlyCycle.Status.ZAKLJUCEN
         or batch.cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
         or batch.calculation_status != MonthlyBatch.CalculationStatus.CALCULATED
-        or batch.calculation_schema_version != CALCULATION_SNAPSHOT_VERSION
+        or batch.calculation_schema_version not in {3, CALCULATION_SNAPSHOT_VERSION}
     ):
         raise ValidationError(
             "Accountant report requires completed monthly evidence."
         )
     preveri_integriteto_zamrznjenega_mesecnega_posnetka(
-        batch.calculation_snapshot, batch
+        batch.calculation_snapshot, batch, allow_legacy_snapshot=True
     )
     return batch
 
@@ -197,7 +197,7 @@ def _unissued_rows(batch):
             )
             raise ValidationError(message) from exc
         prepared = preveri_integriteto_zamrznjenega_kandidata(
-            snapshot, candidate, review
+            snapshot, candidate, review, allow_legacy_snapshot=True
         )
         if review.selected:
             continue

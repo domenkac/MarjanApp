@@ -18,6 +18,7 @@ class VatRegime(models.Model):
     klavzula = models.TextField(blank=True)
     rekapitulacijska_skupina = models.CharField()
     zahteva_referenco = models.BooleanField(default=False)
+    zahteva_polni_odbitek = models.BooleanField(null=True)
     velja_od = models.DateField()
     velja_do = models.DateField(null=True, blank=True)
     eslog_koda = models.CharField(blank=True)
@@ -25,6 +26,12 @@ class VatRegime(models.Model):
 
     def clean(self):
         super().clean()
+        from contracts.vat_eligibility import preveri_ddv_omejitev
+
+        try:
+            preveri_ddv_omejitev(self.sifra, self.zahteva_polni_odbitek)
+        except ValidationError as exc:
+            raise ValidationError({"zahteva_polni_odbitek": exc.messages}) from exc
         if (
             self.nacin_obracuna
             in {

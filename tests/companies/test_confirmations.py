@@ -101,6 +101,7 @@ def confirmation_data(db, settings, tmp_path):
         rok_placila_dni=15,
     )
     used_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R1",
         naziv="DDV 22",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
@@ -110,6 +111,7 @@ def confirmation_data(db, settings, tmp_path):
         velja_od=date(2026, 1, 1),
     )
     unused_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False,
         sifra="R2",
         naziv="DDV 9,5",
         nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,

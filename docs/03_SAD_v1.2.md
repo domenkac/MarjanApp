@@ -157,6 +157,12 @@ AuditLogEntry
 
 **Načelo posnetka (PRD §6.1) je arhitekturno vozlišče celotnega modela.** `InvoiceLine` ne referencira `LeaseItem` s tujim ključem, ki bi se "spremenil, če se spremeni pogodba" — kopira vrednosti ob nastanku. Enako `Invoice` ne referencira žive `VatRegime` vrstice za stopnjo in klavzulo, ampak ju kopira. To je edino mesto v modelu, kjer se namerno **ne** uporabi normalizacija, in razlog je izrecno naveden v PRD (davčna zgodovinskost).
 
+**T1 — status prejemnika (potrjena tehnična odločitev, 2026-10-09).** `VatRegime.zahteva_polni_odbitek` je izrecno polje, ne izpeljava iz načina obračuna ali reference listine. Domensko pravilo v `contracts/vat_eligibility.py` preveri pravno osebo, identifikacijo za DDV in polno pravico do odbitka. Modeli in storitve ga ponovno uporabijo pri dodelitvi, spremembi najemnika pogodbe, izračunu, predhodni kontroli in izdaji pred številčenjem.
+
+Migracija je dvostopenjska: nullable polje ohrani neznano staro razvrstitev; naslednja migracija razvrsti samo preverjeni kanonični vrstici `OBDAVCENO_45=True` in `OBDAVCENO_STANDARD=False`. Neznane, preimenovane ali spremenjene vrstice ustavijo nadgradnjo z identifikatorji in šiframi. Nadaljevanje zahteva uporabnikovo izrecno preslikavo; splošni backfill `False` ni dovoljen. Nov vnos zahteva izbiro Da/Ne. `NULL` ostane tehnično dovoljen za staro neznano stanje, vendar blokira uporabo režima.
+
+Posnetek izračuna različice 4 hrani `tenant.full_deduction` ter na vsaki vrstici `vat_regime_code` in `requires_full_deduction`; podatki so vključeni v prstni odtis. `Invoice.prejemnik_polni_odbitek`, `InvoiceLine.ddv_rezim_sifra` in `InvoiceLine.ddv_zahteva_polni_odbitek` hranijo kopije. Izdaja zamrznjenega paketa preveri njegove dokaze, ne današnjih matičnih podatkov. Stari izdani računi ostanejo nespremenjeni, njihovi neznani dokazi ostanejo `NULL` oziroma prazna šifra. Stari zamrznjeni posnetek različice 3 je dovoljen samo za ponovitev, ki se natančno ujema z že oštevilčenim računom; ne dovoljuje nove izdaje.
+
 ---
 
 ## 5. Django admin — obseg in meje
@@ -322,7 +328,7 @@ Ta razdelek povezuje arhitekturne odločitve neposredno na P0 zahteve, da FSD ne
 | P0-3 (deterministični izračun) | `izracunaj_osnutke()` je čista funkcija: enak vhod (stanje `Lease` v bazi) → enak izhod. Ne piše v bazo, dokler ni potrjeno. |
 | P0-6 (zgodovinskost šifrantov) | `InvoiceLine` in `Invoice` hranita kopirane vrednosti, ne FK na `VatRegime`. Test: sprememba `VatRegime.stopnja` po izdaji ne sme spremeniti obstoječega `Invoice`. |
 | P0-27 (nespremenljivost izdanega računa) | Po dodelitvi številke domenske storitve preprečijo spremembo poslovnih in posnetnih polj `Invoice`, vseh `InvoiceLine` ter izbris originala. Dovoljeni so le prehodi statusa, render poti/kontrolni odtis in evidenca pošiljanja prek namenskih storitev; popravek je storno ali dobropis. |
-| P0-9 (validacija DDV po statusu prejemnika) | Skupni validator v `core`, klican iz `Lease.clean()` in iz storitve za pripravo kandidatov — ista pravila pri vnosu in izdaji. |
+| P0-9 (validacija DDV po statusu prejemnika) | Skupni validator v `contracts/vat_eligibility.py`, klican iz `LeaseItem.clean()`, `Lease.clean()` ob spremembi najemnika, izračuna, predhodne kontrole in obeh poti NP izdaje; zamrznjena izdaja preveri posnetne dokaze pred številčenjem. |
 | P0-11 (sorazmernost postavke) | Vsaka `LeaseItem` ima lastna datuma začetka in prenehanja; izračun se opravi neodvisno za vsako vrstico. |
 | P0-12/13 (ločeni zaporedji, resetiranje) | `NumberSequence(company, tip, leto, zadnja_stevilka)`: NP interno uporablja `leto=0` in se ne ponastavlja, ST uporablja konkretno koledarsko leto; baza uveljavi enoličnost in veljavne kombinacije tipa ter leta. |
 | P0-14 (atomarno številčenje) | Django 5.2 uporablja SQLite `transaction_mode='IMMEDIATE'`; povečanje zaporedja in potrditev računa sta v isti kratki `transaction.atomic()` brez `select_for_update()`. DB `UniqueConstraint(company, stevilka)` prepreči podvojeno številko istega podjetja; test uporablja ločene povezave oziroma dejanske konkurenčne transakcije. |

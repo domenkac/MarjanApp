@@ -146,6 +146,7 @@ class Invoice(models.Model):
     prejemnik_naslov = models.CharField(blank=True)
     prejemnik_drzava_koda = models.CharField(max_length=2, null=True, editable=False)
     prejemnik_identificiran_za_ddv = models.BooleanField(null=True, editable=False)
+    prejemnik_polni_odbitek = models.BooleanField(null=True, blank=True, editable=False)
     prejemnik_davcna_stevilka = models.CharField(blank=True)
     prejemnik_ddv_identifikacijska_stevilka = models.CharField(
         max_length=70, blank=True, editable=False
@@ -236,6 +237,10 @@ class InvoiceLine(models.Model):
     ddv_znesek = models.DecimalField(max_digits=10, decimal_places=2)
     skupaj = models.DecimalField(max_digits=10, decimal_places=2)
     ddv_nacin_obracuna = models.CharField()
+    ddv_rezim_sifra = models.CharField(blank=True, default="", editable=False)
+    ddv_zahteva_polni_odbitek = models.BooleanField(
+        null=True, blank=True, editable=False
+    )
     ddv_klavzula = models.TextField(blank=True)
     ddv_rekap_skupina = models.CharField()
     ddv_eslog_koda = models.CharField(blank=True, default="")

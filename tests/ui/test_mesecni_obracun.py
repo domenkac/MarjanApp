@@ -142,9 +142,15 @@ def _review_cycle(*candidates):
             "contract_reference": f"P-{index}",
             "property_label": f"Objekt {index}",
             "unit_label": f"E-{index}",
-            "tenant": {"name": tenant.naziv},
+            "tenant": {
+                "name": tenant.naziv, "type": tenant.tip,
+                "vat_registered": tenant.identificiran_za_ddv,
+                "full_deduction": tenant.ddv_zavezanec_s_polnim_odbitkom,
+            },
             "lines": [
                 {
+                    "vat_regime_code": "TEST_STANDARD",
+                    "requires_full_deduction": False,
                     "net": options.get("current", "125.00"),
                     "vat": "0.00",
                     "total": options.get("current", "125.00"),
