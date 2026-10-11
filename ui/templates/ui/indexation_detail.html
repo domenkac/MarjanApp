@@ -1,0 +1,23 @@
+{% extends "ui/base.html" %}
+{% block title %}Pregled indeksacije · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>{{ batch.company.naziv }} — indeksacija za {{ batch.index_year }}</h1></header>
+<p>Objavljeni kumulativni indeks: {{ batch.index_value }}. Nova najemnina učinkuje od {{ batch.effective_date|date:"d. m. Y" }}. {{ batch.get_state_display }}.</p>
+<a href="{% url 'ui:indexation_list' %}">Vsi pregledi / nov predogled</a>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% if stale %}<p role="alert">Predogled je zastarel. Ustvarite nov predogled in ponovno preglejte odločitve. Shranjeni pregled ostane ohranjen.</p>{% endif %}
+<form method="post">{% csrf_token %}<input type="hidden" name="revision" value="{{ batch.revision }}">
+{% for group in groups %}
+<section class="settings-table-wrap"><h2>{{ group.lease.oznaka_pogodbe }}</h2>
+{% if batch.state == 'PENDING' %}<p><label><input type="checkbox" name="exclude_{{ group.lease.pk }}"{% if group.reason %} checked{% endif %}> Izključi celotno pogodbo</label> <label>Obvezen razlog <input name="reason_{{ group.lease.pk }}" value="{{ group.reason }}"></label></p>{% endif %}
+<table class="settings-table"><thead><tr><th>Izbira</th><th>Najemnik / nepremičnina / enota</th><th>Postavka</th><th>Stara najemnina</th><th>Nova najemnina</th><th>%</th><th>Učinkovanje</th><th>Pogoj / odločitev</th></tr></thead><tbody>
+{% for row in group.decisions %}<tr><td>{% if batch.state == 'PENDING' and row.proposal.eligible %}<input aria-label="Izberi {{ row.proposal.item }}" type="checkbox" name="selected" value="{{ row.pk }}"{% if row.selected %} checked{% endif %}>{% endif %}</td><td>{{ row.proposal.tenant }} / {{ row.proposal.property }} / {{ row.proposal.unit }}</td><td>{{ row.proposal.item }}</td><td>{{ row.proposal.old_rent|default_if_none:"—" }}</td><td>{{ row.proposal.new_rent|default_if_none:"—" }}</td><td>{{ row.proposal.percentage|default_if_none:"—" }}</td><td>{{ row.proposal.effective_date }}</td><td>{% if row.proposal.blocked %}<strong>Blokirano:</strong>{% elif row.proposal.eligible %}DA:{% else %}NE:{% endif %} {{ row.proposal.explanation }}<br>{{ row.get_outcome_display }} {{ row.reason }}{% if row.decided_at %}<br>{{ row.decided_at }}{% endif %}</td></tr>{% endfor %}
+</tbody></table></section>
+{% empty %}<p>Ni relevantnih aktivnih pogodb.</p>{% endfor %}
+{% if batch.state == 'PENDING' and not stale %}<button class="button-primary" name="action" value="save">Shrani izbiro in izključitve</button>{% endif %}
+</form>
+{% if batch.state == 'PENDING' and not stale %}
+<p>Najprej shranite izbiro. Potrditev uporabi shranjene odločitve. Celoten paket se potrdi atomarno.</p>
+<form method="post">{% csrf_token %}<input type="hidden" name="revision" value="{{ batch.revision }}"><button class="button-primary" name="action" value="confirm">Potrdi shranjeni paket</button></form>
+{% endif %}
+{% endblock %}

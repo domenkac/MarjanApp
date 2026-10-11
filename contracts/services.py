@@ -366,6 +366,7 @@ def izracunaj_indeksacijo(
     stara_vrednost = najemnina_na_datum(lease_item, datum_ucinkovanja - timedelta(days=1))
     razmerje = nov_indeks / zadnji_indeks
     odstotek = (razmerje - 1) * 100
+    nova_vrednost = zaokrozi(stara_vrednost * razmerje)
 
     if (
         lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
@@ -374,15 +375,16 @@ def izracunaj_indeksacijo(
         return IndeksacijaPredlog(
             False,
             f"Sprememba {odstotek:.2f}% pod pragom {lease.prag_spremembe_odstotek}%",
+            stara_vrednost, nova_vrednost, odstotek,
         )
 
-    nova_vrednost = zaokrozi(stara_vrednost * razmerje)
     if (
         lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.SAMO_NAVZGOR
         and nova_vrednost < stara_vrednost
     ):
         return IndeksacijaPredlog(
-            False, "Indeks padel — klavzula dovoljuje samo zvišanje"
+            False, "Indeks padel — klavzula dovoljuje samo zvišanje",
+            stara_vrednost, nova_vrednost, odstotek,
         )
     if nova_vrednost <= 0:
         raise ValidationError("Indeksirana najemnina mora ostati pozitivna.")
@@ -464,8 +466,10 @@ def potrdi_indeksacijo(
     event.full_clean()
     event.save()
     audit = _audit(
-        event, "potrditev", "", str(event.nova_vrednost),
-        f"Potrjena indeksacija; učinkuje {datum_ucinkovanja}; potrjeno {danes}",
+        event, "", "", "",
+        f"Potrjena indeksacija; indeks {nov_indeks}; "
+        f"najemnina {event.stara_vrednost} → {event.nova_vrednost}; "
+        f"učinkuje {datum_ucinkovanja}; potrjeno {danes}",
     )
     audit.full_clean()
     audit.save()

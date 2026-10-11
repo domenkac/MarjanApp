@@ -1,0 +1,12 @@
+{% extends "ui/base.html" %}
+{% block title %}Januarska indeksacija · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>Januarska indeksacija</h1></header>
+<p>Ločen postopek za preteklo leto. Vnesite dejansko objavljeno kumulativno vrednost, ne letne stopnje inflacije. Brez zunanjega prenosa.</p>
+<p>Indeks učinkuje od 1. februarja naslednjega leta. Indeks za leto 2025 učinkuje od 1. februarja 2026. Vsak paket potrjuje odločitve samo za izbrano podjetje.</p>
+<form method="post">{% csrf_token %}{{ form.as_p }}<button class="button-primary" type="submit">Ustvari predogled</button></form>
+<h2>Shranjeni pregledi</h2>
+<section class="settings-table-wrap"><table class="settings-table"><thead><tr><th>Podjetje</th><th>Leto indeksa</th><th>Indeks</th><th>Učinkovanje</th><th>Stanje</th><th></th></tr></thead><tbody>
+{% for batch in batches %}<tr><td>{{ batch.company.naziv }}</td><td>{{ batch.index_year }}</td><td>{{ batch.index_value }}</td><td>{{ batch.effective_date|date:"d. m. Y" }}</td><td>{{ batch.get_state_display }}</td><td><a href="{% url 'ui:indexation_detail' batch.company_id batch.pk %}">Nadaljuj / odpri</a></td></tr>{% empty %}<tr><td colspan="6">Ni shranjenih pregledov.</td></tr>{% endfor %}
+</tbody></table></section>
+{% endblock %}

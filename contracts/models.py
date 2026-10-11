@@ -390,6 +390,44 @@ class IndexationEvent(models.Model):
             )
 
 
+class IndexationBatch(models.Model):
+    class State(models.TextChoices):
+        PENDING = "PENDING", "V pregledu"
+        CONFIRMED = "CONFIRMED", "Potrjeno"
+
+    company = models.ForeignKey("companies.Company", on_delete=models.PROTECT)
+    index_year = models.PositiveSmallIntegerField()
+    index_value = models.DecimalField(
+        max_digits=6, decimal_places=3, validators=[MinValueValidator(Decimal("0.001"))],
+    )
+    effective_date = models.DateField()
+    source_fingerprint = models.CharField(max_length=64)
+    revision = models.PositiveIntegerField(default=1)
+    state = models.CharField(max_length=9, choices=State, default=State.PENDING)
+    created_at = models.DateTimeField(auto_now_add=True)
+    reviewed_at = models.DateTimeField(null=True, blank=True)
+    confirmed_at = models.DateTimeField(null=True, blank=True)
+
+
+class IndexationDecision(models.Model):
+    class Outcome(models.TextChoices):
+        PENDING = "PENDING", "V pregledu"
+        APPROVED = "APPROVED", "Potrjeno"
+        EXCLUDED = "EXCLUDED", "Pogodba izključena"
+        SKIPPED = "SKIPPED", "Preskočeno"
+
+    batch = models.ForeignKey(IndexationBatch, on_delete=models.PROTECT, related_name="decisions")
+    lease = models.ForeignKey(Lease, on_delete=models.PROTECT)
+    lease_item = models.ForeignKey(LeaseItem, on_delete=models.PROTECT, null=True, blank=True)
+    proposal = models.JSONField()
+    selected = models.BooleanField(default=False)
+    exclusion_reason = models.TextField(blank=True)
+    outcome = models.CharField(max_length=8, choices=Outcome, default=Outcome.PENDING)
+    reason = models.TextField(blank=True)
+    event = models.OneToOneField(IndexationEvent, on_delete=models.PROTECT, null=True, blank=True)
+    decided_at = models.DateTimeField(null=True, blank=True)
+
+
 class PoracunIndeksacije(models.Model):
     class Status(models.TextChoices):
         PREDLAGAN = "PREDLAGAN", "Predlagan"

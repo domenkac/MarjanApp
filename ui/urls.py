@@ -1,5 +1,6 @@
 from django.urls import path
 
+from .indexation import indexation_detail, indexation_list
 from .views import (
     accountant_arbitrary_csv,
     accountant_arbitrary_export,
@@ -64,6 +65,8 @@ from .views import (
 app_name = "ui"
 
 urlpatterns = [
+    path("indeksacija/", indexation_list, name="indexation_list"),
+    path("indeksacija/<int:company_id>/<int:batch_id>/", indexation_detail, name="indexation_detail"),
     path("", dashboard, name="dashboard"),
     path("racunovodstvo/izpis/", accountant_arbitrary_export, name="accountant_arbitrary_export"),
     path("racunovodstvo/izpis/csv/", accountant_arbitrary_csv, name="accountant_arbitrary_csv"),

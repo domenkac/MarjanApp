@@ -1778,6 +1778,28 @@ def _izracunaj_vrstice_np(
     return tuple(vrstice)
 
 
+def _first_indexation_exceptions(lines, period_start, period_end):
+    exceptions = []
+    for event in IndexationEvent.objects.filter(
+        lease_item_id__in=[line.lease_item_id for line in lines],
+        izkljucen=False, datum_uskladitve__lte=period_end,
+    ).order_by("pk"):
+        if not InvoiceLine.objects.filter(
+            lease_item_id=event.lease_item_id,
+            invoice__document_type=Invoice.DocumentType.NP,
+            invoice__stevilka__isnull=False,
+            invoice__obdobje_do__gte=event.datum_uskladitve,
+            invoice__obdobje_od__lt=period_start,
+        ).exists():
+            exceptions.append(DeltaRazlaga(
+                event.lease_item_id, "PRVA_INDEKSACIJA",
+                f"Prva uporaba indeksacije #{event.pk} od {event.datum_uskladitve}: "
+                f"{event.stara_vrednost} → {event.nova_vrednost}; "
+                f"objavljeni indeks {event.indeks_vrednost}. Potrebna individualna potrditev.",
+            ))
+    return exceptions
+
+
 def izracunaj_kandidata(
     lease: Lease, obdobje_od: date, obdobje_do: date, datum_izdaje: date
 ) -> RacunKandidat:
@@ -1812,6 +1834,7 @@ def izracunaj_kandidata(
         for v in vrstice
         if v.je_sorazmerno
     ]
+    izjeme.extend(_first_indexation_exceptions(vrstice, obdobje_od, obdobje_do))
     osnutek = Invoice(
         company=company,
         lease=lease,
@@ -2111,6 +2134,7 @@ def _monthly_candidate(lease, period_start, period_end, issue_date):
             if line.je_sorazmerno
         ]
         exceptions.extend(item for item in delta.razlage if item.koda != "BREZ_RAZLIKE")
+        exceptions.extend(_first_indexation_exceptions(lines, period_start, period_end))
         candidate = RacunKandidat(lines, total, True, tuple(exceptions))
     return candidate, delta
 

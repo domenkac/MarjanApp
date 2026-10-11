@@ -369,7 +369,7 @@ def test_razveljavitev_auditira_dogodek_brez_izmisljene_spremembe_najemnine(post
     audits = AuditLogEntry.objects.filter(
         content_type=ContentType.objects.get_for_model(IndexationEvent),
         object_id=event.pk,
-    ).exclude(polje="potrditev")
+    ).filter(polje__in=["izkljucen", "razlog_izkljucitve"])
     razlog = f"Razveljavljena indeksacija #{event.pk}"
     assert {audit.polje: (audit.stara_vrednost, audit.nova_vrednost) for audit in audits} == {
         "izkljucen": ("False", "True"),
@@ -393,7 +393,7 @@ def test_razveljavitev_legacy_predpomnjene_najemnine_zapise_dejanski_spremembi(p
     assert (audit.stara_vrednost, audit.nova_vrednost) == ("110.06", "100.05")
     event_audits = AuditLogEntry.objects.filter(
         content_type=ContentType.objects.get_for_model(IndexationEvent), object_id=event.pk,
-    ).exclude(polje="potrditev")
+    ).filter(polje__in=["izkljucen", "razlog_izkljucitve"])
     assert event_audits.count() == 2
     assert all(row.razlog == event.razlog_izkljucitve for row in [audit, *event_audits])
 
