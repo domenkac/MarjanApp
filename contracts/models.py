@@ -286,10 +286,24 @@ class LeaseItem(models.Model):
         null=True,
         blank=True,
     )
+    referencna_najemnina = models.DecimalField(
+        max_digits=10, decimal_places=2, null=True, blank=True,
+        validators=[MinValueValidator(Decimal("0.01"))],
+    )
+    datum_referencne_najemnine = models.DateField(null=True, blank=True)
+
+    def save(self, *args, **kwargs):
+        from .services import pripravi_referencno_najemnino
+
+        pripravi_referencno_najemnino(self)
+        super().save(*args, **kwargs)
 
     def clean(self):
         super().clean()
         napake = {}
+
+        if (self.referencna_najemnina is None) != (self.datum_referencne_najemnine is None):
+            napake["referencna_najemnina"] = "Referenčni znesek in datum morata biti določena skupaj."
 
         if self.vat_regime_id and self.lease_id:
             from .vat_eligibility import preveri_postavko_ddv
@@ -358,6 +372,15 @@ class IndexationEvent(models.Model):
     nova_vrednost = models.DecimalField(max_digits=10, decimal_places=2)
     izkljucen = models.BooleanField(default=False)
     razlog_izkljucitve = models.TextField(blank=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["lease_item", "datum_uskladitve"],
+                condition=models.Q(izkljucen=False),
+                name="uniq_active_indexation_item_date",
+            ),
+        ]
 
     def clean(self):
         super().clean()

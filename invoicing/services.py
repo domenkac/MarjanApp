@@ -33,6 +33,7 @@ from contracts.services import (
     efektivna_veljavnost_pogodbe,
     efektivna_veljavnost_postavke,
     izracunaj_postavko,
+    najemnina_na_datum,
 )
 from contracts.vat_eligibility import (
     preveri_postavko_ddv,
@@ -746,6 +747,13 @@ def _company_preflight_issues(company, cycle, period_end):
             item_start, item_end = efektivna_veljavnost_postavke(item)
             if dnevi_v_obdobju(cycle.obdobje, period_end, item_start, item_end):
                 items.append(item)
+                try:
+                    najemnina_na_datum(item, max(cycle.obdobje, item_start))
+                except ValidationError as exc:
+                    issues.append(_preflight_issue(
+                        "NAJEMNINA_ZGODOVINA_NERAZJASNJENA", "; ".join(exc.messages),
+                        "LeaseItem", item.pk, "referencna_najemnina",
+                    ))
         issues.extend(_source_validation_issues(lease, items))
         issues.extend(_lease_warning_issues(lease, items, cycle.obdobje, period_end))
     seen = set()

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import date
+from datetime import date, timedelta
 from decimal import Decimal
 
 from django.contrib.contenttypes.models import ContentType
@@ -12,7 +12,7 @@ from companies.models import Company, CompanySampleConfirmation
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
 from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
-from invoicing.models import Invoice, InvoiceLine
+from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 
 from .models import (
     IndexationEvent,
@@ -133,6 +133,101 @@ def izracunaj_osnovo(
     )
 
 
+def pripravi_referencno_najemnino(postavka: LeaseItem) -> None:
+    """Capture a new item's declared initial rent; never infer legacy references."""
+    if (
+        postavka._state.adding and postavka.pk is None and postavka.lease_id
+        and postavka.referencna_najemnina is None
+        and postavka.datum_referencne_najemnine is None
+    ):
+        postavka.referencna_najemnina = postavka.znesek_neto_mesecno
+        zacetek = max(
+            postavka.lease.datum_zacetka,
+            postavka.datum_zacetka_postavke or postavka.lease.datum_zacetka,
+        )
+        # A cutover index base is a reference point, not proof of inception rent.
+        postavka.datum_referencne_najemnine = max(
+            zacetek, postavka.datum_osnove_indeksacije or zacetek,
+        )
+
+
+def _zgodovina_najemnine(
+    postavka: LeaseItem, datum: date | None = None,
+) -> list[IndexationEvent]:
+    if postavka.pk is None:
+        if postavka.lease.ima_klavzulo_indeksacije and (
+            postavka.referencna_najemnina is None
+            or postavka.datum_referencne_najemnine is None
+            or postavka.referencna_najemnina <= 0
+        ):
+            raise ValidationError("Manjka preverjena referenčna najemnina nove postavke.")
+        return []
+    vsi = IndexationEvent.objects.filter(
+        lease_item=postavka, izkljucen=False,
+    )
+    if not postavka.lease.ima_klavzulo_indeksacije and not vsi.exists():
+        return []
+    uporabni = vsi.filter(datum_uskladitve__lte=datum) if datum else vsi
+    dogodki = list(uporabni.order_by("datum_uskladitve", "pk"))
+    if postavka.referencna_najemnina is None or postavka.datum_referencne_najemnine is None:
+        raise ValidationError(
+            f"Postavka #{postavka.pk}: nerazjasnjena zgodovinska najemnina; "
+            "potrebna sta preverjen referenčni znesek in datum."
+        )
+    if postavka.referencna_najemnina <= 0:
+        raise ValidationError(f"Postavka #{postavka.pk}: referenčna najemnina mora biti pozitivna.")
+    revizije = AuditLogEntry.objects.filter(
+        content_type=ContentType.objects.get_for_model(LeaseItem),
+        object_id=postavka.pk, polje="znesek_neto_mesecno",
+    ).exclude(razlog__startswith="Razveljavljena indeksacija #")
+    if revizije.exists():
+        raise ValidationError(
+            f"Postavka #{postavka.pk}: ročni popravki najemnine nimajo datuma učinkovanja."
+        )
+    vrednost = postavka.referencna_najemnina
+    prejsnji_datum = None
+    for dogodek in dogodki:
+        if (
+            dogodek.datum_uskladitve < postavka.datum_referencne_najemnine
+            or (dogodek.datum_uskladitve.month, dogodek.datum_uskladitve.day) != (2, 1)
+            or dogodek.datum_uskladitve == prejsnji_datum
+            or dogodek.stara_vrednost != vrednost
+            or dogodek.indeks_vrednost <= 0
+            or dogodek.nova_vrednost <= 0
+        ):
+            raise ValidationError(f"Postavka #{postavka.pk}: nerazjasnjena indeksacijska veriga.")
+        vrednost = dogodek.nova_vrednost
+        prejsnji_datum = dogodek.datum_uskladitve
+    dovoljene = {
+        postavka.referencna_najemnina,
+        *vsi.values_list("nova_vrednost", flat=True),
+    }
+    if postavka.znesek_neto_mesecno not in dovoljene:
+        raise ValidationError(f"Postavka #{postavka.pk}: nepojasnjen ročni znesek najemnine.")
+    return dogodki
+
+
+def najemnina_na_datum(postavka: LeaseItem, datum: date) -> Decimal:
+    """Resolve business-date rent; issued InvoiceLine snapshots are never readjusted."""
+    dogodki = _zgodovina_najemnine(postavka, datum)
+    if (
+        not postavka.lease.ima_klavzulo_indeksacije
+        and (
+            postavka.pk is None
+            or not IndexationEvent.objects.filter(lease_item=postavka, izkljucen=False).exists()
+        )
+    ):
+        return postavka.znesek_neto_mesecno
+    if datum < postavka.datum_referencne_najemnine:
+        raise ValidationError(f"Postavka #{postavka.pk}: obdobje je pred preverjeno referenčno najemnino.")
+    vrednost = postavka.referencna_najemnina
+    for dogodek in dogodki:
+        if dogodek.datum_uskladitve > datum:
+            break
+        vrednost = dogodek.nova_vrednost
+    return vrednost
+
+
 def izracunaj_postavko(
     postavka: LeaseItem, obdobje_od: date, obdobje_do: date
 ) -> IzracunPostavke | None:
@@ -150,8 +245,19 @@ def izracunaj_postavko(
     zacetek, konec = efektivna_veljavnost_postavke(postavka)
     dnevi_najema = dnevi_v_obdobju(obdobje_od, obdobje_do, zacetek, konec)
     dnevi_v_mesecu = (obdobje_do - obdobje_od).days + 1
+    if not dnevi_najema:
+        return None
+    zacetek_obracuna = max(obdobje_od, zacetek)
+    konec_obracuna = min(obdobje_do, konec) if konec else obdobje_do
+    prehodi = [
+        event.datum_uskladitve
+        for event in _zgodovina_najemnine(postavka, konec_obracuna)
+        if zacetek_obracuna < event.datum_uskladitve <= konec_obracuna
+    ]
+    if prehodi:
+        raise ValidationError("Obdobje prečka datum indeksacije; razdelite obračunsko obdobje.")
     osnova = izracunaj_osnovo(
-        postavka.znesek_neto_mesecno, dnevi_najema, dnevi_v_mesecu
+        najemnina_na_datum(postavka, zacetek_obracuna), dnevi_najema, dnevi_v_mesecu
     )
     if osnova is None:
         return None
@@ -202,6 +308,15 @@ def rocno_popravi_postavko(
         raise ValueError("Nedovoljena poslovna polja za ročni popravek postavke.")
 
     sveza = LeaseItem.objects.get(pk=postavka.pk)
+    if (
+        "znesek_neto_mesecno" in spremembe
+        and Decimal(spremembe["znesek_neto_mesecno"]) != sveza.znesek_neto_mesecno
+        and (
+            sveza.lease.ima_klavzulo_indeksacije
+            or IndexationEvent.objects.filter(lease_item=sveza).exists()
+        )
+    ):
+        raise ValidationError("Ročni popravek indeksirane najemnine zahteva odločitev o datumu učinkovanja.")
     stare_vrednosti = {polje: getattr(sveza, polje) for polje in spremembe}
     for polje, vrednost in spremembe.items():
         polje_modela = LeaseItem._meta.get_field(polje)
@@ -232,18 +347,23 @@ class IndeksacijaPredlog:
 
 
 def izracunaj_indeksacijo(
-    lease_item: LeaseItem, nov_indeks: Decimal, danes: date
+    lease_item: LeaseItem, nov_indeks: Decimal, danes: date, *, indeks_leto: int
 ) -> IndeksacijaPredlog:
     lease = lease_item.lease
     if not lease.ima_klavzulo_indeksacije:
         return IndeksacijaPredlog(False, "Pogodba nima klavzule o indeksaciji")
 
-    zadnji = (
-        IndexationEvent.objects.filter(lease_item=lease_item, izkljucen=False)
-        .order_by("-datum_uskladitve")
-        .first()
-    )
+    datum_ucinkovanja = date(indeks_leto + 1, 2, 1)
+    if not isinstance(nov_indeks, Decimal) or not nov_indeks.is_finite() or nov_indeks <= 0:
+        raise ValidationError("Indeks mora biti pozitivna Decimal vrednost.")
+    zgodovina = _zgodovina_najemnine(lease_item, datum_ucinkovanja - timedelta(days=1))
+    zadnji = zgodovina[-1] if zgodovina else None
     zadnji_indeks = zadnji.indeks_vrednost if zadnji else lease_item.indeks_ob_osnovi
+    if zadnji_indeks is None or zadnji_indeks <= 0:
+        raise ValidationError("Manjka veljaven izhodiščni indeks.")
+    if lease_item.datum_osnove_indeksacije is None or lease_item.datum_osnove_indeksacije >= datum_ucinkovanja:
+        raise ValidationError("Datum indeksne osnove mora biti pred datumom učinkovanja.")
+    stara_vrednost = najemnina_na_datum(lease_item, datum_ucinkovanja - timedelta(days=1))
     razmerje = nov_indeks / zadnji_indeks
     odstotek = (razmerje - 1) * 100
 
@@ -256,14 +376,16 @@ def izracunaj_indeksacijo(
             f"Sprememba {odstotek:.2f}% pod pragom {lease.prag_spremembe_odstotek}%",
         )
 
-    nova_vrednost = zaokrozi(lease_item.znesek_neto_mesecno * razmerje)
+    nova_vrednost = zaokrozi(stara_vrednost * razmerje)
     if (
         lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.SAMO_NAVZGOR
-        and nova_vrednost < lease_item.znesek_neto_mesecno
+        and nova_vrednost < stara_vrednost
     ):
         return IndeksacijaPredlog(
             False, "Indeks padel — klavzula dovoljuje samo zvišanje"
         )
+    if nova_vrednost <= 0:
+        raise ValidationError("Indeksirana najemnina mora ostati pozitivna.")
 
     if lease.tip_pogoja_indeksacije == Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE:
         razlog = (
@@ -277,14 +399,14 @@ def izracunaj_indeksacijo(
     return IndeksacijaPredlog(
         pogoj_izpolnjen=True,
         razlog=razlog,
-        stara_vrednost=lease_item.znesek_neto_mesecno,
+        stara_vrednost=stara_vrednost,
         nova_vrednost=nova_vrednost,
         odstotek_spremembe=odstotek,
     )
 
 
 def zaznaj_zamujen_poracun(
-    indexation_event: IndexationEvent,
+    indexation_event: IndexationEvent, *, obdobje_zaznave: date,
 ) -> list[PoracunIndeksacije]:
     ze_pokrita = PoracunIndeksacije.objects.filter(
         indexation_event=indexation_event
@@ -294,7 +416,7 @@ def zaznaj_zamujen_poracun(
             lease_item=indexation_event.lease_item,
             invoice__document_type=Invoice.DocumentType.NP,
             invoice__obdobje_od__gte=indexation_event.datum_uskladitve,
-            invoice__obdobje_od__lt=date.today().replace(day=1),  # noqa: DTZ011
+            invoice__obdobje_od__lt=obdobje_zaznave.replace(day=1),
             invoice__status__in=[
                 Invoice.Status.IZBRAN_ZA_POSILJANJE,
                 Invoice.Status.POSLAN,
@@ -319,27 +441,36 @@ def zaznaj_zamujen_poracun(
 
 @transaction.atomic
 def potrdi_indeksacijo(
-    lease_item: LeaseItem, nov_indeks: Decimal, danes: date
+    lease_item: LeaseItem, nov_indeks: Decimal, danes: date, *, indeks_leto: int
 ) -> IndexationEvent:
     postavka = LeaseItem.objects.get(pk=lease_item.pk)
-    predlog = izracunaj_indeksacijo(postavka, nov_indeks, danes)
+    postavka.full_clean()
+    datum_ucinkovanja = date(indeks_leto + 1, 2, 1)
+    if IndexationEvent.objects.filter(
+        lease_item=postavka, izkljucen=False, datum_uskladitve__gte=datum_ucinkovanja,
+    ).exists():
+        raise ValidationError("Podvojena indeksacija ali kasnejši odvisni dogodek.")
+    predlog = izracunaj_indeksacijo(postavka, nov_indeks, danes, indeks_leto=indeks_leto)
     if not predlog.pogoj_izpolnjen:
         raise ValueError(predlog.razlog)
 
     event = IndexationEvent(
         lease_item=postavka,
-        datum_uskladitve=date(danes.year, 2, 1),
+        datum_uskladitve=datum_ucinkovanja,
         indeks_vrednost=nov_indeks,
         stara_vrednost=predlog.stara_vrednost,
         nova_vrednost=predlog.nova_vrednost,
     )
     event.full_clean()
     event.save()
-    postavka.znesek_neto_mesecno = predlog.nova_vrednost
-    postavka.full_clean()
-    postavka.save(update_fields=["znesek_neto_mesecno"])
+    audit = _audit(
+        event, "potrditev", "", str(event.nova_vrednost),
+        f"Potrjena indeksacija; učinkuje {datum_ucinkovanja}; potrjeno {danes}",
+    )
+    audit.full_clean()
+    audit.save()
 
-    for poracun in zaznaj_zamujen_poracun(event):
+    for poracun in zaznaj_zamujen_poracun(event, obdobje_zaznave=danes):
         poracun.full_clean()
         poracun.save()
     return event
@@ -351,37 +482,62 @@ def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent
     if dogodek.izkljucen:
         raise ValueError("Indeksacija je že razveljavljena.")
 
+    _zgodovina_najemnine(dogodek.lease_item)
+    if IndexationEvent.objects.filter(
+        lease_item_id=dogodek.lease_item_id, izkljucen=False,
+        datum_uskladitve__gt=dogodek.datum_uskladitve,
+    ).exists():
+        raise ValidationError("Indeksacija ima kasnejši odvisni dogodek.")
+
     if InvoiceLine.objects.filter(
         lease_item_id=dogodek.lease_item_id,
-        invoice__datum_izdaje__gte=dogodek.datum_uskladitve,
+        invoice__obdobje_do__gte=dogodek.datum_uskladitve,
         invoice__stevilka__isnull=False,
     ).exists():
         raise ValueError("Po uskladitvi je bil izdan račun za to postavko.")
 
+    for batch in MonthlyBatch.objects.filter(
+        cycle__status=MonthlyCycle.Status.V_TEKU,
+        cycle__trenutni_korak__gte=MonthlyCycle.Korak.POTRDITEV_PAKETA,
+        cycle__obdobje__gte=dogodek.datum_uskladitve,
+    ):
+        if any(
+            line.get("lease_item_id") == dogodek.lease_item_id
+            for candidate in batch.calculation_snapshot.get("candidates", [])
+            for line in candidate.get("lines", [])
+        ):
+            raise ValidationError("Postavka je v aktivnem zamrznjenem paketu.")
+
     postavka = LeaseItem.objects.get(pk=dogodek.lease_item_id)
     prejsnja_vrednost = postavka.znesek_neto_mesecno
-    postavka.znesek_neto_mesecno = dogodek.stara_vrednost
+    if postavka.znesek_neto_mesecno == dogodek.nova_vrednost:
+        # Compatibility with explicitly reconciled pre-T2 cached amounts.
+        postavka.znesek_neto_mesecno = dogodek.stara_vrednost
     postavka.full_clean()
 
     razlog = f"Razveljavljena indeksacija #{dogodek.pk}"
+    stare_vrednosti_dogodka = {
+        "izkljucen": dogodek.izkljucen,
+        "razlog_izkljucitve": dogodek.razlog_izkljucitve,
+    }
     dogodek.izkljucen = True
     dogodek.razlog_izkljucitve = razlog
     dogodek.full_clean()
 
-    audit = AuditLogEntry(
-        content_type=ContentType.objects.get_for_model(LeaseItem),
-        object_id=postavka.pk,
-        dejanje=AuditLogEntry.Dejanje.SPREMEMBA,
-        polje="znesek_neto_mesecno",
-        stara_vrednost=str(prejsnja_vrednost),
-        nova_vrednost=str(dogodek.stara_vrednost),
-        razlog=razlog,
-    )
-    audit.full_clean()
-
-    postavka.save(update_fields=["znesek_neto_mesecno"])
+    auditi = [
+        _audit(dogodek, polje, stara, getattr(dogodek, polje), razlog)
+        for polje, stara in stare_vrednosti_dogodka.items()
+        if stara != getattr(dogodek, polje)
+    ]
+    if prejsnja_vrednost != postavka.znesek_neto_mesecno:
+        auditi.append(_audit(
+            postavka, "znesek_neto_mesecno", prejsnja_vrednost,
+            postavka.znesek_neto_mesecno, razlog,
+        ))
+        postavka.save(update_fields=["znesek_neto_mesecno"])
     dogodek.save(update_fields=["izkljucen", "razlog_izkljucitve"])
-    audit.save()
+    for audit in auditi:
+        audit.save()
     return dogodek
 
 

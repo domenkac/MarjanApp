@@ -174,7 +174,7 @@ def test_dve_postavki_razlaga_zadene_pravo(pogodba):
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is False
     assert [(r.koda, r.lease_item_id) for r in rezultat.razlage] == [
-        ("VZROK_NEZNAN", druga.pk)
+        ("INDEKSACIJA", prva.pk), ("VZROK_NEZNAN", druga.pk)
     ]
 
 
