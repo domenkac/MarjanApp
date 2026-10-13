@@ -428,11 +428,58 @@ class IndexationDecision(models.Model):
     decided_at = models.DateTimeField(null=True, blank=True)
 
 
+_ADJUSTMENT_EVIDENCE_FIELDS = frozenset({
+    "indexation_event", "indexation_event_id", "original_invoice", "original_invoice_id",
+    "source_line", "source_line_id", "prizadeto_obdobje_od", "prizadeto_obdobje_do",
+    "znesek_poracuna", "calculation_evidence", "detection_month", "detected_at",
+})
+_ADJUSTMENT_OBSERVATION_FIELDS = frozenset({
+    "evidence_state", "unresolved_reasons", "last_observation_fingerprint",
+})
+
+
+class AdjustmentQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        if (_ADJUSTMENT_EVIDENCE_FIELDS | _ADJUSTMENT_OBSERVATION_FIELDS).intersection(kwargs):
+            raise ValidationError("Dokazila poračuna so nespremenljiva.")
+        if {"vkljucen_v_racun", "vkljucen_v_racun_id"}.intersection(kwargs):
+            raise ValidationError("Samodejno vključevanje poračunov še ni omogočeno.")
+        return super().update(**kwargs)
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        if (_ADJUSTMENT_EVIDENCE_FIELDS | _ADJUSTMENT_OBSERVATION_FIELDS).intersection(fields):
+            raise ValidationError("Dokazila poračuna so nespremenljiva.")
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+    def bulk_create(self, objs, batch_size=None, ignore_conflicts=False,
+                    update_conflicts=False, update_fields=None, unique_fields=None):
+        from .adjustments import validate_bulk_adjustments
+
+        objs = list(objs)
+        validate_bulk_adjustments(objs, update_conflicts=update_conflicts)
+        return super().bulk_create(
+            objs, batch_size=batch_size, ignore_conflicts=ignore_conflicts,
+            update_conflicts=update_conflicts, update_fields=update_fields,
+            unique_fields=unique_fields,
+        )
+
+    def delete(self):
+        raise ValidationError("Izbris zgodovine poračunov ni dovoljen.")
+
+
 class PoracunIndeksacije(models.Model):
     class Status(models.TextChoices):
         PREDLAGAN = "PREDLAGAN", "Predlagan"
         POTRJEN = "POTRJEN", "Potrjen"
         ZAVRNJEN = "ZAVRNJEN", "Zavrnjen"
+
+    class EvidenceState(models.TextChoices):
+        LEGACY_UNVERIFIED = "LEGACY_UNVERIFIED", "Nepreverjena zgodovinska dokazila"
+        VERIFIED = "VERIFIED", "Preverjena dokazila"
+        UNRESOLVED = "UNRESOLVED", "Potrebna uskladitev dokazil"
+        MANUAL_REVIEW = "MANUAL_REVIEW", "Obvezen ročni pregled"
+
+    objects = AdjustmentQuerySet.as_manager()
 
     indexation_event = models.ForeignKey(IndexationEvent, on_delete=models.PROTECT)
     original_invoice = models.ForeignKey(
@@ -440,7 +487,7 @@ class PoracunIndeksacije(models.Model):
     )
     prizadeto_obdobje_od = models.DateField()
     prizadeto_obdobje_do = models.DateField()
-    znesek_poracuna = models.DecimalField(max_digits=10, decimal_places=2)
+    znesek_poracuna = models.DecimalField(max_digits=10, decimal_places=2, null=True, blank=True)
     status = models.CharField(max_length=9, choices=Status, default=Status.PREDLAGAN)
     razlog_zavrnitve = models.TextField(blank=True)
     vkljucen_v_racun = models.ForeignKey(
@@ -450,26 +497,37 @@ class PoracunIndeksacije(models.Model):
         blank=True,
         related_name="vkljuceni_poracuni",
     )
+    source_line = models.ForeignKey(
+        "invoicing.InvoiceLine", on_delete=models.PROTECT, null=True, blank=True,
+        related_name="indexation_adjustments", editable=False,
+    )
+    calculation_evidence = models.JSONField(default=dict, blank=True, editable=False)
+    detection_month = models.DateField(null=True, blank=True, editable=False)
+    detected_at = models.DateTimeField(null=True, blank=True, editable=False)
+    evidence_state = models.CharField(
+        max_length=17, choices=EvidenceState, default=EvidenceState.LEGACY_UNVERIFIED,
+    )
+    unresolved_reasons = models.JSONField(default=list, blank=True)
+    last_observation_fingerprint = models.CharField(max_length=64, blank=True, editable=False)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(
+                fields=["indexation_event", "source_line"],
+                name="uniq_adjustment_event_source_line",
+            ),
+        ]
 
     def clean(self):
         super().clean()
-        if (
-            self.status == self.Status.ZAVRNJEN
-            and not (self.razlog_zavrnitve or "").strip()
-        ):
-            raise ValidationError({"razlog_zavrnitve": "Razlog zavrnitve je obvezen."})
+        from .adjustments import validate_adjustment
 
-        if self.indexation_event_id and self.znesek_poracuna is not None:
-            pricakovano = (
-                self.indexation_event.nova_vrednost
-                - self.indexation_event.stara_vrednost
-            )
-            if self.znesek_poracuna != pricakovano:
-                raise ValidationError(
-                    {"znesek_poracuna": "Znesek poračuna se ne ujema z indeksacijo."}
-                )
+        validate_adjustment(self)
 
-        if self.original_invoice_id and self.original_invoice.stevilka is None:
-            raise ValidationError(
-                {"original_invoice": "Originalni račun mora biti izdan."}
-            )
+    def save(self, *args, **kwargs):
+        from .adjustments import save_adjustment
+
+        return save_adjustment(self, *args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Izbris zgodovine poračunov ni dovoljen.")

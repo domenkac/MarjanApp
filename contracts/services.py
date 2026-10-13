@@ -410,35 +410,11 @@ def izracunaj_indeksacijo(
 def zaznaj_zamujen_poracun(
     indexation_event: IndexationEvent, *, obdobje_zaznave: date,
 ) -> list[PoracunIndeksacije]:
-    ze_pokrita = PoracunIndeksacije.objects.filter(
-        indexation_event=indexation_event
-    ).values_list("prizadeto_obdobje_od", flat=True)
-    prizadete = (
-        InvoiceLine.objects.filter(
-            lease_item=indexation_event.lease_item,
-            invoice__document_type=Invoice.DocumentType.NP,
-            invoice__obdobje_od__gte=indexation_event.datum_uskladitve,
-            invoice__obdobje_od__lt=obdobje_zaznave.replace(day=1),
-            invoice__status__in=[
-                Invoice.Status.IZBRAN_ZA_POSILJANJE,
-                Invoice.Status.POSLAN,
-            ],
-        )
-        .exclude(invoice__obdobje_od__in=ze_pokrita)
-        .select_related("invoice")
+    from .adjustments import prepare_adjustments
+
+    return prepare_adjustments(
+        indexation_event, business_month=obdobje_zaznave.replace(day=1),
     )
-    razlika = indexation_event.nova_vrednost - indexation_event.stara_vrednost
-    return [
-        PoracunIndeksacije(
-            indexation_event=indexation_event,
-            original_invoice=line.invoice,
-            prizadeto_obdobje_od=line.invoice.obdobje_od,
-            prizadeto_obdobje_do=line.invoice.obdobje_do,
-            znesek_poracuna=razlika,
-            status=PoracunIndeksacije.Status.PREDLAGAN,
-        )
-        for line in prizadete
-    ]
 
 
 @transaction.atomic
@@ -474,9 +450,10 @@ def potrdi_indeksacijo(
     audit.full_clean()
     audit.save()
 
+    from .adjustments import persist_proposal
+
     for poracun in zaznaj_zamujen_poracun(event, obdobje_zaznave=danes):
-        poracun.full_clean()
-        poracun.save()
+        persist_proposal(poracun)
     return event
 
 

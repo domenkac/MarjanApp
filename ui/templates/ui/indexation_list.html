@@ -2,6 +2,7 @@
 {% block title %}Januarska indeksacija · Marjan{% endblock %}
 {% block content %}
 <header class="page-heading"><h1>Januarska indeksacija</h1></header>
+{% for warning in adjustment_warnings %}<p role="alert">{{ warning }}</p>{% endfor %}
 <p>Ločen postopek za preteklo leto. Vnesite dejansko objavljeno kumulativno vrednost, ne letne stopnje inflacije. Brez zunanjega prenosa.</p>
 <p>Indeks učinkuje od 1. februarja naslednjega leta. Indeks za leto 2025 učinkuje od 1. februarja 2026. Vsak paket potrjuje odločitve samo za izbrano podjetje.</p>
 <form method="post">{% csrf_token %}{{ form.as_p }}<button class="button-primary" type="submit">Ustvari predogled</button></form>

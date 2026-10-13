@@ -7,6 +7,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from companies.models import Company
+from contracts.adjustments import unresolved_warnings
 from contracts.indexation import (
     batch_is_stale,
     confirm_batch,
@@ -63,6 +64,11 @@ def indexation_list(request):
             "batches": IndexationBatch.objects.select_related("company").order_by(
                 "-pk"
             ),
+            "adjustment_warnings": [
+                warning
+                for company_id in Company.objects.order_by("pk").values_list("pk", flat=True)
+                for warning in unresolved_warnings(company_id)
+            ],
             "active_section": "pogodbe",
         },
     )
@@ -125,6 +131,7 @@ def indexation_detail(request, company_id, batch_id):
             "groups": groups.values(),
             "error": error,
             "stale": batch_is_stale(batch),
+            "adjustment_warnings": unresolved_warnings(company_id),
             "active_section": "pogodbe",
         },
     )

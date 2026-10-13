@@ -108,6 +108,13 @@ def test_polja_privzeti_status_in_nullable_racun(poracun_podatki):
         "status",
         "razlog_zavrnitve",
         "vkljucen_v_racun",
+        "source_line",
+        "calculation_evidence",
+        "detection_month",
+        "detected_at",
+        "evidence_state",
+        "unresolved_reasons",
+        "last_observation_fingerprint",
     }
     assert set(PoracunIndeksacije.Status.values) == {"PREDLAGAN", "POTRJEN", "ZAVRNJEN"}
     poracun = PoracunIndeksacije(**poracun_podatki)
@@ -170,12 +177,12 @@ def test_vsi_poslovni_fk_so_protected(poracun_podatki):
 
 
 @pytest.mark.django_db
-def test_napacen_znesek_poracuna_je_zavrnjen(poracun_podatki):
+def test_legacy_znesek_se_ne_preverja_z_izmisljeno_mesecno_razliko(poracun_podatki):
     podatki = poracun_podatki | {"znesek_poracuna": Decimal("9.99")}
     poracun = PoracunIndeksacije(**podatki)
-    with pytest.raises(ValidationError) as error:
-        poracun.full_clean()
-    assert "znesek_poracuna" in error.value.message_dict
+    poracun.full_clean()
+    assert poracun.evidence_state == "LEGACY_UNVERIFIED"
+    assert poracun.calculation_evidence == {}
 
 
 @pytest.mark.django_db

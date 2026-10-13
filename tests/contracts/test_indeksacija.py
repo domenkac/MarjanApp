@@ -303,14 +303,14 @@ def test_izkljucen_dogodek_ne_postane_osnova(postavka):
     assert predlog.nova_vrednost == Decimal("110.06")
 
 
-def test_januar_in_tekoci_mesec_nista_zamujena(postavka):
+def test_januar_ni_prizadet_izdani_tekoci_mesec_je_vkljucen(postavka):
     racun_s_postavkami(postavka, mesec=1)
     danes = DANES
-    racun_s_postavkami(postavka, leto=danes.year, mesec=danes.month)
+    current = racun_s_postavkami(postavka, leto=danes.year, mesec=danes.month)
 
     services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES, indeks_leto=LETO - 1)
 
-    assert not PoracunIndeksacije.objects.exists()
+    assert PoracunIndeksacije.objects.get().original_invoice == current
 
 
 def test_izpuscen_letnik_samodejno_dohiti(postavka):
