@@ -436,10 +436,13 @@ _ADJUSTMENT_EVIDENCE_FIELDS = frozenset({
 _ADJUSTMENT_OBSERVATION_FIELDS = frozenset({
     "evidence_state", "unresolved_reasons", "last_observation_fingerprint",
 })
+_ADJUSTMENT_DECISION_FIELDS = frozenset({"status", "razlog_zavrnitve"})
 
 
 class AdjustmentQuerySet(models.QuerySet):
     def update(self, **kwargs):
+        if _ADJUSTMENT_DECISION_FIELDS.intersection(kwargs):
+            raise ValidationError("Odločitve poračuna zahtevajo revidirano domensko storitev.")
         if (_ADJUSTMENT_EVIDENCE_FIELDS | _ADJUSTMENT_OBSERVATION_FIELDS).intersection(kwargs):
             raise ValidationError("Dokazila poračuna so nespremenljiva.")
         if {"vkljucen_v_racun", "vkljucen_v_racun_id"}.intersection(kwargs):
@@ -447,6 +450,8 @@ class AdjustmentQuerySet(models.QuerySet):
         return super().update(**kwargs)
 
     def bulk_update(self, objs, fields, batch_size=None):
+        if _ADJUSTMENT_DECISION_FIELDS.intersection(fields):
+            raise ValidationError("Odločitve poračuna zahtevajo revidirano domensko storitev.")
         if (_ADJUSTMENT_EVIDENCE_FIELDS | _ADJUSTMENT_OBSERVATION_FIELDS).intersection(fields):
             raise ValidationError("Dokazila poračuna so nespremenljiva.")
         return super().bulk_update(objs, fields, batch_size=batch_size)

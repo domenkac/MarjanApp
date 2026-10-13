@@ -7,14 +7,21 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.views.decorators.http import require_http_methods
 
 from companies.models import Company
-from contracts.adjustments import unresolved_warnings
+from contracts.adjustments import (
+    adjustment_approval_blockers,
+    adjustment_decision_audit,
+    adjustment_review_token,
+    decide_adjustment,
+    review_adjustments,
+    unresolved_warnings,
+)
 from contracts.indexation import (
     batch_is_stale,
     confirm_batch,
     create_batch,
     save_review,
 )
-from contracts.models import IndexationBatch
+from contracts.models import IndexationBatch, Lease, PoracunIndeksacije
 
 
 class CompanyChoiceField(forms.ModelChoiceField):
@@ -70,6 +77,7 @@ def indexation_list(request):
                 for warning in unresolved_warnings(company_id)
             ],
             "active_section": "pogodbe",
+            "active_page": "pogodbe",
         },
     )
 
@@ -133,5 +141,111 @@ def indexation_detail(request, company_id, batch_id):
             "stale": batch_is_stale(batch),
             "adjustment_warnings": unresolved_warnings(company_id),
             "active_section": "pogodbe",
+            "active_page": "pogodbe",
         },
     )
+
+
+class AdjustmentFilterForm(forms.Form):
+    company = CompanyChoiceField(
+        queryset=Company.objects.order_by("naziv", "pk"),
+        required=False, label="Podjetje",
+    )
+    lease = forms.ModelChoiceField(
+        queryset=Lease.objects.none(), required=False, label="Pogodba",
+    )
+    evidence_state = forms.ChoiceField(
+        choices=[("", "Vsa stanja dokazil"), *PoracunIndeksacije.EvidenceState.choices],
+        required=False, label="Stanje dokazil",
+    )
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        leases = Lease.objects.order_by("oznaka_pogodbe", "pk")
+        company = self.data.get("company", "")
+        if company:
+            try:
+                company = self.fields["company"].clean(company)
+            except ValidationError:
+                leases = leases.none()
+            else:
+                leases = leases.filter(unit__property__company=company)
+        self.fields["lease"].queryset = leases
+
+
+def _review_display(row):
+    calculation = row.calculation_evidence.get("calculation") or {}
+    return {
+        "row": row,
+        "old_amount": calculation.get("billed_original_net"),
+        "new_amount": calculation.get("new_period_net"),
+        "signed_difference": (
+            f"{row.znesek_poracuna:+.2f}"
+            if row.znesek_poracuna is not None else None
+        ),
+        "vat": row.calculation_evidence.get("source_line", {}),
+        "blockers": adjustment_approval_blockers(row),
+    }
+
+
+@require_http_methods(["GET"])
+def adjustment_list(request):
+    form = AdjustmentFilterForm(request.GET)
+    groups = {}
+    if form.is_valid():
+        company = form.cleaned_data["company"]
+        rows = review_adjustments(company.pk if company else None)
+        if form.cleaned_data["lease"]:
+            rows = rows.filter(
+                indexation_event__lease_item__lease=form.cleaned_data["lease"]
+            )
+        if form.cleaned_data["evidence_state"]:
+            rows = rows.filter(evidence_state=form.cleaned_data["evidence_state"])
+        for row in rows.order_by(
+            "original_invoice__company_id", "indexation_event__lease_item__lease_id",
+            "evidence_state", "pk",
+        ):
+            lease = row.indexation_event.lease_item.lease
+            key = (row.original_invoice.company_id, lease.pk, row.evidence_state)
+            group = groups.setdefault(key, {
+                "company": row.original_invoice.company,
+                "lease": lease,
+                "evidence_state": row.get_evidence_state_display(),
+                "entries": [],
+            })
+            group["entries"].append(_review_display(row))
+    return render(request, "ui/adjustment_list.html", {
+        "form": form, "groups": list(groups.values()),
+        "active_section": "pogodbe", "active_page": "pogodbe",
+    })
+
+
+@require_http_methods(["GET", "POST"])
+def adjustment_detail(request, company_id, adjustment_id):
+    row = get_object_or_404(review_adjustments(company_id), pk=adjustment_id)
+    error = ""
+    reason = ""
+    if request.method == "POST":
+        reason = request.POST.get("reason", "")
+        try:
+            decide_adjustment(
+                company_id, adjustment_id, request.POST.get("token", ""),
+                request.POST.get("action"), reason=reason,
+            )
+        except (ValidationError, OperationalError) as exc:
+            error = (
+                "; ".join(exc.messages) if isinstance(exc, ValidationError)
+                else "Baza je zasedena. Ponovno odprite pregled."
+            )
+        else:
+            return redirect(
+                "ui:adjustment_detail", company_id=company_id,
+                adjustment_id=adjustment_id,
+            )
+        row = get_object_or_404(review_adjustments(company_id), pk=adjustment_id)
+    return render(request, "ui/adjustment_detail.html", {
+        **_review_display(row), "token": adjustment_review_token(row), "error": error,
+        "reason": reason, "decision_audit": adjustment_decision_audit(row),
+        "adjustment_warnings": unresolved_warnings(company_id),
+        "active_section": "pogodbe", "active_page": "pogodbe",
+    })

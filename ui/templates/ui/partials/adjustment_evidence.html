@@ -1,0 +1,5 @@
+<p>Izvirni račun: {{ row.calculation_evidence.source_invoice.stevilka|default:row.original_invoice.stevilka }} (#{{ row.original_invoice_id }}); izvorna vrstica: {{ row.source_line_id|default_if_none:"—" }}.</p>
+<p>Prizadeto obdobje: {{ row.prizadeto_obdobje_od|date:"d. m. Y" }}–{{ row.prizadeto_obdobje_do|date:"d. m. Y" }}.</p>
+<table class="settings-table"><thead><tr><th>Izvirna osnova</th><th>Nova osnova</th><th>Predznačena razlika</th><th>DDV izvirnika</th><th>Dokazila</th></tr></thead>
+<tbody><tr><td>{{ old_amount|default_if_none:"—" }} EUR</td><td>{{ new_amount|default_if_none:"—" }} EUR</td><td>{{ signed_difference|default_if_none:"—" }} EUR</td><td>{{ vat.ddv_rezim_sifra|default:"—" }} / {{ vat.ddv_nacin_obracuna|default:"—" }} / {{ vat.ddv_stopnja|default:"—" }} %; {{ vat.ddv_znesek|default:"—" }} EUR{% if vat.ddv_klavzula %}<br>{{ vat.ddv_klavzula }}{% endif %}</td><td>{{ row.get_evidence_state_display }}</td></tr></tbody></table>
+{% if blockers %}<div role="alert"><strong>Blokirano — potrditev ni dovoljena.</strong><ul>{% for blocker in blockers %}<li>{{ blocker }}</li>{% endfor %}</ul></div>{% endif %}

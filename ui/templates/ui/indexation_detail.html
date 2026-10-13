@@ -4,6 +4,7 @@
 <header class="page-heading"><h1>{{ batch.company.naziv }} — indeksacija za {{ batch.index_year }}</h1></header>
 <p>Objavljeni kumulativni indeks: {{ batch.index_value }}. Nova najemnina učinkuje od {{ batch.effective_date|date:"d. m. Y" }}. {{ batch.get_state_display }}.</p>
 <a href="{% url 'ui:indexation_list' %}">Vsi pregledi / nov predogled</a>
+<p><a href="{% url 'ui:adjustment_list' %}?company={{ batch.company_id }}">Pregled poračunov podjetja</a></p>
 {% if error %}<p role="alert">{{ error }}</p>{% endif %}
 {% for warning in adjustment_warnings %}<p role="alert">{{ warning }}</p>{% endfor %}
 {% if stale %}<p role="alert">Predogled je zastarel. Ustvarite nov predogled in ponovno preglejte odločitve. Shranjeni pregled ostane ohranjen.</p>{% endif %}

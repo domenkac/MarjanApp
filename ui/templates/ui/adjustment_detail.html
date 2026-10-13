@@ -1,0 +1,20 @@
+{% extends "ui/base.html" %}
+{% block title %}Pregled poračuna #{{ row.pk }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>{{ row.original_invoice.company.naziv }} — poračun #{{ row.pk }}</h1></header>
+<p>Pogodba {{ row.indexation_event.lease_item.lease.oznaka_pogodbe }} (#{{ row.indexation_event.lease_item.lease_id }})</p>
+<p><a href="{% url 'ui:adjustment_list' %}?company={{ row.original_invoice.company_id }}">Pregled poračunov podjetja</a> · <a href="{% url 'ui:indexation_list' %}">Januarska indeksacija</a></p>
+{% if error %}<p role="alert">{{ error }}</p>{% endif %}
+{% include "ui/partials/adjustment_evidence.html" %}
+<p>Odločitev: <strong>{{ row.get_status_display }}</strong></p>
+{% if row.razlog_zavrnitve %}<p>Razlog zavrnitve: {{ row.razlog_zavrnitve }}</p>{% endif %}
+{% if decision_audit %}<p>Odločitev shranjena: {{ decision_audit.created_at|date:"d. m. Y H:i:s" }}</p>{% endif %}
+{% for warning in adjustment_warnings %}<p role="alert">{{ warning }}</p>{% endfor %}
+{% if row.status == 'PREDLAGAN' %}
+{% if not blockers %}
+<form method="post">{% csrf_token %}<input type="hidden" name="token" value="{{ token }}"><button class="button-primary" name="action" value="approve">Potrdi poračun</button></form>
+{% endif %}
+<form method="post">{% csrf_token %}<input type="hidden" name="token" value="{{ token }}"><p><label for="reason">Obvezen razlog zavrnitve</label> <textarea id="reason" name="reason" required>{{ reason }}</textarea></p><button name="action" value="reject">Zavrni poračun</button></form>
+{% endif %}
+<p>Potrditev ali zavrnitev ne spremeni dokazil in zgodovinskih računov. Zavrnitev ne razreši blokad.</p>
+{% endblock %}

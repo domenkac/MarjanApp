@@ -12,7 +12,12 @@ from django.test import Client
 from django.urls import reverse
 
 from companies.models import Company
-from contracts.adjustments import detect_adjustments, unresolved_warnings
+from contracts.adjustments import (
+    adjustment_review_token,
+    decide_adjustment,
+    detect_adjustments,
+    unresolved_warnings,
+)
 from contracts.indexation import create_batch
 from contracts.models import (
     IndexationEvent,
@@ -95,6 +100,12 @@ def detect(event, month=3, **kwargs):
 
 def reasons(row):
     return {reason["code"] for reason in row.unresolved_reasons}
+
+
+def review_decision(row, action, reason=""):
+    return decide_adjustment(
+        row.original_invoice.company_id, row.pk, adjustment_review_token(row), action, reason=reason,
+    )
 
 
 def test_february_march_current_month_cutoff_and_retry(postavka):  # noqa: F811
@@ -228,8 +239,7 @@ def test_correction_after_approval_keeps_decision_and_source_evidence(postavka):
     line = issued_line(postavka)
     event = event_for(postavka)
     row = detect(event)[0]
-    row.status = "POTRJEN"
-    row.save(update_fields=["status"])
+    row = review_decision(row, "approve")
     evidence = row.calculation_evidence
     correction = issued_line(postavka)
     Invoice.objects.filter(pk=correction.invoice_id).update(
@@ -243,9 +253,9 @@ def test_correction_after_approval_keeps_decision_and_source_evidence(postavka):
         content_type=ContentType.objects.get_for_model(row),
         object_id=row.pk,
     )
-    assert audits.count() == 2
+    assert audits.count() == 3
     detect(event)
-    assert audits.count() == 2
+    assert audits.count() == 3
 
 
 @pytest.mark.parametrize(
@@ -361,8 +371,7 @@ def test_evidence_immutable_and_rejected_retry_preserved(postavka):  # noqa: F81
     issued_line(postavka)
     event = event_for(postavka)
     row = detect(event)[0]
-    row.status, row.razlog_zavrnitve = "ZAVRNJEN", "Dogovor"
-    row.save(update_fields=["status", "razlog_zavrnitve"])
+    row = review_decision(row, "reject", "Dogovor")
     assert detect(event)[0].razlog_zavrnitve == "Dogovor"
     row.znesek_poracuna = Decimal("999.00")
     with pytest.raises(ValidationError, match="nespremenljiv"):
@@ -517,8 +526,7 @@ def test_database_identity_constraint_and_protected_source(postavka):  # noqa: F
 def test_signed_negative_cannot_be_cleared_or_approved_as_verified(postavka):  # noqa: F811
     issued_line(postavka)
     row = detect(event_for(postavka, new="90.05"))[0]
-    row.status, row.razlog_zavrnitve = "ZAVRNJEN", "Zahtevan pregled"
-    row.save(update_fields=["status", "razlog_zavrnitve"])
+    row = review_decision(row, "reject", "Zahtevan pregled")
     row.evidence_state = "VERIFIED"
     with pytest.raises(ValidationError):
         row.save()
@@ -553,8 +561,7 @@ def test_retry_detected_negative_persists_signed_observation_and_warning(postavk
     line = issued_line(postavka)
     event = event_for(postavka)
     original = detect(event)[0]
-    original.status = "POTRJEN"
-    original.save(update_fields=["status"])
+    original = review_decision(original, "approve")
     # Simulate conflicting historical evidence; never an authorized invoice edit.
     InvoiceLine.objects.filter(pk=line.pk).update(
         osnova=Decimal("120.05"),
@@ -582,7 +589,7 @@ def test_retry_detected_negative_persists_signed_observation_and_warning(postavk
         AuditLogEntry.objects.filter(
             content_type=audit.content_type, object_id=retry.pk
         ).count()
-        == 2
+        == 3
     )
 
 

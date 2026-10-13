@@ -772,7 +772,17 @@ def validate_adjustment_write(row, *, previous=None):
     if old is None and row.pk:
         old = PoracunIndeksacije.objects.filter(pk=row.pk).first()
     if old is not None:
-        from .models import _ADJUSTMENT_EVIDENCE_FIELDS, _ADJUSTMENT_OBSERVATION_FIELDS
+        from .models import (
+            _ADJUSTMENT_DECISION_FIELDS,
+            _ADJUSTMENT_EVIDENCE_FIELDS,
+            _ADJUSTMENT_OBSERVATION_FIELDS,
+        )
+
+        if any(
+            getattr(old, field) != getattr(row, field)
+            for field in _ADJUSTMENT_DECISION_FIELDS
+        ):
+            raise ValidationError("Odločitve poračuna zahtevajo revidirano domensko storitev.")
 
         if any(
             getattr(old, field) != getattr(row, field)
@@ -798,6 +808,172 @@ def validate_adjustment_write(row, *, previous=None):
         raise ValidationError("Samodejno vključevanje poračunov še ni omogočeno.")
     if row.source_line_id:
         validate_adjustment(row)
+        if old is None and (row.status != "PREDLAGAN" or row.razlog_zavrnitve):
+            raise ValidationError("Nov izvorni poračun mora najprej v izrecni pregled.")
+
+
+def review_adjustments(company_id=None):
+    """Company-scoped reads shared by review and decisions."""
+    rows = PoracunIndeksacije.objects.select_related(
+        "original_invoice__company",
+        "source_line__invoice",
+        "source_line__lease_item__vat_regime",
+        "source_line__lease_item__lease__tenant",
+        "source_line__lease_item__lease__unit__property__company",
+        "indexation_event__lease_item__vat_regime",
+        "indexation_event__lease_item__lease__tenant",
+        "indexation_event__lease_item__lease__unit__property__company",
+    )
+    if company_id is not None:
+        rows = rows.filter(
+            original_invoice__company_id=company_id,
+            indexation_event__lease_item__lease__unit__property__company_id=company_id,
+        )
+    return rows
+
+
+def adjustment_review_token(row):
+    """Bind an explicit decision to the complete stored review, including warnings."""
+    return _fingerprint(_json({
+        "id": row.pk,
+        "evidence": row.calculation_evidence,
+        "observation": _observation_values(row),
+        "status": row.status,
+        "reason": row.razlog_zavrnitve,
+        "amount": row.znesek_poracuna,
+        "source_line_id": row.source_line_id,
+        "original_invoice_id": row.original_invoice_id,
+        "event_id": row.indexation_event_id,
+        "period_start": row.prizadeto_obdobje_od,
+        "period_end": row.prizadeto_obdobje_do,
+        "detection_month": row.detection_month,
+        "detected_at": row.detected_at,
+        "included_invoice_id": row.vkljucen_v_racun_id,
+        "current_observation": _current_review_observation(row),
+    }))
+
+
+def _current_adjustment(row):
+    period = row.calculation_evidence.get("period")
+    verified = {}
+    if period:
+        verified[row.source_line_id] = {
+            "start": date.fromisoformat(period["start"]),
+            "end": date.fromisoformat(period["end"]),
+            "reference": period["reference"],
+        }
+    return _build(row.indexation_event, row.source_line, row.detection_month, verified)
+
+
+def _current_review_observation(row):
+    if not row.source_line_id:
+        return None
+    try:
+        return _current_adjustment(row).last_observation_fingerprint
+    except (ValidationError, KeyError, TypeError, ValueError):
+        return "INVALID"
+
+
+def adjustment_approval_blockers(row):
+    """Recheck current sources without modifying immutable evidence or observations."""
+    blockers = [reason["message"] for reason in row.unresolved_reasons]
+    if row.evidence_state != "VERIFIED":
+        blockers.append(f"{row.get_evidence_state_display()}: potrditev ni dovoljena.")
+    if row.znesek_poracuna is None or row.znesek_poracuna <= 0:
+        blockers.append("Potrditev zahteva preverjen pozitiven poračun.")
+    if (
+        row.original_invoice.company_id
+        != row.indexation_event.lease_item.lease.unit.property.company_id
+    ):
+        blockers.append("Izvirnik in dogodek ne pripadata istemu podjetju.")
+    if not row.source_line_id:
+        blockers.append("Zgodovinski poračun nima preverjene izvorne vrstice.")
+        return list(dict.fromkeys(blockers))
+    try:
+        validate_adjustment(row)
+        candidate = _current_adjustment(row)
+        if (
+            candidate.calculation_evidence != row.calculation_evidence
+            or candidate.last_observation_fingerprint != row.last_observation_fingerprint
+            or candidate.evidence_state != "VERIFIED"
+        ):
+            blockers.append("Dokazila so zastarela ali niso več preverjena. Potrebna je uskladitev.")
+        blockers.extend(reason["message"] for reason in candidate.unresolved_reasons)
+    except (ValidationError, KeyError, TypeError, ValueError) as exc:
+        blockers.append("Dokazila niso veljavna: " + (
+            "; ".join(exc.messages) if isinstance(exc, ValidationError) else "nepopoln posnetek"
+        ))
+    if row.vkljucen_v_racun_id:
+        blockers.append("Poračun je že povezan z računom; nova odločitev ni dovoljena.")
+    return list(dict.fromkeys(blockers))
+
+
+def adjustment_decision_audit(row):
+    return (
+        AuditLogEntry.objects.filter(
+            content_type=ContentType.objects.get_for_model(row),
+            object_id=row.pk, polje="status",
+        )
+        .order_by("pk")
+        .last()
+    )
+
+
+@transaction.atomic
+def decide_adjustment(company_id, adjustment_id, token, action, *, reason=""):
+    """SQLite IMMEDIATE serializes decisions; status and audit commit together."""
+    row = review_adjustments(company_id).get(pk=adjustment_id)
+    if action not in {"approve", "reject"} or not isinstance(reason, str):
+        raise ValidationError("Neveljavna odločitev poračuna.")
+    reason = reason.strip()
+    if action == "reject" and not reason:
+        raise ValidationError("Razlog zavrnitve je obvezen.")
+    status = "POTRJEN" if action == "approve" else "ZAVRNJEN"
+    current_token = adjustment_review_token(row)
+    if row.status != "PREDLAGAN":
+        audit = adjustment_decision_audit(row)
+        payload = json.loads(audit.razlog) if audit else {}
+        if (
+            row.status == status
+            and payload.get("event") == "INDEXATION_ADJUSTMENT_DECISION"
+            and payload.get("reason") == reason
+            and payload.get("decided_token") == current_token
+            and token in {payload.get("review_token"), current_token}
+        ):
+            return row  # Exact duplicate click: no new decision or audit.
+        raise ValidationError("Odločitev je že shranjena. Nasprotujoča odločitev ni dovoljena.")
+    if token != current_token:
+        raise ValidationError("Pregled je zastarel. Ponovno odprite poračun.")
+    if row.vkljucen_v_racun_id:
+        raise ValidationError("Poračun je že povezan z računom.")
+    if action == "approve":
+        blockers = adjustment_approval_blockers(row)
+        if blockers:
+            raise ValidationError(blockers)
+    previous = {"status": row.status, "razlog_zavrnitve": row.razlog_zavrnitve}
+    row.status = status
+    row.razlog_zavrnitve = reason if action == "reject" else ""
+    # Only this private writer bypasses the ordinary decision guard.
+    models.Model.save(row, update_fields=["status", "razlog_zavrnitve"])
+    audit = AuditLogEntry(
+        content_type=ContentType.objects.get_for_model(row),
+        object_id=row.pk,
+        polje="status",
+        stara_vrednost=previous["status"], nova_vrednost=row.status,
+        razlog=json.dumps({
+            "event": "INDEXATION_ADJUSTMENT_DECISION",
+            "action": action, "reason": reason,
+            "review_token": token,
+            "decided_token": adjustment_review_token(row),
+            "changes": {
+                field: {"old": old, "new": getattr(row, field)}
+                for field, old in previous.items()
+            },
+        }, ensure_ascii=False, sort_keys=True),
+    )
+    audit.full_clean()
+    audit.save()
+    return row
 
 
 def unresolved_warnings(company_id):
