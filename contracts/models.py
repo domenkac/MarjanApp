@@ -2,7 +2,7 @@ from decimal import Decimal
 
 from django.core.exceptions import ValidationError
 from django.core.validators import MinValueValidator
-from django.db import models
+from django.db import models, transaction
 
 from catalogs.models import VatRegime
 from companies.models import Company
@@ -219,9 +219,12 @@ class Lease(models.Model):
                 "Pogodba za nedoločen čas ne sme imeti datuma konca."
             )
 
-        if self.samodejno_podaljsanje and self.obdobje_podaljsanja_mesecev is None:
+        if self.samodejno_podaljsanje and (
+            self.obdobje_podaljsanja_mesecev is None
+            or self.obdobje_podaljsanja_mesecev <= 0
+        ):
             napake["obdobje_podaljsanja_mesecev"] = (
-                "Obdobje podaljšanja je obvezno pri samodejnem podaljšanju."
+                "Obdobje podaljšanja mora biti pozitivno število mesecev."
             )
 
         if self.ima_klavzulo_indeksacije and not self.tip_pogoja_indeksacije:
@@ -256,7 +259,23 @@ class Lease(models.Model):
 
     def save(self, *args, **kwargs):
         self._nastavi_privzeti_rok_placila()
-        return super().save(*args, **kwargs)
+        from .renewals import validate_lease_edit
+
+        with transaction.atomic():
+            previous = type(self).objects.select_for_update().filter(pk=self.pk).first() if self.pk else None
+            if previous:
+                fields = kwargs.get("update_fields")
+                changes = {
+                    field.attname: getattr(self, field.attname)
+                    for field in self._meta.fields
+                    if fields is None or field.name in fields or field.attname in fields
+                }
+                validate_lease_edit(previous, changes, source_fingerprint=getattr(
+                    self, "_edit_source_fingerprint", None,
+                ))
+            result = super().save(*args, **kwargs)
+            self.__dict__.pop("_edit_source_fingerprint", None)
+            return result
 
 
 class LeaseItem(models.Model):
@@ -388,6 +407,53 @@ class IndexationEvent(models.Model):
             raise ValidationError(
                 {"razlog_izkljucitve": "Razlog izključitve je obvezen."}
             )
+
+
+class LeaseRenewalEventQuerySet(models.QuerySet):
+    def update(self, **kwargs):
+        raise ValidationError("Zgodovina podaljšanj je nespremenljiva.")
+
+    def delete(self):
+        raise ValidationError("Zgodovina podaljšanj je nespremenljiva.")
+
+    def bulk_update(self, objs, fields, batch_size=None):
+        raise ValidationError("Zgodovina podaljšanj je nespremenljiva.")
+
+    def bulk_create(self, objs, **kwargs):
+        raise ValidationError("Podaljšanje zahteva izrecno domensko potrditev.")
+
+
+class LeaseRenewalEvent(models.Model):
+    class Decision(models.TextChoices):
+        CONFIRMED = "CONFIRMED", "Potrjeno"
+
+    lease = models.ForeignKey(Lease, on_delete=models.PROTECT, related_name="renewal_events")
+    old_end = models.DateField()
+    new_end = models.DateField()
+    months = models.PositiveIntegerField()
+    source_fingerprint = models.CharField(max_length=64)
+    decision = models.CharField(max_length=9, choices=Decision, default=Decision.CONFIRMED)
+    decided_at = models.DateTimeField()
+    audit = models.OneToOneField("core.AuditLogEntry", on_delete=models.PROTECT)
+
+    objects = LeaseRenewalEventQuerySet.as_manager()
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.UniqueConstraint(fields=["lease", "old_end"], name="unique_lease_renewal_end"),
+            models.UniqueConstraint(fields=["lease", "source_fingerprint"], name="unique_lease_renewal_source"),
+            models.CheckConstraint(condition=models.Q(months__gt=0), name="renewal_positive_months"),
+            models.CheckConstraint(condition=models.Q(new_end__gt=models.F("old_end")), name="renewal_end_increases"),
+            models.CheckConstraint(condition=models.Q(decision="CONFIRMED"), name="renewal_confirmed_decision"),
+        ]
+
+    def save(self, *args, **kwargs):
+        if not self._state.adding or (self.pk and type(self).objects.filter(pk=self.pk).exists()):
+            raise ValidationError("Zgodovina podaljšanj je nespremenljiva.")
+        return super().save(*args, **kwargs)
+
+    def delete(self, *args, **kwargs):
+        raise ValidationError("Zgodovina podaljšanj je nespremenljiva.")
 
 
 class IndexationBatch(models.Model):

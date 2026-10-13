@@ -684,7 +684,7 @@ def test_ena_aktivna_postavka_med_vec_zadostuje_za_blokado():
         ("datum_prenehanja_postavke", 0, None, True),
         ("datum_prenehanja", -1, Lease.Status.PRENEHALA, False),
         ("datum_prenehanja", 1, Lease.Status.ODPOVEDANA, True),
-        ("datum_prenehanja", -1, Lease.Status.AKTIVNA, True),
+        ("datum_prenehanja", -1, Lease.Status.AKTIVNA, False),
         ("datum_prenehanja", 1, Lease.Status.PRENEHALA, True),
         ("datum_konca", -1, Lease.Status.AKTIVNA, False),
         ("datum_konca", 0, Lease.Status.AKTIVNA, True),

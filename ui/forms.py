@@ -9,6 +9,11 @@ from archive.configuration import ArchiveConfigurationError, validate_archive_lo
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
+from contracts.renewals import (
+    lease_source_fingerprint,
+    save_lease_edit,
+    validate_lease_edit,
+)
 from delivery.models import MonthlySummaryConfiguration
 
 
@@ -218,6 +223,7 @@ class VatRegimeChoiceField(forms.ModelChoiceField):
 
 
 class LeaseForm(forms.ModelForm):
+    edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
     unit = UnitChoiceField(queryset=Unit.objects.none(), label="Enota")
     tenant = TenantChoiceField(queryset=Tenant.objects.none(), label="Najemnik")
     rok_placila_dni = forms.IntegerField(
@@ -275,6 +281,7 @@ class LeaseForm(forms.ModelForm):
         )
         tenants = Tenant.objects.filter(aktiven=True)
         if self.instance.pk:
+            self.initial["edit_fingerprint"] = lease_source_fingerprint(self.instance)
             units = units | Unit.objects.filter(pk=self.instance.unit_id)
             tenants = tenants | Tenant.objects.filter(pk=self.instance.tenant_id)
         self.fields["unit"].queryset = units.select_related(
@@ -289,6 +296,25 @@ class LeaseForm(forms.ModelForm):
                 "Rok plačila je obvezen pri urejanju obstoječe pogodbe."
             )
         return value
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.instance.pk:
+            previous = Lease.objects.get(pk=self.instance.pk)
+            validate_lease_edit(previous, cleaned, source_fingerprint=cleaned.get("edit_fingerprint", ""))
+        return cleaned
+
+    def save(self, commit=True):
+        lease = super().save(commit=False)
+        if lease.pk:
+            lease._edit_source_fingerprint = self.cleaned_data.get("edit_fingerprint", "")
+        if commit:
+            if lease.pk:
+                save_lease_edit(lease, source_fingerprint=lease._edit_source_fingerprint)
+            else:
+                lease.save()
+            self._save_m2m()
+        return lease
 
 
 class RecipientContactForm(forms.ModelForm):

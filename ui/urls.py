@@ -47,6 +47,7 @@ from .views import (
     pogodba_arhiviraj,
     pogodba_detail,
     pogodba_nova,
+    pogodba_podaljsaj,
     pogodba_reaktiviraj,
     pogodbe,
     postavka_arhiviraj,
@@ -70,6 +71,7 @@ from .views import (
 app_name = "ui"
 
 urlpatterns = [
+    path("pogodbe/<int:lease_id>/podaljsaj/", pogodba_podaljsaj, name="pogodba_podaljsaj"),
     path("indeksacija/", indexation_list, name="indexation_list"),
     path("pogodbe/poracuni/", adjustment_list, name="adjustment_list"),
     path("pogodbe/poracuni/<int:company_id>/<int:adjustment_id>/", adjustment_detail, name="adjustment_detail"),

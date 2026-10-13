@@ -9,6 +9,7 @@ from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
 from django.urls import reverse
+from django.utils import timezone
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
 from accounting_export.arbitrary_export import prepare_arbitrary_accountant_exports
@@ -47,6 +48,7 @@ from companies.services import (
     veljavna_potrditev_vzorca,
 )
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
+from contracts.renewals import confirm_renewal, renewal_proposal
 from contracts.services import (
     arhiviraj_poslovni_zapis as arhiviraj_pogodbeni_zapis,
 )
@@ -97,6 +99,7 @@ from invoicing.services import (
     odpri_zakljucek_mesecnega_cikla,
     poslji_dostavo_mesecnega_cikla,
     potrdi_izjemo_kandidata,
+    potrdi_podaljsanje_mesecnega_kandidata,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
     pripravi_dostavo_mesecnega_cikla,
@@ -185,8 +188,14 @@ def pogodba_detail(request, lease_id):
 def _lease_form(request, lease=None, action_errors=None, *, bind_post=True):
     form = LeaseForm(request.POST if bind_post and request.method == "POST" else None, instance=lease)
     if bind_post and request.method == "POST" and form.is_valid():
-        lease = form.save()
-        return redirect("ui:pogodba_detail", lease_id=lease.pk)
+        try:
+            lease = form.save()
+        except ValidationError as exc:
+            form.add_error(None, " ".join(exc.messages))
+        else:
+            return redirect("ui:pogodba_detail", lease_id=lease.pk)
+    if lease and form.is_bound:
+        lease.refresh_from_db()
     items = (
         LeaseItem.objects.filter(lease=lease).select_related("vat_regime").order_by(
             "arhivirana", "naziv_postavke", "pk"
@@ -201,11 +210,32 @@ def _lease_form(request, lease=None, action_errors=None, *, bind_post=True):
         if lease
         else ()
     )
+    proposal = None
+    if lease:
+        try:
+            proposal = renewal_proposal(lease, timezone.localdate())
+        except ValidationError as exc:
+            action_errors = [*(action_errors or []), *exc.messages]
     return render(request, "ui/pogodba_form.html", _contracts_context(
         form=form, lease=lease, items=items, contacts=contacts,
         action_errors=action_errors,
         hierarchy_usable=_lease_hierarchy_usable(lease) if lease else False,
+        renewal=proposal,
+        renewal_events=lease.renewal_events.order_by("-decided_at", "-pk") if lease else (),
     ))
+
+
+@require_POST
+def pogodba_podaljsaj(request, lease_id):
+    lease = get_object_or_404(
+        Lease.objects.select_related("unit__property__company", "tenant"), pk=lease_id,
+    )
+    try:
+        confirm_renewal(lease_id, request.POST.get("source_fingerprint", ""), as_of=timezone.localdate())
+    except ValidationError as exc:
+        lease.refresh_from_db()
+        return _lease_form(request, lease, exc.messages, bind_post=False)
+    return redirect("ui:pogodba_detail", lease_id=lease_id)
 
 
 def _lease_state(request, lease_id, service):
@@ -1237,7 +1267,7 @@ def mesecni_obracun(request):
     review_error_identity = None
     form_is_valid = form.is_valid() if request.method == "POST" and not action else False
 
-    review_actions = {"select_candidate", "deselect_candidate", "confirm_candidate"}
+    review_actions = {"select_candidate", "deselect_candidate", "confirm_candidate", "confirm_renewal"}
     if request.method == "POST" and action == "finalize_monthly_cycle":
         try:
             if not cycle or cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK:
@@ -1261,7 +1291,14 @@ def mesecni_obracun(request):
             lease_id = int(request.POST.get("lease_id", ""))
             fingerprint = request.POST.get("candidate_fingerprint", "")
             review_error_identity = (lease_id, fingerprint)
-            if action == "confirm_candidate":
+            if action == "confirm_renewal":
+                potrdi_podaljsanje_mesecnega_kandidata(
+                    cycle, lease_id=lease_id, candidate_fingerprint=fingerprint,
+                )
+                preveri_predhodno_kontrolo(cycle)
+                izracunaj_mesecne_kandidate(cycle, samo_brez_aktivnega_izracuna=True)
+                uskladi_preglede_mesecnega_cikla(cycle)
+            elif action == "confirm_candidate":
                 potrdi_izjemo_kandidata(
                     cycle, lease_id=lease_id, candidate_fingerprint=fingerprint
                 )
@@ -1790,6 +1827,7 @@ def _review_rows(cycle, error_identity=None, error=None):
                     "will_issue": bool(candidate["will_issue"]),
                     "system_non_issue_reason": candidate.get("non_issue_reason", ""),
                     "exceptions": candidate.get("exceptions", []),
+                    "renewal": candidate.get("renewal"),
                     "selected": review.selected,
                     "requires_confirmation": review.requires_confirmation,
                     "confirmed_at": review.confirmed_at,

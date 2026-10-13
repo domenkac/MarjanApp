@@ -63,7 +63,7 @@ def test_dnevi_v_obdobju_so_inclusive(zacetek, konec, pricakovano):
 @pytest.mark.parametrize(
     ("status", "datum_konca", "datum_prenehanja", "pricakovani_konec"),
     [
-        (Lease.Status.AKTIVNA, date(2026, 6, 30), date(2026, 3, 15), date(2026, 6, 30)),
+        (Lease.Status.AKTIVNA, date(2026, 6, 30), date(2026, 3, 15), date(2026, 3, 15)),
         (Lease.Status.ODPOVEDANA, date(2026, 6, 30), date(2026, 3, 15), date(2026, 3, 15)),
         (Lease.Status.PRENEHALA, date(2026, 6, 30), date(2026, 3, 15), date(2026, 3, 15)),
         (Lease.Status.AKTIVNA, None, None, None),

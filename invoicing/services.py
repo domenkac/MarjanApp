@@ -28,6 +28,12 @@ from companies.services import (
     veljavni_podpisniki_na_dan,
 )
 from contracts.models import IndexationEvent, Lease, LeaseItem, RecipientContact
+from contracts.renewals import (
+    confirm_renewal,
+    renewal_due,
+    renewal_proposal,
+    require_confirmed_renewal,
+)
 from contracts.services import (
     dnevi_v_obdobju,
     efektivna_veljavnost_pogodbe,
@@ -690,11 +696,11 @@ def _lease_warning_issues(lease, items, period_start, period_end):
             code = None
         if code:
             issues.append(_preflight_issue(code, message, "Lease", lease.pk, warning=True))
-    if lease.samodejno_podaljsanje and lease.datum_konca and period_start <= lease.datum_konca <= period_end:
+    if renewal_due(lease, period_end):
         issues.append(
             _preflight_issue(
                 "SAMODEJNO_PODALJSANJE",
-                "Pogodba v mesecu doseže datum samodejnega podaljšanja.",
+                "Podaljšanje pogodbe zahteva izrecno potrditev pred izdajo računa.",
                 "Lease",
                 lease.pk,
                 warning=True,
@@ -1180,6 +1186,7 @@ def _potrdi_osnutek_np(
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
     if invoice.lease_id is None:
         raise ValueError("NP osnutek nima pogodbe.")
+    require_confirmed_renewal(invoice.lease_id, invoice.obdobje_do)
     if invoice.company_id != invoice.lease.unit.property.company_id:
         raise ValueError("NP podjetje se ne ujema s pogodbo.")
     podpisnik = izberi_veljavnega_podpisnika(
@@ -2089,14 +2096,12 @@ def _lifecycle_exceptions(lease, period_start, period_end):
             "POGODBA_POTECE_V_30_DNEH",
             f"Pogodba poteče v naslednjih 30 dneh ({end:%d.%m.%Y}).",
         ))
-    if fixed and lease.samodejno_podaljsanje and period_start <= end <= period_end + timedelta(days=30):
-        suffix = (
-            f" za {lease.obdobje_podaljsanja_mesecev} mesecev"
-            if lease.obdobje_podaljsanja_mesecev else ""
-        )
+    if renewal_due(lease, period_end):
+        proposal = renewal_proposal(lease, period_end)
         exceptions.append(_exception(
             "SAMODEJNO_PODALJSANJE_OB_KONCU",
-            f"Pogodba s samodejnim podaljšanjem{suffix} doseže konec {end:%d.%m.%Y}.",
+            f"Podaljšanje od {proposal['old_end']} do {proposal['new_end']} "
+            "zahteva izrecno potrditev ali vnos odpovedi.",
         ))
     termination = lease.datum_prenehanja
     if lease.status == Lease.Status.ODPOVEDANA and termination:
@@ -2396,6 +2401,7 @@ def _calculation_snapshot(batch, cycle, issues):
                 "total": _decimal_string(candidate.skupaj_z_ddv),
             },
             "exceptions": exceptions,
+            "renewal": renewal_proposal(lease, period_end),
             "previous_invoice": previous,
             "first_issue": delta.prejsnji_racun_id is None,
             "previous_month_archived_not_issued": (
@@ -2563,6 +2569,11 @@ def zamrzni_paket_za_potrditev(cycle: MonthlyCycle) -> MonthlyCycle:
                 raise ValidationError(message) from exc
             will_issue = candidate.get("will_issue") is True
             if review.selected:
+                if candidate.get("renewal"):
+                    raise ValidationError("Podaljšanje zahteva ločeno potrditev in osvežen pregled kandidata.")
+                require_confirmed_renewal(lease_id, cycle.obdobje.replace(
+                    day=monthrange(cycle.obdobje.year, cycle.obdobje.month)[1],
+                ))
                 if not will_issue:
                     raise ValidationError(
                         "Izbrani pregled je v neskladju s sistemsko neizdajnim kandidatom."
@@ -2620,6 +2631,26 @@ def _trenutni_pregled_in_kandidat(cycle, lease_id, candidate_fingerprint):
     )
 
 
+@transaction.atomic
+def potrdi_podaljsanje_mesecnega_kandidata(cycle, *, lease_id, candidate_fingerprint):
+    batch, candidate = trenutni_mesecni_kandidat(
+        cycle, lease_id=lease_id, candidate_fingerprint=candidate_fingerprint,
+    )
+    proposal = candidate.get("renewal")
+    if not proposal:
+        raise ValidationError("Kandidat nima predloga podaljšanja.")
+    period_start = batch.cycle.obdobje
+    event = confirm_renewal(lease_id, proposal["source_fingerprint"], as_of=period_start.replace(
+        day=monthrange(period_start.year, period_start.month)[1],
+    ))
+    # Only this unfrozen calculation is invalidated. Frozen packages and issued
+    # documents remain unchanged; sample confirmation follows its existing rules.
+    MonthlyBatch.objects.filter(pk=batch.pk).update(
+        calculation_status=MonthlyBatch.CalculationStatus.NOT_CALCULATED,
+    )
+    return event
+
+
 def nastavi_izbiro_kandidata(
     cycle: MonthlyCycle,
     *,
@@ -2647,6 +2678,7 @@ def nastavi_izbiro_kandidata(
     return review
 
 
+@transaction.atomic
 def potrdi_izjemo_kandidata(
     cycle: MonthlyCycle, *, lease_id: int, candidate_fingerprint: str
 ) -> MonthlyCandidateReview:
@@ -2655,6 +2687,11 @@ def potrdi_izjemo_kandidata(
     )
     if not review.selected:
         raise ValidationError("Neizbranega kandidata ni dovoljeno potrditi.")
+    if candidate.get("renewal"):
+        raise ValidationError("Podaljšanje zahteva ločeno potrditev in osvežen pregled kandidata.")
+    require_confirmed_renewal(lease_id, review.batch.cycle.obdobje.replace(
+        day=monthrange(review.batch.cycle.obdobje.year, review.batch.cycle.obdobje.month)[1],
+    ))
     if not review.requires_confirmation or not (
         bool(candidate.get("exceptions")) and candidate["will_issue"]
     ):
@@ -3134,6 +3171,7 @@ def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidat
                 )
             return invoice, True
         if review.selected:
+            require_confirmed_renewal(lease_id, prepared["period_end"])
             reservations = adjustment_services.validate_before_numbering(
                 Invoice(**fields),
                 [InvoiceLine(lease_id=lease_id, **line) for line in prepared["lines"]],

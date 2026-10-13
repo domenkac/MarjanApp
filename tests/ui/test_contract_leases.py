@@ -9,6 +9,7 @@ from django.urls import NoReverseMatch, reverse
 from catalogs.models import VatRegime
 from companies.models import Company
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from contracts.renewals import lease_source_fingerprint
 from core.models import AuditLogEntry
 from invoicing.models import MonthlyBatch
 from invoicing.services import shrani_prvi_korak
@@ -65,6 +66,7 @@ def make_vat(sifra="DDV22", aktiven=True, zahteva_referenco=False):
 
 def lease_data(lease, **changes):
     data = {
+        "edit_fingerprint": lease_source_fingerprint(lease) if lease.pk else "",
         "unit": lease.unit_id, "tenant": lease.tenant_id,
         "oznaka_pogodbe": lease.oznaka_pogodbe,
         "tip_trajanja": Lease.TipTrajanja.NEDOLOCEN_CAS,

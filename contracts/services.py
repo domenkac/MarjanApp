@@ -52,11 +52,19 @@ def dnevi_v_obdobju(
 
 
 def efektivna_veljavnost_pogodbe(pogodba: Lease) -> tuple[date, date | None]:
-    konec = (
-        pogodba.datum_konca
-        if pogodba.status == Lease.Status.AKTIVNA
-        else pogodba.datum_prenehanja
-    )
+    # Actual termination takes precedence. Pending automatic renewal remains
+    # billable, but issuance requires a separate, explicit renewal decision.
+    if pogodba.datum_prenehanja:
+        konec = pogodba.datum_prenehanja
+    elif (
+        pogodba.status == Lease.Status.AKTIVNA
+        and pogodba.samodejno_podaljsanje
+        and not pogodba.datum_odpovedi
+        and pogodba.tip_trajanja == Lease.TipTrajanja.DOLOCEN_CAS
+    ):
+        konec = None
+    else:
+        konec = pogodba.datum_konca
     return pogodba.datum_zacetka, konec
 
 
