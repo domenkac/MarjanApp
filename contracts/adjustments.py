@@ -1,4 +1,4 @@
-"""Late indexation evidence only. No invoice issuance or adjustment consumption."""
+"""Late indexation evidence and explicit review decisions."""
 
 import hashlib
 import json
@@ -275,6 +275,7 @@ def _build(event, line, business_month, verified):
             )
         )
     overlapping = InvoiceLine.objects.filter(
+        adjustment__isnull=True,
         lease_item_id=item.pk,
         invoice__document_type="NP",
         invoice__stevilka__isnull=False,
@@ -397,6 +398,7 @@ def _build(event, line, business_month, verified):
             "source_line": {
                 field.name: getattr(line, field.attname)
                 for field in InvoiceLine._meta.concrete_fields
+                if field.name not in {"adjustment", "adjustment_snapshot", "rent_indexation_event"}
             },
             "period": period,
             "calculation": calculation,
@@ -504,6 +506,7 @@ def _sources(event, business_month):
                 ]
             ),
             lease_item_id=event.lease_item_id,
+            adjustment__isnull=True,
             invoice__document_type="NP",
             invoice__obdobje_do__gte=event.datum_uskladitve,
             invoice__obdobje_od__lte=end,
@@ -804,8 +807,11 @@ def validate_adjustment_write(row, *, previous=None):
             raise ValidationError(
                 "Dokazila opazovanja so nespremenljiva brez revidirane domenske storitve."
             )
-    if row.source_line_id and row.vkljucen_v_racun_id:
-        raise ValidationError("Samodejno vključevanje poračunov še ni omogočeno.")
+    if row.source_line_id and (
+        (old is not None and old.vkljucen_v_racun_id != row.vkljucen_v_racun_id)
+        or (old is None and row.vkljucen_v_racun_id)
+    ):
+        raise ValidationError("Samodejno vključevanje poračunov zahteva revidirano domensko storitev.")
     if row.source_line_id:
         validate_adjustment(row)
         if old is None and (row.status != "PREDLAGAN" or row.razlog_zavrnitve):

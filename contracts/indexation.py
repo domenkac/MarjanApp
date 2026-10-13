@@ -86,7 +86,7 @@ def _fingerprint(company_id):
     return hashlib.sha256(serialized.encode()).hexdigest()
 
 
-def _late_block(item, effective_date):
+def _late_block(item, effective_date, new_rent, index_value):
     issued_or_uncertain = Q(stevilka__isnull=False) | Q(
         status__in=[
             Invoice.Status.IZBRAN_ZA_POSILJANJE,
@@ -97,21 +97,20 @@ def _late_block(item, effective_date):
             Invoice.Status.POPRAVLJEN,
         ]
     )
-    if (
-        Invoice.objects.filter(
-            issued_or_uncertain,
-            lease=item.lease,
-            document_type=Invoice.DocumentType.NP,
-            obdobje_do__gte=effective_date,
-        ).exists()
-        or InvoiceLine.objects.filter(
+    issued = Invoice.objects.filter(
+        issued_or_uncertain,
+        lease=item.lease,
+        document_type=Invoice.DocumentType.NP,
+        obdobje_do__gte=effective_date,
+    )
+    source_invoices = Invoice.objects.filter(
+        pk__in=InvoiceLine.objects.filter(
             lease_item=item,
             invoice__in=Invoice.objects.filter(issued_or_uncertain),
             invoice__document_type=Invoice.DocumentType.NP,
             invoice__obdobje_do__gte=effective_date,
-        ).exists()
-    ):
-        return "Izdan račun v prizadetem obdobju: pozna indeksacija je blokirana do T2-C (varen poračun)."
+        ).values("invoice_id")
+    )
     for batch in MonthlyBatch.objects.filter(
         company_id=item.lease.unit.property.company_id,
         cycle__trenutni_korak__gte=MonthlyCycle.Korak.POTRDITEV_PAKETA,
@@ -122,7 +121,44 @@ def _late_block(item, effective_date):
             candidate.get("lease_id") == item.lease_id
             for candidate in batch.calculation_snapshot.get("candidates", [])
         ):
+            if batch.cycle.status == MonthlyCycle.Status.ZAKLJUCEN:
+                from invoicing.adjustments import validate_consumed
+                from invoicing.models import MonthlyCandidateReview
+                from invoicing.services import stanje_zamrznjenega_mesecnega_kandidata
+
+                candidates = [candidate for candidate in batch.calculation_snapshot.get("candidates", [])
+                              if candidate.get("lease_id") == item.lease_id]
+                if len(candidates) == 1:
+                    fingerprint = candidates[0].get("candidate_fingerprint")
+                    state = stanje_zamrznjenega_mesecnega_kandidata(batch.pk, item.lease_id, fingerprint)
+                    review = MonthlyCandidateReview.objects.filter(
+                        batch=batch, lease_id=item.lease_id, candidate_fingerprint=fingerprint,
+                    ).first()
+                    if state["state"] == "MATERIALIZED" and review:
+                        invoice = state["invoice"]
+                        try:
+                            if review.selected:
+                                validate_consumed(invoice, list(invoice.invoiceline_set.all()), review=review)
+                            continue  # Completed, exactly materialized historical payload stays unchanged.
+                        except ValidationError:
+                            pass
             return "Pogodba je v zamrznjenem paketu: potrditev je blokirana; vsebina paketa ostane nespremenjena."
+    affected_ids = set(issued.values_list("pk", flat=True)) | set(source_invoices.values_list("pk", flat=True))
+    if affected_ids:
+        from .adjustments import _build, _sources
+
+        month = timezone.localdate().replace(day=1)
+        event = IndexationEvent(
+            lease_item=item, datum_uskladitve=effective_date,
+            stara_vrednost=najemnina_na_datum(item, effective_date - timedelta(days=1)),
+            nova_vrednost=new_rent, indeks_vrednost=index_value,
+        )
+        sources = list(_sources(event, month))
+        if {line.invoice_id for line in sources} != affected_ids or any(
+            _build(event, line, month, {}).evidence_state != "VERIFIED"
+            for line in sources
+        ):
+            return "Izdan račun v prizadetem obdobju: T2-C zahteva popolna preverjena dokazila; pozna indeksacija je blokirana."
     return ""
 
 
@@ -197,7 +233,7 @@ def _proposals(company, index_year, index_value):
                     else None,
                 )
                 if calculated.pogoj_izpolnjen:
-                    late = _late_block(item, effective_date)
+                    late = _late_block(item, effective_date, calculated.nova_vrednost, index_value)
                     if late:
                         raise ValidationError(late)
                     if IndexationEvent.objects.filter(

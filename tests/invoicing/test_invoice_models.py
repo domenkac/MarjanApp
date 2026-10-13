@@ -272,6 +272,9 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
         "invoice",
         "lease",
         "lease_item",
+        "adjustment",
+        "adjustment_snapshot",
+        "rent_indexation_event",
         "opis",
         "osnova",
         "ddv_stopnja",
@@ -292,6 +295,9 @@ def test_invoice_line_polja_in_nullable_lease_item(company):
     line.save()
     line.refresh_from_db()
     assert line.lease_item is None
+    assert line.adjustment_id is None
+    assert line.adjustment_snapshot == {}
+    assert line.rent_indexation_event_id is None
     assert line.lease is None
     assert line.je_sorazmerno is False
     line.je_sorazmerno = True

@@ -382,7 +382,7 @@ def test_persisted_version_contract(company, batch_version, snapshot_version):
         calculation_schema_version=batch_version, calculation_snapshot=snapshot,
     )
     task = state()
-    assert task.ready == (batch_version == snapshot_version and batch_version in {3, 4})
+    assert task.ready == (batch_version == snapshot_version and batch_version in {3, 4, 5})
     if not task.ready:
         assert task.issue_code == "MONTHLY_SNAPSHOT_NOT_READY"
         assert task.state != "ZAKLJUCENO"

@@ -207,6 +207,15 @@ def _frozen_non_issue(company, *, user_reason=None, system_reason=None, period=d
             else {"net": "100.00", "vat": "22.00", "total": "122.00"}
         ),
         "delivery_contacts": {},
+        "adjustments": [],
+        "eslog_configuration": {
+            "version": "eslog-2.0-v200-config-v1",
+            "segments": {
+                "elektronski_naslov_kupca_vkljucen": False,
+                "kontaktni_podatki_kupca_vkljuceni": False,
+            },
+            "fields": {},
+        },
         "pdf_template_version": "1",
         "will_issue": system_reason is None,
         "non_issue_reason": system_reason or "",

@@ -52,8 +52,10 @@ from core.validators import (
 from delivery.credentials import KeyringCredentialRef
 from delivery.transport import SmtpConfig
 
+from . import adjustments as adjustment_services
 from .backup_hooks import monthly_backup
 from .models import (
+    AdjustmentReservation,
     Invoice,
     InvoiceLine,
     MonthlyBatch,
@@ -1055,6 +1057,8 @@ def dodaj_vrstico(invoice: Invoice, **podatki) -> InvoiceLine:
 @transaction.atomic
 def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
     sveza = InvoiceLine.objects.get(pk=vrstica.pk)
+    if sveza.adjustment_id:
+        raise ValidationError("Potrjene vrstice poračuna ni dovoljeno ročno spreminjati.")
     invoice = preveri_uredljiv_osnutek(sveza.invoice)
     if invoice.document_type == Invoice.DocumentType.STORNO:
         raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
@@ -1072,6 +1076,8 @@ def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
 @transaction.atomic
 def izbrisi_vrstico(vrstica: InvoiceLine) -> None:
     sveza = InvoiceLine.objects.get(pk=vrstica.pk)
+    if sveza.adjustment_id:
+        raise ValidationError("Rezervirane vrstice poračuna ni dovoljeno izbrisati.")
     invoice = preveri_uredljiv_osnutek(sveza.invoice)
     if invoice.document_type == Invoice.DocumentType.STORNO:
         raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
@@ -1079,8 +1085,21 @@ def izbrisi_vrstico(vrstica: InvoiceLine) -> None:
 
 
 @transaction.atomic
-def izbrisi_racun(invoice: Invoice) -> None:
-    preveri_uredljiv_osnutek(invoice).delete()
+def izbrisi_racun(invoice: Invoice, *, razlog: str = "") -> None:
+    current = Invoice.objects.filter(pk=invoice.pk).first()
+    if current is None or (
+        current.document_type == Invoice.DocumentType.NP and (
+            razlog or AdjustmentReservation.objects.filter(invoice=current).exists()
+            or current.invoiceline_set.filter(adjustment__isnull=False).exists()
+        )
+    ):
+        preklici_osnutek_np(invoice, razlog=razlog)
+        return
+    preveri_uredljiv_osnutek(current).delete()
+
+
+def preklici_osnutek_np(invoice: Invoice, *, razlog: str) -> bool:
+    return adjustment_services.cancel_direct_draft(invoice, reason=razlog)
 
 
 @transaction.atomic
@@ -1136,6 +1155,9 @@ def pripravi_osnutek_np(
     for vrstica in vrstice:
         vrstica.invoice = invoice
     InvoiceLine.objects.bulk_create(vrstice)
+    adjustment_services.reserve(
+        [line.adjustment_snapshot for line in vrstice if line.adjustment_id], invoice=invoice,
+    )
     return PripravaOsnutka(invoice)
 
 
@@ -1149,6 +1171,10 @@ def _potrdi_osnutek_np(
     podpis_vir: str,
     podpis_pot: str,
 ) -> Invoice:
+    existing = Invoice.objects.get(pk=osnutek.pk)
+    if existing.stevilka and existing.invoiceline_set.filter(adjustment__isnull=False).exists():
+        adjustment_services.validate_consumed(existing, list(existing.invoiceline_set.all()))
+        return existing
     invoice = preveri_uredljiv_osnutek(osnutek)
     if invoice.document_type != Invoice.DocumentType.NP:
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
@@ -1196,6 +1222,8 @@ def _potrdi_osnutek_np(
     _preveri_ddv_klavzule(vrstice)
     _preveri_mesanje_eslog_o(vrstice)
 
+    reservations = adjustment_services.validate_before_numbering(invoice, vrstice)
+
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
     invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
@@ -1230,11 +1258,23 @@ def _potrdi_osnutek_np(
             "eslog_konfiguracija_snapshot",
         ]
     )
+    adjustment_services.consume(invoice, reservations)
     return invoice
 
 
 def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
-    invoice = preveri_uredljiv_osnutek(osnutek)
+    existing = Invoice.objects.get(pk=osnutek.pk)
+    if (existing.stevilka and existing.document_type == Invoice.DocumentType.NP
+            and existing.invoiceline_set.filter(adjustment__isnull=False).exists()):
+        with transaction.atomic():
+            existing = Invoice.objects.get(pk=osnutek.pk)
+            adjustment_services.validate_consumed(
+                existing, list(existing.invoiceline_set.all()),
+            )
+            return existing
+    invoice = existing
+    if invoice.status != Invoice.Status.OSNUTEK or invoice.stevilka is not None:
+        raise ValueError("Račun ni neoštevilčen osnutek.")
     if (
         invoice.lease_id is None
         or invoice.company_id != invoice.lease.unit.property.company_id
@@ -1577,10 +1617,12 @@ def _razlozi_delta_postavke(
             IndexationEvent.objects.filter(
                 lease_item_id=lease_item_id,
                 izkljucen=False,
-                datum_uskladitve__gt=prejsnji.obdobje_do,
                 datum_uskladitve__lte=osnutek.obdobje_do,
             ).order_by("datum_uskladitve", "pk")
         )
+        # Late approval can explain old rent billed after the effective date.
+        while dogodki and dogodki[0].stara_vrednost != stara.osnova:
+            dogodki.pop(0)
         if (
             dogodki
             and not stara.je_sorazmerno
@@ -1680,10 +1722,11 @@ def _primerjaj_delta_np(
         if prejsnji.obdobje_do + timedelta(days=1) < osnutek.obdobje_od
         else ()
     )
-    stare_vrstice = list(InvoiceLine.objects.filter(invoice=prejsnji))
+    stare_vrstice = list(InvoiceLine.objects.filter(invoice=prejsnji, adjustment__isnull=True))
+    nove_vrstice = [line for line in nove_vrstice if not line.adjustment_id]
     stari_znesek = (
         prejsnji.skupaj_z_ddv
-        if prejsnji.skupaj_z_ddv is not None
+        if prejsnji.skupaj_z_ddv is not None and not prejsnji.invoiceline_set.filter(adjustment__isnull=False).exists()
         else sum((v.skupaj for v in stare_vrstice), Decimal("0.00"))
     )
     novi_znesek = sum((v.skupaj for v in nove_vrstice), Decimal("0.00"))
@@ -1755,6 +1798,10 @@ def _izracunaj_vrstice_np(
             InvoiceLine(
                 lease=pogodba,
                 lease_item=postavka,
+                rent_indexation_event=IndexationEvent.objects.filter(
+                    lease_item=postavka, izkljucen=False,
+                    datum_uskladitve__lte=max(obdobje_od, efektivna_veljavnost_postavke(postavka)[0]),
+                ).order_by("-datum_uskladitve", "-pk").first(),
                 ddv_rezim_sifra=postavka.vat_regime.sifra,
                 ddv_zahteva_polni_odbitek=postavka.vat_regime.zahteva_polni_odbitek,
                 opis=(
@@ -1784,12 +1831,17 @@ def _first_indexation_exceptions(lines, period_start, period_end):
         lease_item_id__in=[line.lease_item_id for line in lines],
         izkljucen=False, datum_uskladitve__lte=period_end,
     ).order_by("pk"):
+        previous_use = Q(rent_indexation_event__datum_uskladitve__gte=event.datum_uskladitve)
+        if event.nova_vrednost != event.stara_vrednost:
+            previous_use |= Q(osnova=event.nova_vrednost, je_sorazmerno=False)
         if not InvoiceLine.objects.filter(
+            previous_use,
             lease_item_id=event.lease_item_id,
             invoice__document_type=Invoice.DocumentType.NP,
             invoice__stevilka__isnull=False,
             invoice__obdobje_do__gte=event.datum_uskladitve,
             invoice__obdobje_od__lt=period_start,
+            adjustment__isnull=True,
         ).exists():
             exceptions.append(DeltaRazlaga(
                 event.lease_item_id, "PRVA_INDEKSACIJA",
@@ -1818,6 +1870,7 @@ def izracunaj_kandidata(
 
     lease = vrstice[0].lease
     company = lease.unit.property.company
+    vrstice = (*vrstice, *adjustment_services.candidate_lines(lease.pk, obdobje_od))
     skupaj = sum((vrstica.skupaj for vrstica in vrstice), Decimal("0.00"))
     blokade = preveri_predpogoje_podjetja(company, datum_izdaje)
     if blokade:
@@ -1835,6 +1888,9 @@ def izracunaj_kandidata(
         if v.je_sorazmerno
     ]
     izjeme.extend(_first_indexation_exceptions(vrstice, obdobje_od, obdobje_do))
+    izjeme.extend(DeltaRazlaga(
+        line.lease_item_id, "PORACUN_INDEKSACIJE", line.opis,
+    ) for line in vrstice if line.adjustment_id)
     osnutek = Invoice(
         company=company,
         lease=lease,
@@ -1849,7 +1905,7 @@ def izracunaj_kandidata(
     return RacunKandidat(vrstice, skupaj, True, tuple(izjeme))
 
 
-CALCULATION_SNAPSHOT_VERSION = 4
+CALCULATION_SNAPSHOT_VERSION = 5
 
 
 def _decimal_string(value: Decimal | None) -> str | None:
@@ -1866,7 +1922,7 @@ def _previous_invoice_snapshot(invoice_id: int | None) -> dict | None:
             InvoiceLine.objects.filter(invoice=invoice).values_list("skupaj", flat=True),
             Decimal("0.00"),
         )
-    lines = InvoiceLine.objects.filter(invoice=invoice).order_by(
+    lines = InvoiceLine.objects.filter(invoice=invoice, adjustment__isnull=True).order_by(
         "lease_item_id", "pk"
     )
     is_migration_baseline = (
@@ -2105,6 +2161,8 @@ def _monthly_candidate(lease, period_start, period_end, issue_date):
     lines = _izracunaj_vrstice_np(
         lease, period_start, period_end, validate_eslog=False
     )
+    if lines:
+        lines = (*lines, *adjustment_services.candidate_lines(lease.pk, period_start))
     total = sum((line.skupaj for line in lines), Decimal("0.00"))
     draft = Invoice(
         company=lease.unit.property.company,
@@ -2135,6 +2193,9 @@ def _monthly_candidate(lease, period_start, period_end, issue_date):
         ]
         exceptions.extend(item for item in delta.razlage if item.koda != "BREZ_RAZLIKE")
         exceptions.extend(_first_indexation_exceptions(lines, period_start, period_end))
+        exceptions.extend(DeltaRazlaga(
+            line.lease_item_id, "PORACUN_INDEKSACIJE", line.opis,
+        ) for line in lines if line.adjustment_id)
         candidate = RacunKandidat(lines, total, True, tuple(exceptions))
     return candidate, delta
 
@@ -2238,6 +2299,14 @@ def _calculation_snapshot(batch, cycle, issues):
             key=lambda item: (item["code"], item["lease_item_id"] or 0, item["message"]),
         )
         lines = [{
+            "rent_indexation_event_id": line.rent_indexation_event_id,
+            "adjustment_id": line.adjustment_id,
+            "adjustment_snapshot": line.adjustment_snapshot,
+            "vat_eslog_code": line.ddv_eslog_koda or _preveri_eslog_kodo(
+                line.ddv_nacin_obracuna,
+                line.lease_item.vat_regime.eslog_koda or ESLOG_KODE_DDV.get(line.ddv_nacin_obracuna, ""),
+                "DDV režim mesečne vrstice",
+            ),
             "lease_item_id": line.lease_item_id, "description": line.opis,
             "net": _decimal_string(line.osnova),
             "vat_rate": _decimal_string(line.ddv_stopnja),
@@ -2260,7 +2329,7 @@ def _calculation_snapshot(batch, cycle, issues):
                 ),
             ))
         exceptions.extend(_comparison_exceptions(current_header, previous))
-        exceptions.extend(_vat_exceptions(lines, previous))
+        exceptions.extend(_vat_exceptions([line for line in lines if not line["adjustment_id"]], previous))
         exceptions.extend(_lifecycle_exceptions(lease, cycle.obdobje, period_end))
         archived = _previous_month_archived_snapshot(lease, cycle.obdobje)
         if archived["exists"]:
@@ -2310,6 +2379,7 @@ def _calculation_snapshot(batch, cycle, issues):
                 for contact in contacts
             ],
             "delivery_contacts": delivery,
+            "eslog_configuration": _razresi_eslog_snapshot(Invoice(company=company, lease=lease)),
             "historical_delivery_contacts_available": bool(
                 previous and previous["delivery_contacts_available"]
             ),
@@ -2319,6 +2389,7 @@ def _calculation_snapshot(batch, cycle, issues):
             "will_issue": candidate.se_izda,
             "non_issue_reason": candidate.razlog_neizdaje,
             "lines": lines,
+            "adjustments": [line["adjustment_snapshot"] for line in lines if line["adjustment_id"]],
             "totals": {
                 "net": _decimal_string(sum((line.osnova for line in candidate.vrstice), Decimal("0.00"))),
                 "vat": _decimal_string(sum((line.ddv_znesek for line in candidate.vrstice), Decimal("0.00"))),
@@ -2356,7 +2427,7 @@ def aktivni_izracuni_mesecnega_cikla(cycle: MonthlyCycle):
     if cycle.trenutni_korak in (
         MonthlyCycle.Korak.POTRDITEV_PAKETA, MonthlyCycle.Korak.ZAKLJUCEK
     ):
-        versions.append(3)  # Old frozen batches: only exact issued retries may succeed.
+        versions.extend([3, 4])  # Preserve legacy frozen packages and T1 validation.
     return cycle.batches.filter(
         preflight_status=MonthlyBatch.PreflightStatus.PASSED,
         calculation_status=MonthlyBatch.CalculationStatus.CALCULATED,
@@ -2501,6 +2572,19 @@ def zamrzni_paket_za_potrditev(cycle: MonthlyCycle) -> MonthlyCycle:
                 if review.requires_confirmation and review.confirmed_at is None:
                     raise ValidationError("Izjema izbranega kandidata ni potrjena.")
                 _preveri_izdajni_snapshot(candidate)
+                if candidate.get("adjustments"):
+                    prepared = preveri_integriteto_zamrznjenega_kandidata(
+                        batch.calculation_snapshot, candidate, review,
+                    )
+                    fields = _polja_racuna_iz_zamrznjenega_posnetka(batch, candidate, prepared, review)
+                    adjustment_services.reserve(candidate["adjustments"], review=review)
+                    adjustment_services.validate_before_numbering(
+                        Invoice(**fields),
+                        [InvoiceLine(lease_id=lease_id, **line) for line in prepared["lines"]],
+                        review=review,
+                    )
+                elif adjustment_services.outstanding(lease_id, cycle.obdobje).exists():
+                    raise ValidationError("Manjka potrjen poračun; ponovite pregled kandidata.")
             elif will_issue and not review.non_issue_reason.strip():
                 raise ValidationError("Manjka razlog neizdaje kandidata.")
             elif not will_issue and not str(
@@ -2672,7 +2756,7 @@ def preveri_integriteto_zamrznjenega_mesecnega_posnetka(
         or snapshot["schema_version"] != batch.calculation_schema_version
     ):
         raise ValidationError("Različica zamrznjenega posnetka se ne ujema z različico paketa.")
-    if snapshot.get("schema_version") != CALCULATION_SNAPSHOT_VERSION and not (
+    if snapshot.get("schema_version") not in (4, CALCULATION_SNAPSHOT_VERSION) and not (
         allow_legacy_snapshot and snapshot.get("schema_version") == 3
     ):
         raise ValidationError("Razli\u010dica zamrznjenega posnetka ni podprta.")
@@ -2732,8 +2816,22 @@ def preveri_integriteto_zamrznjenega_kandidata(
     )
     if candidate["candidate_fingerprint"] != expected_fingerprint:
         raise ValidationError("Prstni odtis zamrznjenega kandidata ni veljaven.")
-    if snapshot["schema_version"] == CALCULATION_SNAPSHOT_VERSION:
+    if snapshot["schema_version"] >= 4:
         _preveri_ddv_dokazila_kandidata(candidate)
+    if snapshot["schema_version"] >= 5:
+        if "eslog_configuration" not in candidate:
+            raise ValidationError("Manjka posnetna eSLOG konfiguracija.")
+        if review.requires_confirmation != bool(candidate.get("exceptions")) and candidate["will_issue"]:
+            raise ValidationError("Pregled ne odraža izjem zamrznjenega kandidata.")
+        snapshots = candidate.get("adjustments")
+        if not isinstance(snapshots, list) or snapshots != [
+            line.get("adjustment_snapshot") for line in candidate["lines"]
+            if line.get("adjustment_id")
+        ] or any(
+            line.get("adjustment_id") != line.get("adjustment_snapshot", {}).get("id")
+            for line in candidate["lines"] if line.get("adjustment_id")
+        ):
+            raise ValidationError("Identitete poračunov v posnetku niso skladne.")
     if candidate["pdf_template_version"] != snapshot["pdf_template_version"]:
         raise ValidationError("Razli\u010dica PDF-predloge kandidata ni skladna s paketom.")
     for checksum in (company["logo_checksum"], signatory["signature_checksum"]):
@@ -2768,6 +2866,13 @@ def preveri_integriteto_zamrznjenega_kandidata(
                 "ddv_rekap_skupina": line["vat_summary_group"],
                 "je_sorazmerno": line["proportional"],
             }
+            if snapshot["schema_version"] >= 5:
+                parsed.update(
+                    rent_indexation_event_id=line.get("rent_indexation_event_id"),
+                    adjustment_id=line.get("adjustment_id") if review.selected else None,
+                    adjustment_snapshot=line.get("adjustment_snapshot", {}),
+                    ddv_eslog_koda=line.get("vat_eslog_code", ""),
+                )
         except (KeyError, TypeError, ValueError) as exc:
             raise ValidationError(f"Vrstica {index} v zamrznjenem posnetku ni veljavna.") from exc
         if parsed["osnova"] + parsed["ddv_znesek"] != parsed["skupaj"]:
@@ -2837,7 +2942,9 @@ def _polja_racuna_iz_zamrznjenega_posnetka(batch, candidate, prepared, review):
         "osnova_skupaj": prepared["totals"]["net"], "ddv_skupaj": prepared["totals"]["vat"],
         "skupaj_z_ddv": prepared["totals"]["total"],
         "dostavni_kontakti_snapshot": candidate["delivery_contacts"],
-        "eslog_konfiguracija_snapshot": None,
+        "eslog_konfiguracija_snapshot": (
+            candidate["eslog_configuration"] if batch.calculation_schema_version >= 5 else None
+        ),
         "povezan_racun_id": None,
         "razlog": "",
     }
@@ -2851,9 +2958,11 @@ def _racun_se_natancno_ujema(invoice, fields, lines):
             invoice.lease_id, line["lease_item_id"], line["opis"],
             line["osnova"], line["ddv_stopnja"], line["ddv_znesek"],
             line["skupaj"], line["ddv_nacin_obracuna"],
-            line["ddv_klavzula"], line["ddv_rekap_skupina"], "",
+            line["ddv_klavzula"], line["ddv_rekap_skupina"], line.get("ddv_eslog_koda", ""),
             line["je_sorazmerno"], None, None,
             line["ddv_rezim_sifra"], line["ddv_zahteva_polni_odbitek"],
+            line.get("adjustment_id"), line.get("adjustment_snapshot", {}),
+            line.get("rent_indexation_event_id"),
         )
         for line in lines
     ]
@@ -2863,6 +2972,8 @@ def _racun_se_natancno_ujema(invoice, fields, lines):
         "ddv_rekap_skupina", "ddv_eslog_koda", "je_sorazmerno",
         "razlog_rocnega_popravka", "izvirno_izracunana_vrednost",
         "ddv_rezim_sifra", "ddv_zahteva_polni_odbitek",
+        "adjustment_id", "adjustment_snapshot",
+        "rent_indexation_event_id",
     ))
     return actual == expected
 
@@ -3017,8 +3128,17 @@ def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidat
         if state == "CONFLICT":
             raise ValidationError(error)
         if state == "MATERIALIZED":
+            if review.selected:
+                adjustment_services.validate_consumed(
+                    invoice, list(invoice.invoiceline_set.all()), review=review,
+                )
             return invoice, True
         if review.selected:
+            reservations = adjustment_services.validate_before_numbering(
+                Invoice(**fields),
+                [InvoiceLine(lease_id=lease_id, **line) for line in prepared["lines"]],
+                review=review,
+            )
             zaporedna = dodeli_naslednjo_stevilko(batch.company, NumberSequence.Tip.NP, prepared["issue_date"])
             fields["stevilka"] = f"NP-{zaporedna:05d}"
         else:
@@ -3027,6 +3147,8 @@ def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidat
         InvoiceLine.objects.bulk_create([
             InvoiceLine(invoice=invoice, lease_id=lease_id, **line) for line in prepared["lines"]
         ])
+        if review.selected:
+            adjustment_services.consume(invoice, reservations)
         return invoice, False
 
 

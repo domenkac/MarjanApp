@@ -4,6 +4,7 @@ from decimal import Decimal
 import pytest
 from django.core.exceptions import ValidationError
 
+from companies.models import NumberSequence
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem
 from contracts.services import potrdi_indeksacijo, razveljavi_indeksacijo
@@ -53,7 +54,7 @@ def test_pravi_osnutki_in_izdani_posnetki_ostanejo(pogodba):  # noqa: F811
     assert marec.stevilka == "NP-00003"
 
 
-def test_zamrznjen_paket_ohrani_vsebino_in_retry(ready_company, potrdi_septembrski_vzorec):  # noqa: F811
+def test_zastarel_zamrznjen_paket_blokira_izdajo_in_ohrani_vsebino(ready_company, potrdi_septembrski_vzorec):  # noqa: F811
     data = ready_company
     item = data["item"]
     lease = data["lease"]
@@ -72,11 +73,41 @@ def test_zamrznjen_paket_ohrani_vsebino_in_retry(ready_company, potrdi_septembrs
     with pytest.raises(ValidationError, match="zamrznjenem"):
         razveljavi_indeksacijo(event)
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
-    assert all(result["ok"] for result in first)
+    assert all(not result["ok"] for result in first)
+    assert "zastarel" in first[0]["error"]
     lines = list(InvoiceLine.objects.values())
     retry = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
-    assert all(result["ok"] and result["reused"] for result in retry)
+    assert all(not result["ok"] for result in retry)
+    assert not Invoice.objects.exists() and not NumberSequence.objects.exists()
     assert list(InvoiceLine.objects.values()) == lines
+    assert list(MonthlyBatch.objects.values("calculation_snapshot", "calculation_schema_version")) == before
+
+
+def test_veljaven_indeksiran_zamrznjen_paket_ohrani_uspesno_izdajo_in_retry(
+    ready_company, potrdi_septembrski_vzorec,  # noqa: F811
+):
+    data = ready_company
+    item, lease = data["item"], data["lease"]
+    lease.ima_klavzulo_indeksacije = True
+    lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
+    lease.save()
+    item.indeks_ob_osnovi = Decimal("100.000")
+    item.datum_osnove_indeksacije = date(2026, 1, 1)
+    item.save()
+    potrdi_indeksacijo(item, Decimal("110.000"), date(2026, 3, 15), indeks_leto=2025)
+    potrdi_ddv_nastavitve(data["company"])
+    potrdi_septembrski_vzorec(data["company"], lease)
+    _freeze_ready_package(data)
+    before = list(MonthlyBatch.objects.values("calculation_snapshot", "calculation_schema_version"))
+    first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    assert all(result["ok"] and not result["reused"] for result in first)
+    assert first[0]["invoice"].osnova_skupaj == Decimal("110.00")
+    invoices, lines = list(Invoice.objects.values()), list(InvoiceLine.objects.values())
+    retry = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
+    assert all(result["ok"] and result["reused"] for result in retry)
+    assert list(Invoice.objects.values()) == invoices
+    assert list(InvoiceLine.objects.values()) == lines
+    assert NumberSequence.objects.get().zadnja_stevilka == 1
     assert list(MonthlyBatch.objects.values("calculation_snapshot", "calculation_schema_version")) == before
 
 

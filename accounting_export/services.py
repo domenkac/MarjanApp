@@ -162,7 +162,7 @@ def _completed_monthly_batch(company, period):
         batch.cycle.status != MonthlyCycle.Status.ZAKLJUCEN
         or batch.cycle.trenutni_korak != MonthlyCycle.Korak.ZAKLJUCEK
         or batch.calculation_status != MonthlyBatch.CalculationStatus.CALCULATED
-        or batch.calculation_schema_version not in {3, CALCULATION_SNAPSHOT_VERSION}
+        or batch.calculation_schema_version not in {3, 4, CALCULATION_SNAPSHOT_VERSION}
     ):
         raise ValidationError(
             "Accountant report requires completed monthly evidence."

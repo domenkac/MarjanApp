@@ -12,8 +12,10 @@ from invoicing.services import (
     izracunaj_kandidata,
     izracunaj_mesecne_kandidate,
     potrdi_izjemo_kandidata,
+    potrdi_osnutek_np,
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
+    pripravi_osnutek_np,
     uskladi_preglede_mesecnega_cikla,
     zamrzni_paket_za_potrditev,
 )
@@ -88,4 +90,14 @@ def test_january_unaffected_and_review_not_repeated_after_first_issue(ready_comp
     march = izracunaj_kandidata(
         data["lease"], date(2026, 3, 1), date(2026, 3, 31), date(2026, 3, 1)
     )
-    assert not any(row.koda == "PRVA_INDEKSACIJA" for row in march.izjeme)
+    assert any(row.koda == "PRVA_INDEKSACIJA" for row in march.izjeme)
+    first = potrdi_osnutek_np(pripravi_osnutek_np(
+        data["lease"], date(2026, 3, 1), date(2026, 3, 31), date(2026, 3, 1),
+    ).invoice)
+    line = first.invoiceline_set.get()
+    assert line.osnova == Decimal("110.00") and line.ddv_znesek == Decimal("24.20")
+    assert line.rent_indexation_event_id is not None
+    april = izracunaj_kandidata(
+        data["lease"], date(2026, 4, 1), date(2026, 4, 30), date(2026, 4, 1)
+    )
+    assert not any(row.koda == "PRVA_INDEKSACIJA" for row in april.izjeme)

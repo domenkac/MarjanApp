@@ -503,12 +503,12 @@ def test_previous_month_archived_not_issued_evidence(ready_company, reason, expe
     ) is expected
 
 
-def test_snapshot_v4_fingerprint_and_pdf_contract(ready_company, settings):
+def test_snapshot_v5_fingerprint_and_pdf_contract(ready_company, settings):
     candidate = _calculate(ready_company)[0]
 
-    assert CALCULATION_SNAPSHOT_VERSION == 4
-    assert ready_company["batch"].calculation_schema_version == 4
-    assert ready_company["batch"].calculation_snapshot["schema_version"] == 4
+    assert CALCULATION_SNAPSHOT_VERSION == 5
+    assert ready_company["batch"].calculation_schema_version == 5
+    assert ready_company["batch"].calculation_snapshot["schema_version"] == 5
     assert candidate["pdf_template_version"] == settings.PDF_TEMPLATE_VERSION
     assert len(candidate["candidate_fingerprint"]) == 64
     assert candidate["lease_state"] == {
@@ -696,7 +696,7 @@ def test_step4_partial_calculation_upgrades_old_schema(ready_company):
 
     assert [batch.pk for batch in result] == [data["batch"].pk]
     assert data["cycle"].trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
-    assert data["batch"].calculation_schema_version == 4
+    assert data["batch"].calculation_schema_version == 5
     assert len(data["batch"].calculation_snapshot["candidates"][0][
         "candidate_fingerprint"
     ]) == 64
@@ -1710,7 +1710,7 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     assert invoice.dostavni_kontakti_snapshot == candidate["delivery_contacts"]
     assert line.opis == candidate["lines"][0]["description"]
     assert line.osnova == Decimal(candidate["lines"][0]["net"])
-    assert line.ddv_eslog_koda == ""
+    assert line.ddv_eslog_koda == "S"
     assert NumberSequence.objects.get().zadnja_stevilka == 1
     assert invoice.rendered_pdf_path == invoice.checksum == ""
     assert invoice.rendered_eslog_path == invoice.rendered_eslog_checksum == ""

@@ -348,8 +348,8 @@ def test_legacy_frozen_snapshot_only_allows_exact_issued_retry(ready_company, is
     candidate, _review = _freeze_ready_package(data)
     if issued:
         assert izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["ok"]
-        Invoice.objects.update(prejemnik_polni_odbitek=None)
-        InvoiceLine.objects.update(ddv_rezim_sifra="", ddv_zahteva_polni_odbitek=None)
+        Invoice.objects.update(prejemnik_polni_odbitek=None, eslog_konfiguracija_snapshot=None)
+        InvoiceLine.objects.update(ddv_rezim_sifra="", ddv_zahteva_polni_odbitek=None, ddv_eslog_koda="")
     data["batch"].refresh_from_db()
     snapshot = deepcopy(data["batch"].calculation_snapshot)
     snapshot["schema_version"] = 3

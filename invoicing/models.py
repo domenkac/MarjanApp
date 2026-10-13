@@ -224,6 +224,15 @@ class Invoice(models.Model):
 
 
 class InvoiceLine(models.Model):
+    rent_indexation_event = models.ForeignKey(
+        "contracts.IndexationEvent", on_delete=models.PROTECT,
+        null=True, blank=True, editable=False,
+    )
+    adjustment = models.OneToOneField(
+        "contracts.PoracunIndeksacije", on_delete=models.PROTECT,
+        null=True, blank=True, related_name="target_line", editable=False,
+    )
+    adjustment_snapshot = models.JSONField(default=dict, blank=True, editable=False)
     invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT)
     lease = models.ForeignKey(
         "contracts.Lease", on_delete=models.PROTECT, null=True, blank=True
@@ -261,3 +270,41 @@ class InvoiceLine(models.Model):
             raise ValidationError(
                 {"razlog_rocnega_popravka": "Razlog ročnega popravka je obvezen."}
             )
+
+
+class AdjustmentReservation(models.Model):
+    """One durable owner per adjustment, retained after consumption."""
+
+    adjustment = models.OneToOneField(
+        "contracts.PoracunIndeksacije", on_delete=models.PROTECT,
+        related_name="reservation",
+    )
+    invoice = models.ForeignKey(Invoice, on_delete=models.PROTECT, null=True, blank=True)
+    review = models.ForeignKey(
+        MonthlyCandidateReview, on_delete=models.PROTECT, null=True, blank=True,
+    )
+    evidence = models.JSONField()
+    reserved_at = models.DateTimeField(auto_now_add=True)
+    consumed_invoice = models.ForeignKey(
+        Invoice, on_delete=models.PROTECT, null=True, blank=True,
+        related_name="consumed_adjustment_reservations",
+    )
+    consumed_at = models.DateTimeField(null=True, blank=True)
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=(
+                    models.Q(invoice__isnull=False, review__isnull=True)
+                    | models.Q(invoice__isnull=True, review__isnull=False)
+                ),
+                name="adjustment_reservation_one_owner",
+            ),
+            models.CheckConstraint(
+                condition=(
+                    models.Q(consumed_invoice__isnull=True, consumed_at__isnull=True)
+                    | models.Q(consumed_invoice__isnull=False, consumed_at__isnull=False)
+                ),
+                name="adjustment_consumption_complete",
+            ),
+        ]
