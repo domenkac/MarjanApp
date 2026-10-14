@@ -1,0 +1,5 @@
+{% extends "ui/base.html" %}
+{% block content %}
+<div class="form-errors" role="alert">Neveljaven korak začetne nastavitve.</div>
+<a href="{% url 'ui:first_run_setup' %}">Nadaljuj začetno nastavitev</a>
+{% endblock %}

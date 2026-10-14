@@ -11,5 +11,6 @@
       <span class="nav-item is-disabled{% if active_section == 'arhiv' %} is-active{% endif %}"{% if active_section == 'arhiv' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">archive</span>Arhiv</span>
       <a class="nav-item{% if active_section == 'nastavitve' %} is-active{% endif %}" href="{% url 'ui:nastavitve' %}"{% if active_section == 'nastavitve' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">settings</span>Nastavitve</a>
     </nav>
+    <a class="nav-item{% if active_section == 'setup' %} is-active{% endif %}" href="{% url 'ui:first_run_setup' %}"{% if active_section == 'setup' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">checklist</span>Začetna nastavitev</a>
   </div>
 </aside>

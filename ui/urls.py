@@ -6,6 +6,7 @@ from .indexation import (
     indexation_detail,
     indexation_list,
 )
+from .setup import first_run_setup
 from .views import (
     accountant_arbitrary_csv,
     accountant_arbitrary_export,
@@ -71,6 +72,7 @@ from .views import (
 app_name = "ui"
 
 urlpatterns = [
+    path("zacetna-nastavitev/", first_run_setup, name="first_run_setup"),
     path("pogodbe/<int:lease_id>/podaljsaj/", pogodba_podaljsaj, name="pogodba_podaljsaj"),
     path("indeksacija/", indexation_list, name="indexation_list"),
     path("pogodbe/poracuni/", adjustment_list, name="adjustment_list"),

@@ -1,0 +1,2 @@
+<span class="status-badge{% if result.stanje == 'valid' %} is-passed{% elif result.stanje == 'stale' %} is-blocked{% endif %}">{% if result.stanje == 'valid' %}Veljavna{% elif result.stanje == 'stale' %}Zastarela{% else %}Manjka{% endif %}</span>
+{% if result.potrditev %}<small>{{ result.potrditev.confirmed_at|date:"d. m. Y H:i" }}</small>{% endif %}

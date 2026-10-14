@@ -3,6 +3,7 @@
 {% block title %}Nadzorna plošča · Marjan{% endblock %}
 
 {% block content %}
+<p class="form-note"><a href="{% url 'ui:first_run_setup' %}">Začni ali nadaljuj začetno nastavitev</a>. Preverite celotno verigo podatkov in potrditve podjetij.</p>
 {% if backup_error %}<p class="form-note" role="alert">Mesečno stanje je shranjeno. Varnostne kopije ni bilo mogoče ustvariti in preveriti. Preverite nastavitve arhiva in ustvarite kopijo ročno.</p>{% endif %}
 <header class="page-heading dashboard-heading">
   <div>
