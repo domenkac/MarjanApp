@@ -104,7 +104,9 @@
 <div class="review-table-wrap"><table class="review-table"><thead><tr><th>Podjetje / izdajatelj</th><th>Številka računa</th><th>Stanje dostave</th><th>Sporočilo</th></tr></thead><tbody>
 {% for item in delivery_state.per_invoice %}<tr><td><strong>{{ item.issuer_label }}</strong></td><td>{{ item.invoice_number }}</td><td>{% if item.delivery_state == 'DELIVERY_NOT_PREPARED' %}Ni pripravljeno{% elif item.delivery_state == 'DELIVERY_PREPARED' %}Pripravljeno za pošiljanje{% elif item.delivery_state == 'DELIVERY_IN_PROGRESS' %}Pošiljanje je v teku{% elif item.delivery_state == 'DELIVERY_SENT' %}Poslano{% elif item.delivery_state == 'DELIVERY_FAILED' %}Pošiljanje ni uspelo{% elif item.delivery_state == 'DELIVERY_UNKNOWN' %}Rezultat pošiljanja ni znan{% else %}Neskladje{% endif %}</td><td>
 {% if item.delivery_state == 'DELIVERY_UNKNOWN' %}
-<p>Rezultat pošiljanja ni znan.</p>
+<p>Rezultat ni znan – potrebno preverjanje.</p>
+<p>{{ item.message }}</p>
+{% if item.latest_attempt_result_code %}<p>{{ item.latest_attempt_result_code }}</p>{% endif %}
 <p>Preverite mapo Poslano pri ponudniku e-pošte.</p>
 <form method="post">
   {% csrf_token %}

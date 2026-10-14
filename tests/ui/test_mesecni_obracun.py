@@ -1,4 +1,5 @@
 import re
+from contextlib import nullcontext
 from copy import deepcopy
 from datetime import date
 
@@ -14,6 +15,7 @@ from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
 from core.models import AuditLogEntry
 from delivery.credentials import KeyringCredentialRef
+from delivery.execution import delivery_execution_lock
 from delivery.models import DeliveryAttempt
 from delivery.services import (
     UNKNOWN_RESOLUTION_FIELD,
@@ -1498,7 +1500,7 @@ def test_unknown_resolution_get_is_read_only_and_shows_both_decisions(
         "attempt_id": attempt.pk, "reason": "Checked",
     })
     content = response.content.decode()
-    assert "Rezultat pošiljanja ni znan." in content
+    assert "Rezultat ni znan – potrebno preverjanje." in content
     assert "Preverite mapo Poslano pri ponudniku e-pošte." in content
     assert "Potrdi, da je bilo poslano" in content
     assert "Potrdi, da ni bilo poslano" in content
@@ -1525,7 +1527,8 @@ def test_other_delivery_states_have_no_unknown_form(
             mark_confirmed_failure(attempt, code="SMTP_REJECTED")
         elif state == "conflict":
             Invoice.objects.filter(pk=attempt.invoice_id).update(checksum="f" * 64)
-    content = client.get("/mesecni-obracun/").content.decode()
+    with delivery_execution_lock(attempt.pk) if state == "started" else nullcontext():
+        content = client.get("/mesecni-obracun/").content.decode()
     assert 'value="unknown_sent"' not in content
     assert 'value="unknown_not_sent"' not in content
     assert 'name="reason"' not in content
@@ -1832,12 +1835,14 @@ def test_step6_post_ne_ponovi_dostave_v_teku(
         lambda *_args, **_kwargs: pytest.fail("Dostave v teku se ne sme poslati znova."),
     )
 
-    response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
+    with delivery_execution_lock(attempt.pk) as acquired:
+        assert acquired
+        response = client.post("/mesecni-obracun/", {"action": "send_delivery"})
 
-    assert response.status_code == 302
-    assert DeliveryAttempt.objects.count() == 1
-    attempt.refresh_from_db()
-    assert attempt.result == DeliveryAttempt.Result.SUBMISSION_STARTED
+        assert response.status_code == 302
+        assert DeliveryAttempt.objects.count() == 1
+        attempt.refresh_from_db()
+        assert attempt.result == DeliveryAttempt.Result.SUBMISSION_STARTED
 
 
 @pytest.mark.django_db

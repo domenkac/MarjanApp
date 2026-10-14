@@ -29,6 +29,8 @@
 
 **Transakcijski način SQLite.** `DATABASES['default']['OPTIONS']['transaction_mode']` je nastavljen na `'IMMEDIATE'`. Vsak zunanji `transaction.atomic()` zato pridobi SQLite zaklep za pisanje ob začetku transakcije in prepreči, da bi dva pisca hkrati prebrala isto vrednost zaporedja. Transakcije, ki spreminjajo številčenje ali preverjajo reference pred fizičnim izbrisom, morajo ostati kratke in ne smejo vključevati generiranja datotek, omrežnih klicev ali drugega zunanjega dela. `select_for_update()` se za SQLite ne uporablja, ker ne zagotavlja vrstičnega zaklepanja.
 
+**Nadgradnja T5 in obnova po prekinitvi SMTP.** Pred nadgradnjo na T5 ali zagonom obnove pošiljanja je treba ustaviti vse procese aplikacije in pošiljatelje SMTP iz različic pred T5. Stari poskusi v stanju `SUBMISSION_STARTED` nimajo zaklepov izvajanja, zato odsotnost zaklepa pri teh poskusih sama ne dokazuje, da je pošiljatelj prenehal delovati. Obnova po tej ustavitvi prekinjene poskuse brez shranjenega končnega rezultata označi kot `UNKNOWN`, pripadajoči račun pa kot `REZULTAT_NI_ZNAN`. Samodejno ponovno pošiljanje ni dovoljeno. Potrebna je izrecna potrditev preverjanja mape Poslano ali uporabnikova odločitev z razlogom: potrjeno poslano oziroma potrjeno neposlano; šele potrditev, da sporočilo ni bilo poslano, omogoči varen ponovni poskus (PRD §7.5, P0-49/P0-51).
+
 **Kaj to ni:** ni prava spletna aplikacija (§4 PRD — en uporabnik, brez prijave), ni SaaS, ni multi-tenant. To je odločitev, sprejeta zavestno in je zapisana tudi v §2 tega dokumenta, da je ne pozabimo, ko projekt zraste.
 
 ---

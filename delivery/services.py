@@ -3,6 +3,7 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass
 from email.message import EmailMessage
+from uuid import uuid4
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
@@ -15,6 +16,7 @@ from contracts.models import RecipientContact
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, MonthlyCycle
 
+from .execution import delivery_execution_lock
 from .models import (
     AccountantReportDeliveryAttempt,
     DeliveryAttempt,
@@ -406,6 +408,7 @@ def mark_submission_started(attempt: DeliveryAttempt) -> DeliveryAttempt:
         expected=DeliveryAttempt.Result.PREPARED,
         result=DeliveryAttempt.Result.SUBMISSION_STARTED,
         submission_started_at=timezone.now(),
+        execution_id=uuid4(),
     )
 
 
@@ -467,6 +470,84 @@ def send_pdf_email(
     credential_ref,
     password_loader=None,
     smtp_factory=None,
+) -> DeliveryAttempt:
+    if connection.in_atomic_block:
+        raise ValidationError("SMTP sending must run outside a DB transaction.")
+    with delivery_execution_lock(attempt.pk) as acquired:
+        if not acquired:
+            raise ValidationError("Delivery attempt is already being sent.")
+        return _send_pdf_email(
+            attempt,
+            subject=subject,
+            body=body,
+            smtp_config=smtp_config,
+            credential_ref=credential_ref,
+            password_loader=password_loader,
+            smtp_factory=smtp_factory,
+        )
+
+
+def recover_interrupted_submissions(*, invoice_ids=None) -> int:
+    """Reconcile unlocked submissions; stop pre-T5 senders before upgrading."""
+    attempts = DeliveryAttempt.objects.filter(
+        result=DeliveryAttempt.Result.SUBMISSION_STARTED,
+    )
+    if invoice_ids is not None:
+        attempts = attempts.filter(invoice_id__in=invoice_ids)
+    recovered = 0
+    for attempt in attempts:
+        with delivery_execution_lock(attempt.pk) as acquired:
+            if not acquired:
+                continue
+            with transaction.atomic():
+                current = DeliveryAttempt.objects.get(pk=attempt.pk)
+                if (
+                    current.result != DeliveryAttempt.Result.SUBMISSION_STARTED
+                    or current.execution_id != attempt.execution_id
+                ):
+                    continue
+                invoice = Invoice.objects.get(pk=current.invoice_id)
+                latest = invoice.delivery_attempts.order_by("-sequence").first()
+                if (
+                    latest.pk != current.pk
+                    or invoice.status != Invoice.Status.IZBRAN_ZA_POSILJANJE
+                ):
+                    continue
+                message = (
+                    "Izvajanje pošiljanja je prekinjeno brez shranjene končne potrditve. "
+                    "Preverite mapo Poslano in izrecno potrdite rezultat. "
+                    "Samodejno ponovno pošiljanje je blokirano."
+                )
+                mark_result_unknown(
+                    current, code="SMTP_EXECUTION_INTERRUPTED", message=message
+                )
+                audit = AuditLogEntry(
+                    content_type=ContentType.objects.get_for_model(DeliveryAttempt),
+                    object_id=current.pk,
+                    polje="result",
+                    stara_vrednost=DeliveryAttempt.Result.SUBMISSION_STARTED,
+                    nova_vrednost=DeliveryAttempt.Result.UNKNOWN,
+                    razlog=(
+                        (
+                            f"Execution {current.execution_id}: "
+                            if current.execution_id else
+                            "Legacy attempt without execution identity "
+                            "(pre-T5 senders must be stopped before upgrade): "
+                        )
+                        + "exclusive delivery lock acquired; no active sender owns this "
+                        "attempt. No final result was persisted; "
+                        "SMTP acceptance is unknown. No resend performed."
+                    ),
+                )
+                audit.full_clean()
+                audit.save()
+                recovered += 1
+    return recovered
+
+
+def _send_pdf_email(
+    attempt, *, subject, body, smtp_config, credential_ref,
+    password_loader, smtp_factory,
 ) -> DeliveryAttempt:
     from .credentials import load_password
     from .transport import _default_smtp_factory, send_prepared_email

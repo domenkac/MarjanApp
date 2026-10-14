@@ -1,11 +1,15 @@
 # ruff: noqa: F401, F811
+from contextlib import nullcontext
+
 import pytest
 from django.core.exceptions import ValidationError
 from django.db import connection
+from django.urls import reverse
 
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import RecipientContact
 from delivery.credentials import KeyringCredentialRef
+from delivery.execution import delivery_execution_lock
 from delivery.models import DeliveryAttempt
 from delivery.services import (
     mark_accepted,
@@ -255,7 +259,12 @@ def test_read_states_and_prepare_never_retries(
         if transition == "resolved":
             resolve_unknown_as_sent(attempt, reason="Verified in Sent folder")
 
-    summary = pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    with (
+        delivery_execution_lock(attempt.pk)
+        if transition == "started"
+        else nullcontext()
+    ):
+        summary = pripravi_dostavo_mesecnega_cikla(data["cycle"])
 
     assert _state(summary) == expected
     assert summary["complete"] is complete
@@ -264,6 +273,52 @@ def test_read_states_and_prepare_never_retries(
     assert (cycle.status, cycle.trenutni_korak) == (
         MonthlyCycle.Status.V_TEKU,
         MonthlyCycle.Korak.ZAKLJUCEK,
+    )
+
+
+def test_monthly_page_recovers_crash_and_offers_only_unknown_decisions(
+    ready_company, settings, tmp_path, client, monkeypatch,
+):
+    data = ready_company
+    invoice = _ready_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    attempt = mark_submission_started(DeliveryAttempt.objects.get(invoice=invoice))
+    monkeypatch.setattr(
+        "delivery.services.send_pdf_email",
+        lambda *args, **kwargs: pytest.fail("Recovery must never send"),
+    )
+
+    response = client.get(reverse("ui:mesecni_obracun"))
+    assert response.status_code == 200
+    content = response.content.decode()
+    assert "Rezultat ni znan – potrebno preverjanje" in content
+    assert "SMTP_EXECUTION_INTERRUPTED" in content
+    assert "Preverite mapo Poslano" in content
+    assert 'value="unknown_sent"' in content
+    assert 'value="unknown_not_sent"' in content
+    assert 'value="send_delivery"' not in content
+    assert 'value="prepare_delivery"' not in content
+    assert stanje_dostave_mesecnega_cikla(data["cycle"])["unknown_count"] == 1
+    assert DeliveryAttempt.objects.count() == 1
+    attempt.refresh_from_db()
+    assert attempt.result == DeliveryAttempt.Result.UNKNOWN
+
+
+def test_monthly_recovery_keeps_active_send_in_progress(
+    ready_company, settings, tmp_path,
+):
+    data = ready_company
+    invoice = _ready_step_6(data, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(data["cycle"])
+    attempt = DeliveryAttempt.objects.get(invoice=invoice)
+    with delivery_execution_lock(attempt.pk) as acquired:
+        assert acquired
+        mark_submission_started(attempt)
+        summary = stanje_dostave_mesecnega_cikla(data["cycle"])
+        assert _state(summary) == StanjeMesecneDostave.DELIVERY_IN_PROGRESS
+        assert summary["unknown_count"] == 0
+    assert _state(stanje_dostave_mesecnega_cikla(data["cycle"])) == (
+        StanjeMesecneDostave.DELIVERY_UNKNOWN
     )
 
 
@@ -555,10 +610,11 @@ def test_monthly_send_runtime_exception_uses_transitioned_persisted_state(
     invoice.refresh_from_db()
     cycle = MonthlyCycle.objects.get(pk=data["cycle"].pk)
     assert calls == [attempt.pk]
-    assert _state(first) == StanjeMesecneDostave.DELIVERY_IN_PROGRESS
-    assert _state(second) == StanjeMesecneDostave.DELIVERY_IN_PROGRESS
-    assert attempt.result == DeliveryAttempt.Result.SUBMISSION_STARTED
-    assert invoice.status == Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert _state(first) == StanjeMesecneDostave.DELIVERY_UNKNOWN
+    assert _state(second) == StanjeMesecneDostave.DELIVERY_UNKNOWN
+    assert attempt.result == DeliveryAttempt.Result.UNKNOWN
+    assert attempt.result_code == "SMTP_EXECUTION_INTERRUPTED"
+    assert invoice.status == Invoice.Status.REZULTAT_NI_ZNAN
     assert "sensitive/internal backend failure" not in str(first)
     assert "sensitive/internal backend failure" not in str(second)
     assert (cycle.status, cycle.trenutni_korak) == (

@@ -18,6 +18,7 @@ class DeliveryAttempt(models.Model):
     sequence = models.PositiveIntegerField()
     prepared_at = models.DateTimeField(auto_now_add=True)
     submission_started_at = models.DateTimeField(null=True, blank=True)
+    execution_id = models.UUIDField(null=True, blank=True, editable=False)
     completed_at = models.DateTimeField(null=True, blank=True)
     sender = models.EmailField()
     recipients_to = models.JSONField(default=list, blank=True)

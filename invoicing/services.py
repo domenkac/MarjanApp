@@ -3332,6 +3332,7 @@ def _rezultat_mesecne_dostave(cycle, *, preparation_failures=None):
         UNKNOWN_RESOLUTION_NOT_SENT_CONFIRMED,
         has_sent_delivery_evidence,
         has_unknown_resolution,
+        recover_interrupted_submissions,
     )
 
     preparation_failures = preparation_failures or {}
@@ -3374,6 +3375,8 @@ def _rezultat_mesecne_dostave(cycle, *, preparation_failures=None):
             continue
 
         invoice = materialization["invoice"]
+        recover_interrupted_submissions(invoice_ids=[invoice.pk])
+        invoice.refresh_from_db(fields=["status"])
         attempts = list(invoice.delivery_attempts.order_by("sequence"))
         latest = attempts[-1] if attempts else None
         if not review.selected:
@@ -3469,7 +3472,7 @@ def _rezultat_mesecne_dostave(cycle, *, preparation_failures=None):
             and latest.result == DeliveryAttempt.Result.UNKNOWN
         ):
             state = StanjeMesecneDostave.DELIVERY_UNKNOWN
-            message = "Rezultat dostave ni znan."
+            message = latest.message or "Rezultat dostave ni znan."
         else:
             message = "Stanje računa in zadnji poskus dostave nista skladna."
         if state == StanjeMesecneDostave.CONFLICT:

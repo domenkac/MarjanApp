@@ -1,10 +1,12 @@
 # ruff: noqa: F401, F811
+from contextlib import nullcontext
 from pathlib import Path
 
 import pytest
 
 from archive.models import ArchivedFile
 from archive.services import ArchiveRoots
+from delivery.execution import delivery_execution_lock
 from delivery.models import DeliveryAttempt
 from delivery.services import resolve_unknown_as_sent
 from invoicing.models import Invoice, MonthlyCandidateReview, MonthlyCycle
@@ -120,10 +122,15 @@ def test_open_delivery_states_require_attention(
 ):
     data = ready_company
     invoice = _selected_step_6(data, settings, tmp_path)
-    _attempt(invoice, result_state)
+    attempt = _attempt(invoice, result_state)
     Invoice.objects.filter(pk=invoice.pk).update(status=invoice_status)
 
-    result = stanje_zakljucne_kontrole_mesecnega_cikla(data["cycle"])
+    with (
+        delivery_execution_lock(attempt.pk)
+        if result_state == DeliveryAttempt.Result.SUBMISSION_STARTED
+        else nullcontext()
+    ):
+        result = stanje_zakljucne_kontrole_mesecnega_cikla(data["cycle"])
 
     assert result["requires_attention"] and result[count_name] == 1
     assert category in {item["category"] for item in result["issues"]}

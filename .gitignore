@@ -22,6 +22,7 @@ db.sqlite3-journal
 media/
 rendered/
 staticfiles/
+.smtp-locks/
 
 # Logs
 *.log

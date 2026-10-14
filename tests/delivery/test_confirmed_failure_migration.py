@@ -74,6 +74,7 @@ def test_confirmed_failure_migration_preserves_audit_data_and_reverses():
             pk=attempt.pk
         )
         assert migrated.result == "CONFIRMED_FAILURE"
+        assert migrated.execution_id is None
         assert {field: getattr(migrated, field) for field in audit_data} == audit_data
 
         executor = MigrationExecutor(connection)
