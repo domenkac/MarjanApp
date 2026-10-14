@@ -3,7 +3,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import connection
 
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import RecipientContact
 from delivery.credentials import KeyringCredentialRef
 from delivery.models import DeliveryAttempt
@@ -37,11 +37,13 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 def _open_step_6(data, settings, tmp_path):
+    prepare_initial_setup(data["company"], data["lease"])
     settings.RENDERING_ROOT = tmp_path / "rendered"
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
     renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
@@ -190,7 +192,7 @@ def test_sibling_preparation_failure_does_not_block_valid_invoice(
     data = ready_company
     second_lease = _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     for lease in (data["lease"], second_lease):
         for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
             RecipientContact.objects.create(
@@ -355,7 +357,7 @@ def test_monthly_send_isolates_siblings_and_never_retries_terminal_results(
     data = ready_company
     second_lease = _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     for lease in (data["lease"], second_lease):
         for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
             RecipientContact.objects.create(
@@ -397,7 +399,7 @@ def test_monthly_send_missing_input_does_not_block_sibling(
     data = ready_company
     second_lease = _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     for lease in (data["lease"], second_lease):
         for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
             RecipientContact.objects.create(
@@ -437,7 +439,7 @@ def test_monthly_send_rejects_invalid_input_set_before_any_send(
     data = ready_company
     second_lease = _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     for lease in (data["lease"], second_lease):
         for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
             RecipientContact.objects.create(
@@ -493,7 +495,7 @@ def test_monthly_send_unknown_and_validation_failure_continue_and_are_not_retrie
     data = ready_company
     second_lease = _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     for lease in (data["lease"], second_lease):
         for role in (RecipientContact.Vloga.TO, RecipientContact.Vloga.CC):
             RecipientContact.objects.create(

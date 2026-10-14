@@ -21,6 +21,8 @@ from contracts.models import (
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import potrdi_korekcijski_osnutek, pripravi_korekcijski_osnutek
+from tests.image_data import slika_bytes
+from tests.setup_helpers import prepare_initial_setup
 
 LETO = 2026
 DANES = date(LETO, 3, 15)
@@ -235,8 +237,8 @@ def test_zamujen_poracun_samo_za_pravo_postavko(postavka, status):
 
 def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
-    (tmp_path / "logo.png").write_bytes(b"logo")
-    (tmp_path / "podpis.png").write_bytes(b"podpis")
+    (tmp_path / "logo.png").write_bytes(slika_bytes())
+    (tmp_path / "podpis.png").write_bytes(slika_bytes())
     original = racun_s_postavkami(postavka)
     Signatory.objects.create(
         company=original.company,
@@ -259,6 +261,9 @@ def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka, tmp_path, se
         "Napaka",
         date(LETO, 4, 1),
     )
+    postavka.vat_regime.eslog_koda = "S"
+    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    prepare_initial_setup(original.company, postavka.lease)
     potrdi_korekcijski_osnutek(storno)
 
     event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), date(LETO, 4, 15), indeks_leto=LETO - 1)

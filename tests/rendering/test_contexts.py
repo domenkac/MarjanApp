@@ -25,6 +25,7 @@ from rendering.contexts import (
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
 )
+from tests.setup_helpers import prepare_initial_setup
 
 VALID_PNG_LOGO = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -256,6 +257,7 @@ def izdani_racun(db, tmp_path, settings):
         vat_regime=regime,
     )
     potrdi_ddv_nastavitve(company)
+    prepare_initial_setup(company, lease)
     invoice = pripravi_osnutek_np(
         lease, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
     ).invoice
@@ -334,7 +336,7 @@ def test_neskladni_totali_so_zavrnjeni(izdani_racun):
 
 def test_vzorcni_context_ne_ustvari_racuna_in_ne_porabi_stevilke(izdani_racun):
     racunov = Invoice.objects.count()
-    zaporedje = NumberSequence.objects.get(company=izdani_racun.company)
+    zaporedje = NumberSequence.objects.get(company=izdani_racun.company, tip="NP")
     stevilka = zaporedje.zadnja_stevilka
 
     context = pripravi_vzorcni_pdf_context(

@@ -5,7 +5,6 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
 
-from companies.services import potrdi_vzorec_podjetja
 from contracts.models import Lease, LeaseRenewalEvent
 from contracts.renewals import confirm_renewal, renewal_proposal
 from invoicing.models import Invoice, MonthlyCycle
@@ -25,6 +24,7 @@ from tests.invoicing.test_preflight import (  # noqa: F401
     potrdi_septembrski_vzorec,
     ready_company,
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytestmark = pytest.mark.django_db
 
@@ -36,7 +36,7 @@ def set_automatic(data, end=date(2026, 8, 31), months=12):
     lease.samodejno_podaljsanje = True
     lease.obdobje_podaljsanja_mesecev = months
     lease.save()
-    potrdi_vzorec_podjetja(data["company"], lease)
+    approve_sample(data["company"], lease)
     return lease
 
 
@@ -107,7 +107,7 @@ def test_monthly_explicit_confirmation_refreshes_review_and_issues(ready_company
     lease.refresh_from_db()
     assert lease.datum_konca == date(2027, 8, 31)
     # The existing sample gate requires a new explicit sample approval.
-    potrdi_vzorec_podjetja(data["company"], lease)
+    approve_sample(data["company"], lease)
     client.post(reverse("ui:mesecni_obracun"), {"action": "refresh_review"})
     current = uskladi_preglede_mesecnega_cikla(data["cycle"])[0]
     assert current.candidate_fingerprint != review.candidate_fingerprint
@@ -116,6 +116,7 @@ def test_monthly_explicit_confirmation_refreshes_review_and_issues(ready_company
     assert old_snapshot["candidates"][0]["renewal"]["old_end"] == "2026-08-31"
     potrdi_izjemo_kandidata(data["cycle"], lease_id=lease.pk, candidate_fingerprint=current.candidate_fingerprint)
     zamrzni_paket_za_potrditev(data["cycle"])
+    prepare_initial_setup(data["company"], lease)
     invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(current.batch_id, lease.pk, current.candidate_fingerprint)
     assert invoice.stevilka and not reused
     assert LeaseRenewalEvent.objects.count() == 1
@@ -130,6 +131,7 @@ def test_direct_draft_issuance_requires_renewal(ready_company):  # noqa: F811
     assert draft.stevilka is None
     proposal = renewal_proposal(lease, date(2026, 9, 30))
     confirm_renewal(lease.pk, proposal["source_fingerprint"], as_of=date(2026, 9, 30))
+    prepare_initial_setup(draft.company, draft.lease)
     assert potrdi_osnutek_np(draft).stevilka
 
 
@@ -140,6 +142,7 @@ def test_renewal_preserves_frozen_snapshot_and_issued_invoice(ready_company):  #
     potrdi_izjemo_kandidata(data["cycle"], lease_id=lease.pk, candidate_fingerprint=review.candidate_fingerprint)
     zamrzni_paket_za_potrditev(data["cycle"])
     snapshot = deepcopy(review.batch.calculation_snapshot)
+    prepare_initial_setup(data["company"], lease)
     invoice, _ = materializiraj_zamrznjenega_mesecnega_kandidata(review.batch_id, lease.pk, review.candidate_fingerprint)
     stored = Invoice.objects.filter(pk=invoice.pk).values().get()
     lines = list(invoice.invoiceline_set.values())

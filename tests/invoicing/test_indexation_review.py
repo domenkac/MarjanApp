@@ -24,6 +24,7 @@ from tests.invoicing.test_preflight import (  # noqa: F401
     potrdi_septembrski_vzorec,
     ready_company,
 )
+from tests.setup_helpers import prepare_initial_setup
 
 
 def approve(data, value="110.000"):
@@ -91,6 +92,7 @@ def test_january_unaffected_and_review_not_repeated_after_first_issue(ready_comp
         data["lease"], date(2026, 3, 1), date(2026, 3, 31), date(2026, 3, 1)
     )
     assert any(row.koda == "PRVA_INDEKSACIJA" for row in march.izjeme)
+    prepare_initial_setup(data["lease"].unit.property.company, data["lease"])
     first = potrdi_osnutek_np(pripravi_osnutek_np(
         data["lease"], date(2026, 3, 1), date(2026, 3, 31), date(2026, 3, 1),
     ).invoice)

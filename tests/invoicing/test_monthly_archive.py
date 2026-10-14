@@ -6,7 +6,7 @@ from django.db import connection
 
 from archive.models import ArchivedFile
 from archive.services import ArchiveRoots, ArchiveState
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.services import potrdi_ddv_nastavitve
 from delivery.models import DeliveryAttempt
 from delivery.services import resolve_unknown_as_sent
 from invoicing.models import Invoice, MonthlyCandidateReview, MonthlyCycle
@@ -30,6 +30,7 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -40,6 +41,7 @@ def roots(tmp_path):
 
 
 def _open_step_6(data, settings, tmp_path):
+    prepare_initial_setup(data["company"], data["lease"])
     settings.RENDERING_ROOT = tmp_path / "rendered"
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
     renderiraj_koncne_pdfje_mesecnega_paketa(data["cycle"])
@@ -133,7 +135,7 @@ def test_partial_failure_continues_and_retry_reuses_archive(
     data = ready_company
     _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     _freeze_all_candidates(data)
     invoices = _open_step_6(data, settings, tmp_path)
     for invoice in invoices:
@@ -212,7 +214,7 @@ def test_unselected_sibling_is_untouched(ready_company, settings, tmp_path, root
     data = ready_company
     _add_lease(data, "P-B", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     _calculate(data)
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
     data["cycle"].save(update_fields=["trenutni_korak"])

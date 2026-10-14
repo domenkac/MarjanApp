@@ -996,6 +996,10 @@ def podjetje_vzorec_pdf(request, company_id, lease_id):
     response = HttpResponse(rezultat.pdf_bytes, content_type="application/pdf")
     response["Content-Disposition"] = 'inline; filename="VZOREC-NI-RACUN.pdf"'
     response["Cache-Control"] = "no-store"
+    response.set_signed_cookie(
+        f"sample_preview_{company.pk}_{lease.pk}", str(rezultat.preview_id),
+        salt="sample-preview", httponly=True, samesite="Strict",
+    )
     return response
 
 
@@ -1004,7 +1008,13 @@ def podjetje_potrdi_vzorec(request, company_id):
     company = get_object_or_404(Company, pk=company_id)
     lease = _sample_lease_or_404(company, request.POST.get("lease"))
     try:
-        potrdi_vzorec_podjetja(company, lease)
+        potrdi_vzorec_podjetja(
+            company, lease,
+            preview_id=request.get_signed_cookie(
+                f"sample_preview_{company.pk}_{lease.pk}", default=None,
+                salt="sample-preview",
+            ),
+        )
     except (AssetPotrditveSpremenjen, PdfRenderNapaka, ValidationError, ValueError, OSError) as napaka:
         return render(
             request,

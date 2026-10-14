@@ -14,9 +14,10 @@ from companies.models import (
     Signatory,
     VatSettingsConfirmation,
 )
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.setup_helpers import approve_sample
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -26,7 +27,7 @@ PNG = base64.b64decode(
 @pytest.fixture
 def confirmation_ui_data(db, settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
-    settings.RENDER_ROOT = tmp_path / "rendered"
+    settings.RENDERING_ROOT = tmp_path / "rendered"
     (tmp_path / "logo.png").write_bytes(PNG)
     (tmp_path / "podpis.png").write_bytes(PNG)
     company = Company.objects.create(
@@ -142,11 +143,8 @@ def test_sample_choices_scope_preview_and_confirmation(
     assert "csrfmiddlewaretoken" not in selection_form
     assert client.post(f"{detail_url(data)}potrdi-vzorec/", {"lease": other_lease.pk}).status_code == 404
 
-    monkeypatch.setattr(
-        "ui.views.render_sample_pdf",
-        lambda *args, **kwargs: SimpleNamespace(pdf_bytes=b"%PDF-1.7 VZOREC - NI RACUN"),
-    )
     counts = (Invoice.objects.count(), InvoiceLine.objects.count(), NumberSequence.objects.count())
+    potrdi_ddv_nastavitve(data.company)
     selected = client.get(
         detail_url(data), {"vzorec_pogodba": data.lease.pk}
     ).content.decode()
@@ -198,6 +196,7 @@ def test_one_selected_lease_drives_preview_and_confirmation(
     assert content.count('id="id_vzorec_pogodba"') == 1
     assert 'id="id_lease"' not in content
 
+    assert client.get(preview_url).status_code == 200
     confirmation = client.post(
         f"{detail_url(data)}potrdi-vzorec/", {"lease": lease_b.pk}
     )
@@ -235,6 +234,9 @@ def test_sample_post_is_immutable_safe_and_errors_are_controlled(client, confirm
         NumberSequence.objects.count(), MonthlyCycle.objects.count(),
         MonthlyBatch.objects.count(),
     )
+    assert client.post(url, {"lease": data.lease.pk}).status_code == 409
+    preview_url = f"{detail_url(data)}vzorec/{data.lease.pk}/pdf/"
+    assert client.get(preview_url).status_code == 200
     success = client.post(url, {"lease": data.lease.pk}, follow=True)
     assert success.status_code == 200
     assert "Vzorčni račun je potrjen." in success.content.decode()
@@ -254,7 +256,7 @@ def test_sample_post_is_immutable_safe_and_errors_are_controlled(client, confirm
 def test_stale_states_and_dashboard_tasks(client, confirmation_ui_data):
     data = confirmation_ui_data
     potrdi_ddv_nastavitve(data.company)
-    potrdi_vzorec_podjetja(data.company, data.lease)
+    approve_sample(data.company, data.lease)
     assert "Potrebne potrditve" not in client.get("/").content.decode()
 
     data.regime.stopnja = Decimal("9.50")

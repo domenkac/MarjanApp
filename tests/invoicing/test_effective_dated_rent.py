@@ -21,6 +21,7 @@ from tests.invoicing.test_preflight import (  # noqa: F401
     ready_company,
 )
 from tests.invoicing.test_priprava_np import dodaj_postavko, pogodba  # noqa: F401
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 
 def indeksirana(lease):
@@ -35,7 +36,9 @@ def indeksirana(lease):
 
 def test_pravi_osnutki_in_izdani_posnetki_ostanejo(pogodba):  # noqa: F811
     item = indeksirana(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     januar = potrdi_osnutek_np(pripravi_osnutek_np(pogodba, date(2026, 1, 1), date(2026, 1, 31), date(2026, 1, 1)).invoice)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     februar = potrdi_osnutek_np(pripravi_osnutek_np(pogodba, date(2026, 2, 1), date(2026, 2, 28), date(2026, 2, 1)).invoice)
     januar.rendered_pdf_path = "original.pdf"
     januar.checksum = "original-checksum"
@@ -50,6 +53,8 @@ def test_pravi_osnutki_in_izdani_posnetki_ostanejo(pogodba):  # noqa: F811
     for month, end, amount in [(1, 31, "100.00"), (2, 28, "110.00")]:
         draft = pripravi_osnutek_np(pogodba, date(2026, month, 1), date(2026, month, end), date(2026, month, 1)).invoice
         assert InvoiceLine.objects.get(invoice=draft).osnova == Decimal(amount)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
+    approve_sample(pogodba.unit.property.company, pogodba)
     marec = potrdi_osnutek_np(pripravi_osnutek_np(pogodba, date(2026, 3, 1), date(2026, 3, 31), date(2026, 3, 1)).invoice)
     assert marec.stevilka == "NP-00003"
 
@@ -78,7 +83,7 @@ def test_zastarel_zamrznjen_paket_blokira_izdajo_in_ohrani_vsebino(ready_company
     lines = list(InvoiceLine.objects.values())
     retry = izdaj_zamrznjeni_mesecni_paket(data["cycle"])
     assert all(not result["ok"] for result in retry)
-    assert not Invoice.objects.exists() and not NumberSequence.objects.exists()
+    assert not Invoice.objects.exists() and not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert list(InvoiceLine.objects.values()) == lines
     assert list(MonthlyBatch.objects.values("calculation_snapshot", "calculation_schema_version")) == before
 
@@ -107,7 +112,7 @@ def test_veljaven_indeksiran_zamrznjen_paket_ohrani_uspesno_izdajo_in_retry(
     assert all(result["ok"] and result["reused"] for result in retry)
     assert list(Invoice.objects.values()) == invoices
     assert list(InvoiceLine.objects.values()) == lines
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
     assert list(MonthlyBatch.objects.values("calculation_snapshot", "calculation_schema_version")) == before
 
 

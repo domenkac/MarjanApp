@@ -15,6 +15,7 @@ from invoicing.services import (
     pripravi_osnutek_np,
 )
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -25,6 +26,8 @@ def racun(pogodba, mesec, *, potrdi=False):
     invoice = pripravi_osnutek_np(
         pogodba, obdobje_od, datum_izdaje - timedelta(days=1), datum_izdaje
     ).invoice
+    if potrdi:
+        prepare_initial_setup(invoice.company, invoice.lease)
     return potrdi_osnutek_np(invoice) if potrdi else invoice
 
 
@@ -136,6 +139,7 @@ def test_preskocen_mesec_primerja_z_zadnjim_izdanim(pogodba):
     racun(pogodba, 1, potrdi=True)
     item.znesek_neto_mesecno = Decimal("110.00")
     item.save(update_fields=["znesek_neto_mesecno"])
+    approve_sample(pogodba.unit.property.company, pogodba)
     prejsnji = racun(pogodba, 2, potrdi=True)
     rezultat = primerjaj_delta_np(racun(pogodba, 4))
     assert rezultat.prejsnji_racun_id == prejsnji.pk

@@ -16,6 +16,7 @@ from invoicing.services import (
 )
 from rendering.contexts import pripravi_vzorcni_pdf_context
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -30,6 +31,7 @@ def _izdaj_avgust(pogodba):
     osnutek = pripravi_osnutek_np(
         pogodba, AVGUST_OD, AVGUST_DO, date(2026, 9, 1)
     ).invoice
+    prepare_initial_setup(osnutek.company, osnutek.lease)
     return potrdi_osnutek_np(osnutek)
 
 
@@ -151,7 +153,7 @@ def test_obicajen_celomescni_kandidat_brez_izjem_in_stranskih_ucinkov(pogodba):
     postavka = dodaj_postavko(pogodba)
     _izdaj_avgust(pogodba)
     stevilo_racunov = Invoice.objects.count()
-    zaporedna = NumberSequence.objects.get().zadnja_stevilka
+    zaporedna = NumberSequence.objects.get(company=pogodba.unit.property.company, tip="NP").zadnja_stevilka
 
     kandidat = izracunaj_kandidata(
         pogodba, SEPTEMBER_OD, SEPTEMBER_DO, DATUM_IZDAJE
@@ -166,7 +168,7 @@ def test_obicajen_celomescni_kandidat_brez_izjem_in_stranskih_ucinkov(pogodba):
     assert kandidat.vrstice[0].pk is None
     assert Invoice.objects.count() == stevilo_racunov
     assert InvoiceLine.objects.count() == 1
-    assert NumberSequence.objects.get().zadnja_stevilka == zaporedna
+    assert NumberSequence.objects.get(company=pogodba.unit.property.company, tip="NP").zadnja_stevilka == zaporedna
 
 
 def test_manjkajoca_obvezna_referenca_ostane_blokada(pogodba):

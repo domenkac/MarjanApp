@@ -1,6 +1,7 @@
 """First-run navigation. Business records and existing services own readiness."""
 
 from django import forms
+from django.core.exceptions import ValidationError
 from django.shortcuts import redirect, render
 from django.urls import reverse
 from django.utils import timezone
@@ -9,7 +10,13 @@ from django.views.decorators.http import require_http_methods
 
 from archive.configuration import ArchiveConfigurationError, validate_archive_locations
 from archive.models import ArchiveConfiguration
-from companies.models import Company
+from companies.models import Company, InitialSetupCompletion, NumberSequence
+from companies.readiness import (
+    archive_verification_evidence,
+    complete_initial_setup,
+    setup_readiness,
+    verify_numbering,
+)
 from companies.services import veljavna_potrditev_ddv, veljavna_potrditev_vzorca
 from companies.setup import issuer_setup_issues
 from contracts.models import Lease, Property, Tenant, Unit
@@ -50,6 +57,13 @@ class SetupSelectionForm(forms.Form):
                 "invalid_choice": "Izbrani zapis ni aktiven ali ne pripada izbrani verigi.",
             },
         )
+
+
+class NumberingVerificationForm(forms.Form):
+    np_last = forms.IntegerField(min_value=0, label="Dejanska zadnja številka NP")
+    st_last = forms.IntegerField(min_value=0, label="Dejanska zadnja številka ST")
+    st_year = forms.IntegerField(min_value=1, max_value=9999, label="Leto ST")
+    explicit = forms.BooleanField(label="Začetni vrednosti sem preveril glede na zgodovino izdanih računov.")
 
 
 def _navigation():
@@ -156,7 +170,12 @@ def _archive_status():
         except ArchiveConfigurationError as exc:
             error = str(exc)
         else:
-            verified = bool(config.verified_at)
+            try:
+                archive_verification_evidence()
+            except ArchiveConfigurationError as exc:
+                error = str(exc)
+            else:
+                verified = True
     locations = [
         {
             "label": label,
@@ -200,6 +219,11 @@ def _links(state, step):
 @override("sl")
 def first_run_setup(request):
     state = _navigation()
+    if request.method == "POST" and request.POST.get("action") == "restart":
+        SetupNavigation.objects.filter(pk=state.pk).update(
+            step="company", company=None, property=None, unit=None, tenant=None, lease=None,
+        )
+        return redirect("ui:first_run_setup")
     step = request.GET.get("korak", state.step)
     if step not in dict(STEPS):
         return render(request, "ui/setup_error.html", status=400)
@@ -210,6 +234,34 @@ def first_run_setup(request):
     position = list(dict(STEPS)).index(step)
     form = None
     action_errors = []
+    numbering_form = None
+    if state.company:
+        counters = {
+            sequence.tip: sequence.zadnja_stevilka
+            for sequence in NumberSequence.objects.filter(
+                company=state.company, leto__in=[0, today.year],
+            )
+        }
+        numbering_form = NumberingVerificationForm(
+            request.POST if request.method == "POST" and request.POST.get("action") == "verify_numbering" else None,
+            initial={"np_last": counters.get("NP"), "st_last": counters.get("ST"), "st_year": today.year},
+        )
+        if numbering_form.is_bound and numbering_form.is_valid():
+            try:
+                if request.POST.get("company_id") != str(state.company_id):
+                    raise ValidationError("Izbrano podjetje se je spremenilo. Ponovno odprite korak številčenja.")
+                verify_numbering(state.company, **numbering_form.cleaned_data)
+            except ValidationError as error:
+                action_errors = error.messages
+            else:
+                return redirect("ui:first_run_setup")
+    if request.method == "POST" and request.POST.get("action") == "finish":
+        try:
+            complete_initial_setup()
+        except ValidationError as error:
+            action_errors = error.messages
+        else:
+            return redirect("ui:first_run_setup")
     if step in {"company", "property", "unit", "tenant", "lease"}:
         form = SetupSelectionForm(
             request.POST
@@ -245,7 +297,7 @@ def first_run_setup(request):
         else [("company", "Najprej izberite podjetje.")]
     )
     ddv = veljavna_potrditev_ddv(state.company) if state.company else None
-    sample = veljavna_potrditev_vzorca(state.company) if state.company else None
+    sample = veljavna_potrditev_vzorca(state.company, require_preview=True) if state.company else None
     errors = {
         "company": [
             message
@@ -266,6 +318,10 @@ def first_run_setup(request):
             errors["issuer"].append(
                 f"{label} {'je zastarela' if result and result.stanje == 'stale' else 'manjka'}."
             )
+    readiness = setup_readiness(today=today)
+    selected_issuer = next((row for row in readiness.companies if row["company"].pk == state.company_id), None)
+    if selected_issuer:
+        errors["issuer"] = [message for _, message in selected_issuer["issues"]] + archive_errors
     if request.method == "POST" and request.POST.get("action") == "next":
         if errors[step]:
             action_errors = [
@@ -276,20 +332,12 @@ def first_run_setup(request):
             state.save(update_fields=["step"])
             return redirect("ui:first_run_setup")
     elif request.method == "POST" and (
-        request.POST.get("action") not in {"select", "next"}
+        request.POST.get("action") not in {"select", "next", "finish", "verify_numbering"}
         or (request.POST.get("action") == "select" and form is None)
     ):
         action_errors = ["Neveljavno dejanje začetne nastavitve."]
     create_url, edit_url = _links(state, step)
-    companies = [
-        {
-            "company": company,
-            "ddv": veljavna_potrditev_ddv(company),
-            "sample": veljavna_potrditev_vzorca(company),
-            "issues": issuer_setup_issues(company, today),
-        }
-        for company in Company.objects.filter(aktivno=True).order_by("naziv", "pk")
-    ]
+    companies = readiness.companies
     response = render(
         request,
         "ui/setup.html",
@@ -312,6 +360,9 @@ def first_run_setup(request):
             "create_url": create_url,
             "edit_url": edit_url,
             "companies": companies,
+            "readiness": readiness,
+            "completion": InitialSetupCompletion.objects.filter(pk=1).first(),
+            "numbering_form": numbering_form,
             "locations": locations,
             "items": state.lease.leaseitem_set.filter(arhivirana=False)
             if state.lease

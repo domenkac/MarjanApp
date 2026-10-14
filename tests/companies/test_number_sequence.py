@@ -6,7 +6,19 @@ import pytest
 from django.db import IntegrityError, connections, transaction
 
 from companies.models import Company, NumberSequence
+from companies.readiness import verify_numbering
 from companies.services import dodeli_naslednjo_stevilko
+from tests.setup_helpers import prepare_initial_setup
+from tests.ui import test_company_confirmations
+
+setup_data = test_company_confirmations.confirmation_ui_data
+
+
+@pytest.fixture
+def numbering_setup(setup_data):
+    prepare_initial_setup(setup_data.company, setup_data.lease)
+    verify_numbering(setup_data.company, np_last=0, st_last=0, st_year=2025, explicit=True)
+    return setup_data.company
 
 
 def ustvari_podjetje():
@@ -25,25 +37,25 @@ def ustvari_podjetje():
 
 
 @pytest.mark.django_db
-def test_np_ne_resetira_cez_leto():
-    company = ustvari_podjetje()
+def test_np_ne_resetira_cez_leto(numbering_setup):
+    company = numbering_setup
 
     prva = dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2025, 12, 31))
     druga = dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1))
 
     assert (prva, druga) == (1, 2)
-    assert NumberSequence.objects.get().leto == 0
+    assert NumberSequence.objects.get(company=company, tip="NP").leto == 0
 
 
 @pytest.mark.django_db
-def test_st_resetira_po_letu_izdaje():
-    company = ustvari_podjetje()
+def test_st_resetira_po_letu_izdaje(numbering_setup):
+    company = numbering_setup
 
     prva = dodeli_naslednjo_stevilko(company, NumberSequence.Tip.ST, date(2025, 12, 31))
     druga = dodeli_naslednjo_stevilko(company, NumberSequence.Tip.ST, date(2026, 1, 1))
 
     assert (prva, druga) == (1, 1)
-    assert set(NumberSequence.objects.values_list("leto", flat=True)) == {2025, 2026}
+    assert set(NumberSequence.objects.filter(company=company, tip="ST").values_list("leto", flat=True)) == {2025, 2026}
 
 
 @pytest.mark.django_db
@@ -70,8 +82,8 @@ def test_number_sequence_zavrne_neveljavno_kombinacijo_tipa_in_leta(tip, leto):
 
 
 @pytest.mark.django_db
-def test_neuspesna_transakcija_ne_zazge_stevilke():
-    company = ustvari_podjetje()
+def test_neuspesna_transakcija_ne_zazge_stevilke(numbering_setup):
+    company = numbering_setup
 
     with pytest.raises(RuntimeError), transaction.atomic():
         dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1))
@@ -83,8 +95,8 @@ def test_neuspesna_transakcija_ne_zazge_stevilke():
 
 
 @pytest.mark.django_db(transaction=True)
-def test_atomarno_dodeljevanje_socasno():
-    company = ustvari_podjetje()
+def test_atomarno_dodeljevanje_socasno(numbering_setup):
+    company = numbering_setup
     zacetek = Barrier(2)
 
     def dodeli():
@@ -106,4 +118,4 @@ def test_atomarno_dodeljevanje_socasno():
 
     assert sorted(stevilka for stevilka, _ in rezultata) == [1, 2]
     assert len({povezava for _, povezava in rezultata}) == 2
-    assert NumberSequence.objects.get().zadnja_stevilka == 2
+    assert NumberSequence.objects.get(company=company, tip="NP").zadnja_stevilka == 2

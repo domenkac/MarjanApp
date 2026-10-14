@@ -135,6 +135,12 @@ def verify_and_save_archive_roots(
             "icloud_root": str(roots.icloud_root),
             "dropbox_root": str(roots.dropbox_root),
             "verified_at": timezone.now(),
+            "verification_evidence": {
+                "local_root": str(roots.local_root),
+                "icloud_root": str(roots.icloud_root),
+                "dropbox_root": str(roots.dropbox_root),
+                "operations": ["write", "read", "delete"],
+            },
         },
     )
     return configuration

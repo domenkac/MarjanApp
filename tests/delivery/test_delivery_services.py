@@ -350,7 +350,7 @@ def test_confirmed_failure_is_retry_eligible_and_preserves_issue_data(
         issued_invoice.rendered_pdf_path,
         issued_invoice.checksum,
         list(InvoiceLine.objects.filter(invoice=issued_invoice).values()),
-        NumberSequence.objects.get(company=issued_invoice.company).zadnja_stevilka,
+        NumberSequence.objects.get(company=issued_invoice.company, tip="NP").zadnja_stevilka,
     )
     attempt = prepare_attempt(issued_invoice)
     failed = mark_confirmed_failure(
@@ -365,7 +365,7 @@ def test_confirmed_failure_is_retry_eligible_and_preserves_issue_data(
         issued_invoice.rendered_pdf_path,
         issued_invoice.checksum,
         list(InvoiceLine.objects.filter(invoice=issued_invoice).values()),
-        NumberSequence.objects.get(company=issued_invoice.company).zadnja_stevilka,
+        NumberSequence.objects.get(company=issued_invoice.company, tip="NP").zadnja_stevilka,
     )
     assert failed.result == DeliveryAttempt.Result.CONFIRMED_FAILURE
     assert issued_invoice.status == Invoice.Status.NAPAKA

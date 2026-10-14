@@ -1,6 +1,5 @@
 import json
-from calendar import monthrange
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from datetime import date
 from decimal import Decimal
 from hashlib import sha256
@@ -18,6 +17,7 @@ from companies.models import (
     Company,
     CompanySampleConfirmation,
     NumberSequence,
+    SamplePdfPreview,
     Signatory,
     VatSettingsConfirmation,
 )
@@ -25,7 +25,7 @@ from core.models import AuditLogEntry
 from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
 
 FINGERPRINT_DDV_VERSION = 2
-FINGERPRINT_VZORCA_VERSION = 1
+FINGERPRINT_VZORCA_VERSION = 2
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,7 +145,7 @@ def _checksum_immutable_asseta(pot: str) -> str:
 
 
 def _vzorec_podatki(company: Company, lease, podpisnik: Signatory) -> dict:
-    from contracts.models import LeaseItem
+    from contracts.models import IndexationEvent, LeaseItem
 
     tenant = lease.tenant
     nepremicnina = lease.unit.property
@@ -238,6 +238,13 @@ def _vzorec_podatki(company: Company, lease, podpisnik: Signatory) -> dict:
                 "osnovna_najemnina_ob_sklenitvi": (
                     postavka.osnovna_najemnina_ob_sklenitvi
                 ),
+                "referencna_najemnina": postavka.referencna_najemnina,
+                "datum_referencne_najemnine": postavka.datum_referencne_najemnine,
+                "indexations": list(IndexationEvent.objects.filter(
+                    lease_item=postavka, izkljucen=False,
+                ).order_by("datum_uskladitve", "pk").values(
+                    "datum_uskladitve", "stara_vrednost", "nova_vrednost", "indeks_vrednost",
+                )),
                 "vat_regime_id": postavka.vat_regime_id,
                 "vat_nacin_obracuna": postavka.vat_regime.nacin_obracuna,
                 "vat_stopnja": postavka.vat_regime.stopnja,
@@ -251,7 +258,7 @@ def _vzorec_podatki(company: Company, lease, podpisnik: Signatory) -> dict:
     }
 
 
-def _nalozi_vzorec(company: Company, lease):
+def _nalozi_vzorec(company: Company, lease, *, datum_izdaje=None):
     from contracts.models import Lease
 
     company = Company.objects.get(pk=company.pk)
@@ -262,35 +269,25 @@ def _nalozi_vzorec(company: Company, lease):
     )
     if lease is None or lease.unit.property.company_id != company.pk:
         raise ValueError("Pogodba ne pripada podjetju.")
-    podpisnik = izberi_veljavnega_podpisnika(company, date.today())  # noqa: DTZ011
+    podpisnik = izberi_veljavnega_podpisnika(company, datum_izdaje or date.today())  # noqa: DTZ011
     return company, lease, podpisnik
 
 
-def izracunaj_fingerprint_vzorca(company: Company, lease) -> str:
-    company, lease, podpisnik = _nalozi_vzorec(company, lease)
+def izracunaj_fingerprint_vzorca(company: Company, lease, *, datum_izdaje=None) -> str:
+    company, lease, podpisnik = _nalozi_vzorec(company, lease, datum_izdaje=datum_izdaje)
     return _kanonicni_fingerprint(_vzorec_podatki(company, lease, podpisnik))
 
 
-def potrdi_vzorec_podjetja(company: Company, lease) -> CompanySampleConfirmation:
-    from rendering.contexts import pripravi_vzorcni_pdf_context
-
-    company, lease, podpisnik = _nalozi_vzorec(company, lease)
-    danes = date.today()  # noqa: DTZ011
-    prvi_dan = danes.replace(day=1)
-    zadnji_dan = danes.replace(day=monthrange(danes.year, danes.month)[1])
-    pripravi_vzorcni_pdf_context(
-        lease,
-        datum_izdaje=danes,
-        obdobje_od=prvi_dan,
-        obdobje_do=zadnji_dan,
-    )
+def pripravi_fingerprint_predogleda(company: Company, lease, *, datum_izdaje=None) -> str:
+    """Freeze asset identities before rendering; never record an approval."""
+    company, lease, podpisnik = _nalozi_vzorec(company, lease, datum_izdaje=datum_izdaje)
     logo_pot = company.logotip.name
     podpis_pot = podpisnik.podpis_slika.name
     logo_checksum = _checksum_immutable_asseta(logo_pot)
     podpis_checksum = _checksum_immutable_asseta(podpis_pot)
 
     with transaction.atomic():
-        company, lease, podpisnik = _nalozi_vzorec(company, lease)
+        company, lease, podpisnik = _nalozi_vzorec(company, lease, datum_izdaje=datum_izdaje)
         if (
             company.logotip.name != logo_pot
             or podpisnik.podpis_slika.name != podpis_pot
@@ -305,23 +302,65 @@ def potrdi_vzorec_podjetja(company: Company, lease) -> CompanySampleConfirmation
         company.logotip_checksum = logo_checksum
         podpisnik.podpis_checksum = podpis_checksum
         fingerprint = _kanonicni_fingerprint(_vzorec_podatki(company, lease, podpisnik))
+        return fingerprint
+
+
+def potrdi_vzorec_podjetja(
+    company: Company, lease, *, preview_id=None,
+) -> CompanySampleConfirmation:
+    from rendering.contexts import pripravi_vzorcni_pdf_context
+
+    with transaction.atomic():
+        company, lease, podpisnik = _nalozi_vzorec(company, lease)
+        try:
+            preview = SamplePdfPreview.objects.filter(
+                pk=preview_id, company=company, lease=lease,
+            ).first() if preview_id else None
+        except (ValidationError, ValueError, TypeError):
+            preview = None
+        fingerprint = _kanonicni_fingerprint(_vzorec_podatki(company, lease, podpisnik))
+        if (
+            preview is None
+            or preview.source_fingerprint != fingerprint
+            or preview.pdf_template_version != settings.PDF_TEMPLATE_VERSION
+            or preview.fingerprint_schema_version != FINGERPRINT_VZORCA_VERSION
+        ):
+            raise ValueError("Najprej odprite veljaven PDF predogled izbrane pogodbe.")
+        context = pripravi_vzorcni_pdf_context(
+            lease, datum_izdaje=preview.datum_izdaje,
+            obdobje_od=preview.obdobje_od, obdobje_do=preview.obdobje_do,
+        )
+        if _kanonicni_fingerprint(asdict(context)) != preview.content_fingerprint:
+            raise ValueError("Vsebina predogleda je zastarela; ponovno odprite PDF predogled.")
         return CompanySampleConfirmation.objects.create(
             company=company,
             lease=lease,
             pdf_template_version=settings.PDF_TEMPLATE_VERSION,
             source_fingerprint=fingerprint,
             fingerprint_schema_version=FINGERPRINT_VZORCA_VERSION,
+            preview=preview,
         )
 
 
-def veljavna_potrditev_vzorca(company: Company) -> PotrditevVeljavnost:
+def veljavna_potrditev_vzorca(
+    company: Company, *, require_preview=False,
+) -> PotrditevVeljavnost:
     company = Company.objects.get(pk=company.pk)
     potrditve = CompanySampleConfirmation.objects.filter(company=company).order_by(
         "-confirmed_at", "-pk"
     )
     if not potrditve.exists():
         return PotrditevVeljavnost("missing")
-    for potrditev in potrditve.select_related("lease"):
+    for potrditev in potrditve.select_related("lease", "preview"):
+        if require_preview and (
+            potrditev.preview_id is None
+            or potrditev.preview.company_id != company.pk
+            or potrditev.preview.lease_id != potrditev.lease_id
+            or potrditev.preview.source_fingerprint != potrditev.source_fingerprint
+            or potrditev.preview.pdf_template_version != potrditev.pdf_template_version
+            or potrditev.preview.fingerprint_schema_version != potrditev.fingerprint_schema_version
+        ):
+            continue
         try:
             fingerprint = izracunaj_fingerprint_vzorca(company, potrditev.lease)
         except (ValueError, OSError):
@@ -394,6 +433,9 @@ def shrani_nespremenljiv_asset(pot: str) -> str:
 
 @transaction.atomic
 def dodeli_naslednjo_stevilko(company, tip, datum_izdaje):
+    from .readiness import require_issuance_readiness
+
+    require_issuance_readiness(company, datum_izdaje, tip=tip)
     leto = datum_izdaje.year if tip == NumberSequence.Tip.ST else 0
     zaporedje, _ = NumberSequence.objects.get_or_create(
         company=company,
@@ -401,6 +443,10 @@ def dodeli_naslednjo_stevilko(company, tip, datum_izdaje):
         leto=leto,
         defaults={"zadnja_stevilka": 0},
     )
+    try:
+        NumberSequence._meta.get_field("zadnja_stevilka").run_validators(zaporedje.zadnja_stevilka + 1)
+    except ValidationError:
+        raise ValidationError("Številčenje presega dovoljeno velikost zaporedja.") from None
     zaporedje.zadnja_stevilka = F("zadnja_stevilka") + 1
     zaporedje.save(update_fields=["zadnja_stevilka"])
     zaporedje.refresh_from_db(fields=["zadnja_stevilka"])

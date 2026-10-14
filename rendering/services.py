@@ -3,7 +3,7 @@ import hashlib
 import mimetypes
 import os
 from contextlib import contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, field
 from decimal import Decimal
 from io import BytesIO
 from pathlib import Path
@@ -15,7 +15,9 @@ if os.name == "nt":
     if _msys_bin.is_dir():
         os.add_dll_directory(str(_msys_bin))
 
+from django.conf import settings
 from django.core.files.storage import default_storage
+from django.db import transaction
 from django.template import Context, Engine
 from weasyprint import HTML
 from weasyprint.urls import URLFetcherResponse
@@ -44,6 +46,7 @@ class PdfRenderRezultat:
     pot: str
     checksum: str
     pdf_bytes: bytes
+    preview_id: object | None = field(default=None, compare=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -519,6 +522,16 @@ def render_eslog(invoice: Invoice) -> EslogRenderRezultat:
         return EslogRenderRezultat(relativna_pot, checksum, koncni_bytes)
 
 def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRenderRezultat:
+    from companies.models import Company, SamplePdfPreview
+    from companies.services import (
+        FINGERPRINT_VZORCA_VERSION,
+        _kanonicni_fingerprint,
+        izracunaj_fingerprint_vzorca,
+        pripravi_fingerprint_predogleda,
+    )
+
+    company = Company.objects.get(pk=lease.unit.property.company_id)
+    fingerprint = pripravi_fingerprint_predogleda(company, lease, datum_izdaje=datum_izdaje)
     context = pripravi_vzorcni_pdf_context(
         lease,
         datum_izdaje=datum_izdaje,
@@ -534,9 +547,20 @@ def render_sample_pdf(lease, *, datum_izdaje, obdobje_od, obdobje_do) -> PdfRend
     except NeveljavnaRenderPot as napaka:
         raise PdfRenderNapaka("PDF_POT_NEVELJAVNA", "PDF ime ni veljavno.") from napaka
     pdf_bytes = _generiraj_pdf_bytes(context)
-    rezultat = PdfRenderRezultat(
-        relativna_pot, hashlib.sha256(pdf_bytes).hexdigest(), pdf_bytes
-    )
     with _zakleni_artifact(pot):
         _zamenjaj_atomsko(pot, pdf_bytes)
-    return rezultat
+    with transaction.atomic():
+        if (
+            fingerprint != izracunaj_fingerprint_vzorca(company, lease, datum_izdaje=datum_izdaje)
+            or context.pdf_template_version != settings.PDF_TEMPLATE_VERSION
+        ):
+            raise ValueError("Podatki so se med PDF predogledom spremenili; poskusite znova.")
+        preview = SamplePdfPreview.objects.create(
+            company=company, lease=lease, source_fingerprint=fingerprint,
+            fingerprint_schema_version=FINGERPRINT_VZORCA_VERSION,
+            pdf_template_version=context.pdf_template_version,
+            pdf_checksum=hashlib.sha256(pdf_bytes).hexdigest(),
+            content_fingerprint=_kanonicni_fingerprint(asdict(context)),
+            datum_izdaje=datum_izdaje, obdobje_od=obdobje_od, obdobje_do=obdobje_do,
+        )
+    return PdfRenderRezultat(relativna_pot, preview.pdf_checksum, pdf_bytes, preview.pk)

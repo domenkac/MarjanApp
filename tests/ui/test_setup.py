@@ -14,11 +14,12 @@ from companies.models import (
     NumberSequence,
     VatSettingsConfirmation,
 )
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.services import potrdi_ddv_nastavitve
 from companies.setup import issuer_setup_issues
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from delivery.models import DeliveryAttempt
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.setup_helpers import approve_sample
 from tests.ui import test_company_confirmations
 from tests.ui.test_nastavitve import company_data
 from ui.models import SetupNavigation
@@ -176,7 +177,7 @@ def test_invalid_step_and_action_preserve_navigation(client, setup_data):
     assert client.get(URL + "?korak=unknown").status_code == 400
     assert SetupNavigation.objects.get().step == "items"
     assert (
-        "Neveljavno dejanje" in client.post(URL, {"action": "finish"}).content.decode()
+        "najmanj pet" in client.post(URL, {"action": "finish"}).content.decode()
     )
     assert (
         "Neveljavno dejanje" in client.post(URL, {"action": "select"}).content.decode()
@@ -250,7 +251,7 @@ def test_incomplete_chain_and_existing_validations(client, setup_data):
 
 def test_stale_confirmations_are_derived_again(client, setup_data):
     potrdi_ddv_nastavitve(setup_data.company)
-    potrdi_vzorec_podjetja(setup_data.company, setup_data.lease)
+    approve_sample(setup_data.company, setup_data.lease)
     select_chain(client, setup_data)
     rows = client.get(URL + "?korak=issuer").context["companies"]
     assert rows[0]["ddv"].stanje == rows[0]["sample"].stanje == "valid"
@@ -431,14 +432,14 @@ def test_all_selected_requirements_never_mark_global_setup_complete(
         root.mkdir()
     verify_and_save_archive_roots(*roots)
     potrdi_ddv_nastavitve(setup_data.company)
-    potrdi_vzorec_podjetja(setup_data.company, setup_data.lease)
+    approve_sample(setup_data.company, setup_data.lease)
     select_chain(client, setup_data)
     response = client.get(URL + "?korak=issuer")
-    assert response.context["checked_count"] == 7
+    assert response.context["checked_count"] == 6
     assert "Začetna nastavitev še ni zaključena" in response.content.decode()
     assert not response.context["next_step"]
     assert (
-        "Neveljavno dejanje" in client.post(URL, {"action": "finish"}).content.decode()
+        "najmanj pet" in client.post(URL, {"action": "finish"}).content.decode()
     )
     assert not Invoice.objects.exists()
     assert not MonthlyCycle.objects.exists()

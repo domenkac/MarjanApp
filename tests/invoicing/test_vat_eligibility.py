@@ -7,9 +7,9 @@ from django.core.exceptions import ValidationError
 
 from catalogs.models import VatRegime
 from companies.models import NumberSequence
+from companies.readiness import verify_numbering
 from companies.services import (
     potrdi_ddv_nastavitve,
-    potrdi_vzorec_podjetja,
     veljavna_potrditev_ddv,
 )
 from contracts.models import Lease, Tenant, Unit
@@ -34,6 +34,7 @@ from tests.invoicing.test_preflight import (
 from tests.invoicing.test_preflight import (
     ready_company as ready_company,  # noqa: PLC0414 -- pytest fixture re-export
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 from tests.ui.test_catalog_settings import vat_data
 from tests.ui.test_contract_leases import item_data, lease_data
 from ui.forms import LeaseForm, LeaseItemCreateForm, LeaseItemDetailsForm, VatRegimeForm
@@ -127,7 +128,7 @@ def _set_eligibility(data, *, restricted=True, tip="PRAVNA_OSEBA", registered=Tr
         data[key].refresh_from_db()
     potrdi_ddv_nastavitve(data["company"])
     if restricted is False or (restricted is True and tip == "PRAVNA_OSEBA" and registered and full):
-        potrdi_vzorec_podjetja(data["company"], data["lease"])
+        approve_sample(data["company"], data["lease"])
 
 
 @pytest.mark.parametrize("tip,registered,full", list(product(
@@ -167,7 +168,7 @@ def test_standard_taxable_items_allow_ineligible_recipient(ready_company, unit_t
     data["item"].refresh_from_db()
     data["item"].full_clean()
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     candidate, _review = _freeze_ready_package(data)
     result = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert result["ok"]
@@ -282,6 +283,7 @@ def test_frozen_invalid_evidence_rejects_before_numbering(ready_company, damage)
     data = ready_company
     _set_eligibility(data)
     candidate, _review = _freeze_ready_package(data)
+    numbering_before = list(NumberSequence.objects.order_by("pk").values())
     candidate = deepcopy(candidate)
     tenant, line = candidate["tenant"], candidate["lines"][0]
     if damage == "individual":
@@ -305,7 +307,7 @@ def test_frozen_invalid_evidence_rejects_before_numbering(ready_company, damage)
     candidate = _replace_frozen(data, candidate)
     with pytest.raises(ValidationError):
         materializiraj_zamrznjenega_mesecnega_kandidata(data["batch"].pk, data["lease"].pk, candidate["candidate_fingerprint"])
-    assert not NumberSequence.objects.exists()
+    assert list(NumberSequence.objects.order_by("pk").values()) == numbering_before
     assert not Invoice.objects.exists()
     assert not InvoiceLine.objects.exists()
 
@@ -316,7 +318,14 @@ def test_frozen_evidence_is_immutable_and_retry_consumes_no_number(ready_company
     candidate, _review = _freeze_ready_package(data)
     Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
     VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=None)
+    blocked = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
+    assert not blocked["ok"] and not Invoice.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 0
+    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=True)
+    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=True)
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
+    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
+    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=None)
     second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert first["ok"] and second["ok"] and second["reused"]
     invoice = Invoice.objects.get()
@@ -324,7 +333,7 @@ def test_frozen_evidence_is_immutable_and_retry_consumes_no_number(ready_company
     assert invoice.prejemnik_polni_odbitek is True
     assert line.ddv_zahteva_polni_odbitek is True
     assert line.ddv_rezim_sifra == candidate["lines"][0]["vat_regime_code"]
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
     with pytest.raises(ValueError):
         spremeni_vrstico(line, ddv_zahteva_polni_odbitek=False)
 
@@ -337,7 +346,7 @@ def test_eligibility_change_changes_candidate_and_confirmation_fingerprints(read
     assert veljavna_potrditev_ddv(data["company"]).stanje == "stale"
     potrdi_ddv_nastavitve(data["company"])
     data["lease"].refresh_from_db()
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     after = _calculate(data)[0]["candidate_fingerprint"]
     assert before != after
 
@@ -346,6 +355,7 @@ def test_eligibility_change_changes_candidate_and_confirmation_fingerprints(read
 def test_legacy_frozen_snapshot_only_allows_exact_issued_retry(ready_company, issued):
     data = ready_company
     candidate, _review = _freeze_ready_package(data)
+    numbering_before = list(NumberSequence.objects.order_by("pk").values())
     if issued:
         assert izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]["ok"]
         Invoice.objects.update(prejemnik_polni_odbitek=None, eslog_konfiguracija_snapshot=None)
@@ -368,30 +378,31 @@ def test_legacy_frozen_snapshot_only_allows_exact_issued_retry(ready_company, is
         assert result["reused"]
         assert Invoice.objects.get().prejemnik_polni_odbitek is None
         assert InvoiceLine.objects.get().ddv_zahteva_polni_odbitek is None
-        assert NumberSequence.objects.get().zadnja_stevilka == 1
+        assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
     else:
-        assert not Invoice.objects.exists() and not NumberSequence.objects.exists()
+        assert not Invoice.objects.exists()
+        assert list(NumberSequence.objects.order_by("pk").values()) == numbering_before
 
 
 def test_direct_issuance_persists_eligibility_evidence(ready_company):
     data = ready_company
     _set_eligibility(data)
     invoice = pripravi_osnutek_np(data["lease"], date(2026, 9, 1), date(2026, 9, 30), date(2026, 9, 10)).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     issued = potrdi_osnutek_np(invoice)
     line = issued.invoiceline_set.get()
     assert issued.prejemnik_polni_odbitek is True
     assert line.ddv_zahteva_polni_odbitek is True
     assert line.ddv_rezim_sifra == data["regime"].sifra
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
 
 
 def test_rejection_preserves_existing_sequence_and_valid_retry(ready_company):
     data = ready_company
     _set_eligibility(data)
     candidate, _review = _freeze_ready_package(data)
-    sequence = NumberSequence.objects.create(
-        company=data["company"], tip=NumberSequence.Tip.NP, leto=0, zadnja_stevilka=41
-    )
+    verify_numbering(data["company"], np_last=41, st_last=0, st_year=2026, explicit=True)
+    sequence = NumberSequence.objects.get(company=data["company"], tip="NP", leto=0)
     invalid = deepcopy(candidate)
     invalid["tenant"]["full_deduction"] = False
     invalid = _replace_frozen(data, invalid)

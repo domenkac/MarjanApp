@@ -13,6 +13,7 @@ from tests.invoicing.test_priprava_np import (
     OBDOBJE_OD,
     dodaj_postavko,
 )
+from tests.setup_helpers import prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -43,6 +44,7 @@ def test_faza1_pot_od_pogodbe_do_izdanega_posnetka(pogodba):
     assert (delta.ima_prejsnji_racun, delta.obstaja_razlika) == (False, False)
     assert [razlaga.koda for razlaga in delta.razlage] == ["PRVA_IZDAJA"]
 
+    prepare_initial_setup(osnutek.company, osnutek.lease)
     potrjen = potrdi_osnutek_np(osnutek)
     assert (potrjen.stevilka, potrjen.status, potrjen.rok_placila) == (
         "NP-00001", Invoice.Status.IZBRAN_ZA_POSILJANJE, DATUM_IZDAJE.replace(day=16)

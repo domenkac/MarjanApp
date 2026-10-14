@@ -14,6 +14,7 @@ from invoicing.models import InvoiceLine
 from invoicing.services import potrdi_osnutek_np, pripravi_osnutek_np
 from tests.image_data import slika_bytes
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -24,6 +25,7 @@ def test_arhiviranje_podjetja_ohrani_zgodovino_in_izkljuci_novi_np(pogodba):
     invoice = pripravi_osnutek_np(
         pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
     ).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     invoice = potrdi_osnutek_np(invoice)
     line = InvoiceLine.objects.get(invoice=invoice)
 

@@ -14,6 +14,7 @@ from invoicing.services import (
     pripravi_osnutek_np,
 )
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -84,6 +85,7 @@ def test_np_snapshot_nastane_ob_potrditvi_in_ostane_nespremenjen(pogodba):
     tenant.eslog_neobvezna_polja = {"elektronski_naslov_kupca": " racuni@x.si "}
     tenant.save(update_fields=["eslog_neobvezna_polja"])
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
     assert potrjen.eslog_konfiguracija_snapshot == {
         "version": "eslog-2.0-v200-config-v1",
@@ -120,6 +122,7 @@ def test_korekcija_uporabi_trenutno_konfiguracijo_ob_lastni_potrditvi(
     pogodba, tip
 ):
     dodaj_postavko(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     original = potrdi_osnutek_np(
         pripravi_osnutek_np(
             pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
@@ -168,6 +171,7 @@ def test_korekcija_uporabi_trenutno_konfiguracijo_ob_lastni_potrditvi(
 @pytest.mark.parametrize("tip", [Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS])
 def test_neveljavna_korekcijska_konfiguracija_ne_porabi_stevilke(pogodba, tip):
     dodaj_postavko(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     original = potrdi_osnutek_np(
         pripravi_osnutek_np(
             pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
@@ -191,7 +195,7 @@ def test_neveljavna_korekcijska_konfiguracija_ne_porabi_stevilke(pogodba, tip):
     company = pogodba.unit.property.company
     company.eslog_privzeti_neobvezni_segmenti = {E_NASLOV: True, KONTAKT: False}
     company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
-    zaporedje = NumberSequence.objects.get()
+    zaporedje = NumberSequence.objects.get(company=company, tip="NP")
 
     with pytest.raises(ValueError, match="BT-49"):
         potrdi_korekcijski_osnutek(popravek)
@@ -204,6 +208,7 @@ def test_neveljavna_korekcijska_konfiguracija_ne_porabi_stevilke(pogodba, tip):
 
 def test_korekcija_brez_pogodbe_odpove_pred_stevilcenjem(pogodba):
     dodaj_postavko(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     original = potrdi_osnutek_np(
         pripravi_osnutek_np(
             pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
@@ -220,11 +225,12 @@ def test_korekcija_brez_pogodbe_odpove_pred_stevilcenjem(pogodba):
     storno.refresh_from_db()
     assert storno.stevilka is None
     assert storno.eslog_konfiguracija_snapshot is None
-    assert NumberSequence.objects.get(tip=NumberSequence.Tip.NP).zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=pogodba.unit.property.company, tip=NumberSequence.Tip.NP).zadnja_stevilka == 1
 
 
 def test_lease_st_korekcija_uporabi_trenutno_konfiguracijo(pogodba):
     dodaj_postavko(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     np = potrdi_osnutek_np(
         pripravi_osnutek_np(
             pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
@@ -242,12 +248,7 @@ def test_lease_st_korekcija_uporabi_trenutno_konfiguracijo(pogodba):
         izdajatelj_podpisnik_slika_pot=np.izdajatelj_podpisnik_slika_pot,
         eslog_konfiguracija_snapshot=BASELINE,
     )
-    NumberSequence.objects.create(
-        company=np.company,
-        tip=NumberSequence.Tip.ST,
-        leto=2026,
-        zadnja_stevilka=1,
-    )
+    NumberSequence.objects.filter(company=np.company, tip="ST", leto=2026).update(zadnja_stevilka=1)
     InvoiceLine.objects.create(
         invoice=original,
         opis="Storitev",

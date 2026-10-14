@@ -9,7 +9,8 @@ from django.utils import timezone
 
 from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.readiness import verify_numbering
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from invoicing.models import (
     Invoice,
@@ -46,6 +47,7 @@ from rendering.services import (
     renderiraj_koncne_pdfje_mesecnega_paketa,
     stanje_koncnega_pdf,
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -119,7 +121,7 @@ def ready_company(db, settings, tmp_path):
         vat_regime=regime,
     )
     potrdi_ddv_nastavitve(company)
-    potrdi_vzorec_podjetja(company, lease)
+    approve_sample(company, lease)
     cycle = MonthlyCycle.objects.create(
         obdobje=date(2026, 9, 1),
         datum_izdaje=date(2026, 9, 10),
@@ -154,7 +156,7 @@ def potrdi_septembrski_vzorec(monkeypatch):
             return date(2026, 9, 10)
 
     monkeypatch.setattr(company_services, "date", SeptemberDate)
-    return potrdi_vzorec_podjetja
+    return approve_sample
 
 
 def _codes(batch):
@@ -192,7 +194,8 @@ def _add_ready_company(data):
         vat_regime=data["regime"],
     )
     potrdi_ddv_nastavitve(company)
-    potrdi_vzorec_podjetja(company, lease)
+    approve_sample(company, lease)
+    verify_numbering(company, np_last=0, st_last=0, st_year=2026, explicit=True)
     return company, MonthlyBatch.objects.create(cycle=data["cycle"], company=company)
 
 
@@ -287,6 +290,7 @@ def _enter_step4_with_reviews(data, *, will_issue=True, exceptions=None):
 
 
 def _freeze_ready_package(data):
+    prepare_initial_setup(data["company"], data["lease"])
     candidate = _calculate(data)[0]
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
     data["cycle"].save(update_fields=["trenutni_korak"])
@@ -319,6 +323,7 @@ def _freeze_unselected_package(data):
 
 
 def _freeze_all_candidates(data):
+    prepare_initial_setup(data["company"], data["lease"])
     candidates = _calculate(data)
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
     data["cycle"].save(update_fields=["trenutni_korak"])
@@ -429,7 +434,7 @@ def test_candidates_are_ordered_and_archived_lease_is_excluded(ready_company):
     second = _add_lease(data, "P-2", with_item=True)
     archived = _add_lease(data, "P-3", with_item=True, archived=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     preveri_predhodno_kontrolo(data["cycle"])
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
     data["cycle"].save(update_fields=["trenutni_korak"])
@@ -550,7 +555,7 @@ def test_document_input_change_changes_fingerprint(
     model.objects.filter(
         pk=(ready_company["item"].pk if model is LeaseItem else ready_company["tenant"].pk)
     ).update(**{field: value})
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    approve_sample(ready_company["company"], ready_company["lease"])
     second = _calculate(ready_company)[0]["candidate_fingerprint"]
 
     assert second != first
@@ -559,7 +564,7 @@ def test_document_input_change_changes_fingerprint(
 def test_issuer_change_changes_fingerprint(ready_company):
     first = _calculate(ready_company)[0]["candidate_fingerprint"]
     Company.objects.filter(pk=ready_company["company"].pk).update(naziv="Nova Alfa d.o.o.")
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    approve_sample(ready_company["company"], ready_company["lease"])
     second = _calculate(ready_company)[0]["candidate_fingerprint"]
 
     assert second != first
@@ -569,13 +574,13 @@ def test_other_candidate_change_does_not_change_fingerprint(ready_company):
     second_lease = _add_lease(ready_company, with_item=True)
     second_item = LeaseItem.objects.get(lease=second_lease)
     potrdi_ddv_nastavitve(ready_company["company"])
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    approve_sample(ready_company["company"], ready_company["lease"])
     first_candidates = _calculate(ready_company)
     untouched = next(
         item for item in first_candidates if item["lease_id"] == ready_company["lease"].pk
     )["candidate_fingerprint"]
     LeaseItem.objects.filter(pk=second_item.pk).update(znesek_neto_mesecno=Decimal("51.00"))
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    approve_sample(ready_company["company"], ready_company["lease"])
     second_candidates = _calculate(ready_company)
 
     assert next(
@@ -587,7 +592,7 @@ def test_first_issue_and_proportional_exceptions(ready_company):
     Lease.objects.filter(pk=ready_company["lease"].pk).update(
         datum_zacetka=date(2026, 9, 10)
     )
-    potrdi_vzorec_podjetja(ready_company["company"], ready_company["lease"])
+    approve_sample(ready_company["company"], ready_company["lease"])
     codes = _candidate_codes(_calculate(ready_company)[0])
 
     assert {"PRVA_IZDAJA", "SORAZMERNO"} <= codes
@@ -877,7 +882,7 @@ def test_step4_late_join_preserves_existing_active_snapshot(ready_company, clien
     LeaseItem.objects.filter(pk=data["item"].pk).update(
         znesek_neto_mesecno=Decimal("125.00")
     )
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     Company.objects.filter(pk=second_company.pk).update(trr=second_iban)
 
     client.post("/mesecni-obracun/", {"action": "refresh_review"})
@@ -1500,7 +1505,7 @@ def test_valid_required_reference_passes(ready_company):
         referenca_listine="POG-1", datum_reference=date(2026, 1, 1)
     )
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
 
     preveri_predhodno_kontrolo(data["cycle"])
 
@@ -1660,7 +1665,7 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
 ):
     data = ready_company
     RecipientContact.objects.create(
-        lease=data["lease"], email="kontakt@example.com", vloga="TO"
+        lease=data["lease"], email="kontakt@example.com", vloga="TO", kanal="PDF"
     )
     candidate, _review = _freeze_ready_package(data)
     frozen = data["batch"].calculation_snapshot
@@ -1685,6 +1690,17 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
         email="changed@example.com"
     )
 
+    blocked = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
+    assert not blocked["ok"]
+    assert not Invoice.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 0
+    Company.objects.filter(pk=data["company"].pk).update(trr="SI56191000000123438")
+    settings.PDF_TEMPLATE_VERSION = candidate["pdf_template_version"]
+    VatRegime.objects.filter(pk=data["regime"].pk).update(
+        nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
+    )
+    potrdi_ddv_nastavitve(data["company"])
+    approve_sample(data["company"], data["lease"])
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     invoice = Invoice.objects.get()
@@ -1711,7 +1727,7 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     assert line.opis == candidate["lines"][0]["description"]
     assert line.osnova == Decimal(candidate["lines"][0]["net"])
     assert line.ddv_eslog_koda == "S"
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
     assert invoice.rendered_pdf_path == invoice.checksum == ""
     assert invoice.rendered_eslog_path == invoice.rendered_eslog_checksum == ""
     assert MonthlyCycle.objects.get().trenutni_korak == 5
@@ -1736,7 +1752,7 @@ def test_frozen_unselected_candidate_archives_without_number(ready_company):
     assert invoice.status == Invoice.Status.ARHIVIRAN_NI_IZDAN
     assert invoice.stevilka is None
     assert invoice.razlog_arhiviranja == "User decision"
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert InvoiceLine.objects.count() == len(candidate["lines"])
 
 
@@ -1754,7 +1770,7 @@ def test_post_allocation_failure_rolls_back_number_and_invoice(
         materializiraj_zamrznjenega_mesecnega_kandidata(
             data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
         )
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert not Invoice.objects.exists()
     assert not InvoiceLine.objects.exists()
 
@@ -1775,19 +1791,14 @@ def test_retry_reuses_invoice_after_pdf_metadata(ready_company):
     )
 
     assert reused and same.pk == invoice.pk
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
     assert (Invoice.objects.count(), InvoiceLine.objects.count()) == (1, 1)
 
 
 def test_six_digit_np_number_is_materialized_and_reused(ready_company):
     data = ready_company
     candidate, review = _freeze_ready_package(data)
-    NumberSequence.objects.create(
-        company=data["company"],
-        tip=NumberSequence.Tip.NP,
-        leto=0,
-        zadnja_stevilka=99999,
-    )
+    verify_numbering(data["company"], np_last=99999, st_last=0, st_year=2026, explicit=True)
 
     invoice, reused = materializiraj_zamrznjenega_mesecnega_kandidata(
         data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
@@ -1802,7 +1813,7 @@ def test_six_digit_np_number_is_materialized_and_reused(ready_company):
     assert invoice.stevilka == "NP-100000"
     assert not reused and reused_again and same.pk == invoice.pk
     assert (Invoice.objects.count(), InvoiceLine.objects.count()) == (1, 1)
-    assert NumberSequence.objects.get().zadnja_stevilka == 100000
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 100000
     assert state["state"] == "MATERIALIZED" and state["invoice"].pk == invoice.pk
 
     invoice.stevilka = "NP-1234"
@@ -1839,7 +1850,7 @@ def test_conflicting_line_trace_or_audit_state_fails_closed(
         materializiraj_zamrznjenega_mesecnega_kandidata(
             data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
         )
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
 
 
 def test_line_creation_failure_rolls_back_invoice_and_number(
@@ -1857,7 +1868,7 @@ def test_line_creation_failure_rolls_back_invoice_and_number(
             data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
         )
 
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert not Invoice.objects.exists()
     assert not InvoiceLine.objects.exists()
 
@@ -1865,6 +1876,7 @@ def test_line_creation_failure_rolls_back_invoice_and_number(
 def test_direct_materialization_rejects_blocked_stale_batch(ready_company):
     data = ready_company
     _company, stale_batch = _add_ready_company(data)
+    prepare_initial_setup(data["company"], data["lease"])
     candidates = _calculate(data)
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
     data["cycle"].save(update_fields=["trenutni_korak"])
@@ -1898,7 +1910,7 @@ def test_direct_materialization_rejects_blocked_stale_batch(ready_company):
     )
     assert not reused and invoice.stevilka == "NP-00001"
     assert Invoice.objects.count() == 1
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
 
 
 def test_partial_package_continues_and_retry_reuses_resolved_candidates(
@@ -1908,7 +1920,7 @@ def test_partial_package_continues_and_retry_reuses_resolved_candidates(
     _add_lease(data, "P-B", with_item=True)
     _add_lease(data, "P-C", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     candidates, _reviews = _freeze_all_candidates(data)
     snapshot = data["batch"].calculation_snapshot
     snapshot["candidates"][1]["candidate_fingerprint"] = "0" * 64
@@ -1927,7 +1939,7 @@ def test_partial_package_continues_and_retry_reuses_resolved_candidates(
     assert list(
         Invoice.objects.order_by("lease_id").values_list("stevilka", flat=True)
     ) == first_numbers
-    assert NumberSequence.objects.get().zadnja_stevilka == 2
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 2
     assert len(candidates) == 3
 
 
@@ -1952,7 +1964,7 @@ def test_zero_selected_including_system_zero_lines_consumes_no_number(
 
     assert all(result["ok"] for result in results)
     assert Invoice.objects.count() == 2
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert set(Invoice.objects.values_list("status", flat=True)) == {
         Invoice.Status.ARHIVIRAN_NI_IZDAN
     }
@@ -1963,7 +1975,7 @@ def test_zero_selected_including_system_zero_lines_consumes_no_number(
     assert all(item["ok"] and item["skipped"] for item in pdf_results)
     assert cycle.trenutni_korak == MonthlyCycle.Korak.ZAKLJUCEK
     assert cycle.status == MonthlyCycle.Status.V_TEKU
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert not Invoice.objects.exclude(rendered_pdf_path="").exists()
 
 
@@ -2006,7 +2018,7 @@ def test_conflicting_and_multiple_existing_invoices_fail_closed(ready_company):
         materializiraj_zamrznjenega_mesecnega_kandidata(
             data["batch"].pk, candidate["lease_id"], review.candidate_fingerprint
         )
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 1
 
 
 @pytest.mark.parametrize("invalid", ["NaN", "Infinity", "-Infinity"])
@@ -2034,7 +2046,7 @@ def test_nonfinite_frozen_money_fails_before_numbering(ready_company, invalid):
         materializiraj_zamrznjenega_mesecnega_kandidata(
             data["batch"].pk, candidate["lease_id"], fingerprint
         )
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
     assert not Invoice.objects.exists()
 
 
@@ -2092,7 +2104,7 @@ def test_koncni_pdf_paketa_nastane_zunaj_transakcije_in_odpre_korak_6(
     assert "CONFLICT" not in content and "Napaka" not in content
     before = (
         Invoice.objects.count(),
-        NumberSequence.objects.get().zadnja_stevilka,
+        NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka,
         invoice.checksum,
     )
     (settings.RENDERING_ROOT / invoice.rendered_pdf_path).unlink()
@@ -2106,7 +2118,7 @@ def test_koncni_pdf_paketa_nastane_zunaj_transakcije_in_odpre_korak_6(
     assert MonthlyCycle.objects.get(pk=cycle.pk).trenutni_korak == 6
     assert (
         Invoice.objects.count(),
-        NumberSequence.objects.get().zadnja_stevilka,
+        NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka,
         Invoice.objects.get(pk=invoice.pk).checksum,
     ) == before
     assert atomic_states == [False, False]
@@ -2205,7 +2217,7 @@ def test_paket_nadaljuje_po_pdf_napaki_in_obdrzi_uspesne(
     _add_lease(data, "P-B", with_item=True)
     _add_lease(data, "P-C", with_item=True)
     potrdi_ddv_nastavitve(data["company"])
-    potrdi_vzorec_podjetja(data["company"], data["lease"])
+    approve_sample(data["company"], data["lease"])
     _freeze_all_candidates(data)
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
     from rendering import services as rendering_services

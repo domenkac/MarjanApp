@@ -24,7 +24,8 @@ from accounting_export.workflow import deliver_accountant_control_report
 from archive.configuration import verify_and_save_archive_roots
 from archive.models import ArchivedFile, BackupSnapshot
 from companies.models import NumberSequence
-from companies.services import potrdi_ddv_nastavitve, potrdi_vzorec_podjetja
+from companies.readiness import verify_numbering
+from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, RecipientContact
 from core.models import AuditLogEntry
 from delivery.models import (
@@ -46,6 +47,7 @@ from tests.invoicing.test_preflight import _add_ready_company
 from tests.invoicing.test_preflight import (
     ready_company as ready_company,  # noqa: PLC0414
 )
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytestmark = pytest.mark.django_db(transaction=True)
 PERIOD = date(2030, 11, 1)
@@ -144,10 +146,9 @@ def flow(ready_company, client, settings, tmp_path, monkeypatch, external_bounda
             kanal=RecipientContact.Kanal.PDF,
         )
         potrdi_ddv_nastavitve(company)
-        potrdi_vzorec_podjetja(company, lease)
-        NumberSequence.objects.create(
-            company=company, tip="NP", leto=0, zadnja_stevilka=40 + index * 50
-        )
+        approve_sample(company, lease)
+        verify_numbering(company, np_last=40 + index * 50, st_last=0, st_year=2026, explicit=True)
+    prepare_initial_setup(companies[0], leases[0])
     calls = []
     outcomes = {}
     envelopes = []

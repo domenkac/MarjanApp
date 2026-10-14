@@ -24,21 +24,19 @@ from companies.services import (
     veljavna_potrditev_ddv,
     veljavna_potrditev_vzorca,
 )
-from companies.services import (
-    potrdi_vzorec_podjetja as _potrdi_vzorec_podjetja,
-)
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.services import odloci_o_fizicnem_izbrisu as odloci_o_izbrisu_pogodbe
 from invoicing.models import Invoice, InvoiceLine
+from tests.setup_helpers import approve_sample as _approve_sample
 
 PNG_1 = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
 )
 
 
-def potrdi_vzorec_podjetja(company, lease):
+def approve_sample(company, lease):
     potrdi_ddv_nastavitve(company)
-    return _potrdi_vzorec_podjetja(company, lease)
+    return _approve_sample(company, lease)
 
 
 PNG_2 = base64.b64decode(
@@ -231,7 +229,7 @@ def test_sample_confirmation_lifecycle_and_safety(confirmation_data, settings):
         NumberSequence.objects.count(),
     )
 
-    confirmation = potrdi_vzorec_podjetja(company, lease)
+    confirmation = approve_sample(company, lease)
 
     assert confirmation.company == company
     assert confirmation.lease == lease
@@ -265,7 +263,7 @@ def test_sample_confirmation_lifecycle_and_safety(confirmation_data, settings):
 )
 def test_sample_semantic_change_is_stale(confirmation_data, target, field, value):
     company = confirmation_data["company"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
 
     type(confirmation_data[target]).objects.filter(
         pk=confirmation_data[target].pk
@@ -276,7 +274,7 @@ def test_sample_semantic_change_is_stale(confirmation_data, target, field, value
 
 def test_unrelated_tenant_change_does_not_stale_sample(confirmation_data):
     company = confirmation_data["company"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
     Tenant.objects.create(
         tip=Tenant.Tip.FIZICNA_OSEBA,
         naziv="Nepovezan najemnik",
@@ -291,7 +289,7 @@ def test_unrelated_tenant_change_does_not_stale_sample(confirmation_data):
 
 def test_logo_filefield_replacement_stales_sample(confirmation_data):
     company = confirmation_data["company"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
     staro_ime = company.logotip.name
 
     company.logotip.save("nov-logo.png", ContentFile(PNG_2), save=True)
@@ -303,7 +301,7 @@ def test_logo_filefield_replacement_stales_sample(confirmation_data):
 def test_signature_filefield_replacement_stales_sample(confirmation_data):
     company = confirmation_data["company"]
     signatory = confirmation_data["signatory"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
     staro_ime = signatory.podpis_slika.name
 
     signatory.podpis_slika.save("nov-podpis.png", ContentFile(PNG_1), save=True)
@@ -337,7 +335,7 @@ def test_unrelated_lease_amount_does_not_stale_sample(confirmation_data):
         znesek_neto_mesecno=Decimal("50.00"),
         vat_regime=confirmation_data["used_regime"],
     )
-    potrdi_vzorec_podjetja(company, selected_lease)
+    approve_sample(company, selected_lease)
 
     LeaseItem.objects.filter(pk=other_item.pk).update(
         znesek_neto_mesecno=Decimal("60.00")
@@ -348,7 +346,7 @@ def test_unrelated_lease_amount_does_not_stale_sample(confirmation_data):
 
 def test_sample_validity_does_not_read_storage(confirmation_data, monkeypatch):
     company = confirmation_data["company"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
 
     def nepricakovano_branje(*_args, **_kwargs):
         raise AssertionError("Validity ne sme brati shrambe.")
@@ -378,13 +376,13 @@ def test_asset_change_during_confirmation_requires_retry(
     )
 
     with pytest.raises(AssetPotrditveSpremenjen):
-        potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+        approve_sample(company, confirmation_data["lease"])
     assert not CompanySampleConfirmation.objects.filter(company=company).exists()
 
 
 def test_pdf_version_change_stales_sample(confirmation_data, settings):
     company = confirmation_data["company"]
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
 
     settings.PDF_TEMPLATE_VERSION = "2"
 
@@ -394,9 +392,9 @@ def test_pdf_version_change_stales_sample(confirmation_data, settings):
 def test_prior_sample_state_becomes_valid_after_exact_restoration(confirmation_data):
     company = confirmation_data["company"]
     item = confirmation_data["item"]
-    original = potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    original = approve_sample(company, confirmation_data["lease"])
     LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("120.00"))
-    potrdi_vzorec_podjetja(company, confirmation_data["lease"])
+    approve_sample(company, confirmation_data["lease"])
     LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("100.00"))
 
     result = veljavna_potrditev_vzorca(company)
@@ -409,7 +407,7 @@ def test_confirmation_history_protects_company_and_lease(confirmation_data):
     company = confirmation_data["company"]
     lease = confirmation_data["lease"]
     potrdi_ddv_nastavitve(company)
-    potrdi_vzorec_podjetja(company, lease)
+    approve_sample(company, lease)
     Company.objects.filter(pk=company.pk).update(ddv_razporeditev_potrjena=False)
 
     company_result = odloci_o_fizicnem_izbrisu(company, izrecna_potrditev=True)

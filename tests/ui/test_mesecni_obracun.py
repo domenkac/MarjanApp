@@ -1476,9 +1476,10 @@ def unknown_delivery(ready_company, settings, tmp_path):  # noqa: F811
     unrelated["obdobje_od"] = date(2025, 1, 1)
     unrelated["obdobje_do"] = date(2025, 1, 31)
     Invoice.objects.create(**unrelated)
-    ArchiveConfiguration.objects.create(
-        local_root=str(tmp_path / "local"), icloud_root=str(tmp_path / "icloud"),
-        verified_at=timezone.now(),
+    ArchiveConfiguration.objects.update_or_create(
+        pk=1, defaults={"local_root": str(tmp_path / "local"),
+                       "icloud_root": str(tmp_path / "icloud"),
+                       "verified_at": timezone.now()},
     )
     return cycle, attempt
 

@@ -36,6 +36,7 @@ class ArchiveConfiguration(models.Model):
     icloud_root = models.CharField()
     dropbox_root = models.CharField(blank=True, default="")
     verified_at = models.DateTimeField()
+    verification_evidence = models.JSONField(default=dict)
     created_at = models.DateTimeField(auto_now_add=True)
     updated_at = models.DateTimeField(auto_now=True)
 

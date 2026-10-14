@@ -23,6 +23,8 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.image_data import slika_bytes
+from tests.setup_helpers import prepare_initial_setup
 
 OBDOBJE_OD = date(2026, 8, 1)
 OBDOBJE_DO = date(2026, 8, 31)
@@ -32,8 +34,8 @@ DATUM_IZDAJE = date(2026, 9, 1)
 @pytest.fixture
 def pogodba(db, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
-    (tmp_path / "logo.png").write_bytes(b"logo")
-    (tmp_path / "podpis.png").write_bytes(b"podpis")
+    (tmp_path / "logo.png").write_bytes(slika_bytes())
+    (tmp_path / "podpis.png").write_bytes(slika_bytes())
     company = Company.objects.create(
         drzava_koda="SI",
         naziv="Alfa d.o.o.",
@@ -296,6 +298,7 @@ def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
     postavka.naziv_postavke = "Spremenjena postavka"
     postavka.save(update_fields=["naziv_postavke"])
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
 
     assert potrjen.stevilka == "NP-00001"
@@ -329,6 +332,7 @@ def test_potrditev_ne_prebere_drzave_in_ddv_statusa_iz_zivih_partnerjev(pogodba)
     company.ddv_zavezanec = False
     company.save(update_fields=["drzava_koda", "ddv_zavezanec"])
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
 
     assert (
@@ -354,6 +358,7 @@ def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
     assert invoice.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
     assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
 
     assert potrjen.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
@@ -387,6 +392,7 @@ def test_potrditev_ne_prebere_tipa_in_ddv_rezima_iz_zivih_modelov(pogodba):
         update_fields=["nacin_obracuna", "eslog_koda", "klavzula"]
     )
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
     vrstica.refresh_from_db()
 
@@ -429,9 +435,11 @@ def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
     pogodba.tenant.davcna_stevilka = ""
     pogodba.tenant.maticna_stevilka = ""
-    pogodba.tenant.save(update_fields=["tip", "davcna_stevilka", "maticna_stevilka"])
+    pogodba.tenant.identificiran_za_ddv = False
+    pogodba.tenant.save(update_fields=["tip", "davcna_stevilka", "maticna_stevilka", "identificiran_za_ddv"])
     dodaj_postavko(pogodba)
 
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     potrjen = potrdi_osnutek_np(pripravi(pogodba).invoice)
 
     assert potrjen.prejemnik_tip == Tenant.Tip.FIZICNA_OSEBA
@@ -440,6 +448,7 @@ def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
 
 def test_eslog_artifact_se_nastavi_samo_z_namensko_storitvijo(pogodba):
     dodaj_postavko(pogodba)
+    prepare_initial_setup(pogodba.unit.property.company, pogodba)
     invoice = potrdi_osnutek_np(pripravi(pogodba).invoice)
 
     shranjen = nastavi_eslog_artifact(
@@ -466,6 +475,7 @@ def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):
     dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00", nacin="OPROSCENO")
     invoice = pripravi(pogodba).invoice
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
 
     assert (potrjen.osnova_skupaj, potrjen.ddv_skupaj, potrjen.skupaj_z_ddv) == (
@@ -483,9 +493,11 @@ def test_potrditvi_porabita_zaporedni_np_stevilki_brez_letnega_reseta(pogodba):
     drugi.datum_izdaje = date(2027, 1, 1)
     drugi.save(update_fields=["datum_izdaje"])
 
+    prepare_initial_setup(prvi.company, prvi.lease)
     assert potrdi_osnutek_np(prvi).stevilka == "NP-00001"
+    prepare_initial_setup(drugi.company, drugi.lease)
     assert potrdi_osnutek_np(drugi).stevilka == "NP-00002"
-    zaporedje = NumberSequence.objects.get(company=prvi.company)
+    zaporedje = NumberSequence.objects.get(company=prvi.company, tip="NP")
     assert (zaporedje.tip, zaporedje.leto, zaporedje.zadnja_stevilka) == (
         NumberSequence.Tip.NP,
         0,
@@ -496,6 +508,7 @@ def test_potrditvi_porabita_zaporedni_np_stevilki_brez_letnega_reseta(pogodba):
 def test_ponovna_potrditev_ne_porabi_druge_stevilke(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrdi_osnutek_np(invoice)
 
     with pytest.raises(ValueError):
@@ -503,7 +516,7 @@ def test_ponovna_potrditev_ne_porabi_druge_stevilke(pogodba):
 
     invoice.refresh_from_db()
     assert invoice.stevilka == "NP-00001"
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=invoice.company, tip="NP").zadnja_stevilka == 1
 
 
 def test_neostevilcen_racun_z_drugim_statusom_je_zavrnjen(pogodba):
@@ -567,6 +580,7 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
         patch.object(Invoice, "save", side_effect=RuntimeError("napaka po dodelitvi")),
         pytest.raises(RuntimeError, match="napaka po dodelitvi"),
     ):
+        prepare_initial_setup(invoice.company, invoice.lease)
         potrdi_osnutek_np(invoice)
 
     invoice.refresh_from_db()
@@ -581,7 +595,7 @@ def test_napaka_po_dodelitvi_stevilke_povrne_racun_in_zaporedje(pogodba):
         None,
         None,
     )
-    assert NumberSequence.objects.get().zadnja_stevilka == 41
+    assert NumberSequence.objects.get(company=invoice.company, tip="NP").zadnja_stevilka == 41
 
 
 def test_np_nespremenljive_assete_pripravi_zunaj_transakcije(
@@ -598,6 +612,7 @@ def test_np_nespremenljive_assete_pripravi_zunaj_transakcije(
 
     monkeypatch.setattr(invoicing_services, "shrani_nespremenljiv_asset", preveri)
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     assert potrdi_osnutek_np(invoice).stevilka == "NP-00001"
 
 
@@ -619,6 +634,7 @@ def test_np_ob_potrditvi_uporabi_podpisnika_za_koncni_datum(
     )
     spremeni_podatke_racuna(invoice, datum_izdaje=date(2026, 9, 2))
 
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
 
     assert potrjen.izdajatelj_podpisnik_ime == "Boris Podpisnik"
@@ -740,6 +756,7 @@ def test_neostevilcen_osnutek_se_lahko_ureja(pogodba):
 def test_ostevilcen_racun_in_vrstice_se_ne_spremenijo(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     potrdi_osnutek_np(invoice)
     assert invoice.stevilka is None  # preveri tudi zastarel objekt v pomnilniku
     vrstica = InvoiceLine.objects.get(invoice=invoice)
@@ -854,4 +871,5 @@ def test_potrditev_zavrne_mesanje_o_in_obdavcene_pred_stevilcenjem(pogodba):
 @pytest.mark.parametrize("nacin", ["NI_PREDMET", "OBDAVCENO"])
 def test_homogeni_o_in_navaden_s_se_lahko_potrdita(pogodba, nacin):
     dodaj_postavko(pogodba, nacin=nacin)
+    prepare_initial_setup(pripravi(pogodba).invoice.company, pripravi(pogodba).invoice.lease)
     assert potrdi_osnutek_np(pripravi(pogodba).invoice).stevilka == "NP-00001"

@@ -20,7 +20,9 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.image_data import slika_bytes
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -31,6 +33,7 @@ def izdan_np(pogodba):
     osnutek = pripravi_osnutek_np(
         pogodba, date(2026, 8, 1), date(2026, 8, 31), date(2026, 9, 1)
     ).invoice
+    prepare_initial_setup(osnutek.company, osnutek.lease)
     return potrdi_osnutek_np(osnutek)
 
 
@@ -126,6 +129,7 @@ def test_storno_ohrani_eslog_snapshote_po_spremembi_zivih_podatkov(pogodba):
 
     pogodba.tenant.tip = pogodba.tenant.Tip.FIZICNA_OSEBA
     pogodba.tenant.save(update_fields=["tip"])
+    approve_sample(original.company, pogodba)
     for postavka in pogodba.leaseitem_set.select_related("vat_regime"):
         postavka.vat_regime.eslog_koda = "SPREMENJENA"
         postavka.vat_regime.save(update_fields=["eslog_koda"])
@@ -149,7 +153,7 @@ def test_korekcija_uporabi_podpisnika_veljavnega_na_svoj_datum(
     podpisnik_a = Signatory.objects.get(company=original.company)
     podpisnik_a.velja_do = date(2026, 9, 1)
     podpisnik_a.save(update_fields=["velja_do"])
-    (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+    (tmp_path / "podpis-b.png").write_bytes(slika_bytes(size=(3, 3)))
     Signatory.objects.create(
         company=original.company,
         ime_priimek="Boris Podpisnik",
@@ -173,6 +177,7 @@ def test_korekcija_uporabi_podpisnika_veljavnega_na_svoj_datum(
             ddv_rekap_skupina="NI_PREDMET",
         )
 
+    approve_sample(original.company, pogodba)
     potrjen = potrdi_korekcijski_osnutek(popravek)
     original.refresh_from_db()
 
@@ -375,7 +380,7 @@ def test_korekcija_np_uporabi_np_zaporedje(pogodba, tip):
     assert popravek.stevilka is None
     assert potrdi_korekcijski_osnutek(popravek).stevilka == "NP-00002"
     assert list(
-        NumberSequence.objects.values_list("tip", "leto", "zadnja_stevilka")
+        NumberSequence.objects.filter(company=original.company, tip="NP").values_list("tip", "leto", "zadnja_stevilka")
     ) == [(NumberSequence.Tip.NP, 0, 2)]
 
 
@@ -395,9 +400,7 @@ def test_korekcija_st_uporabi_letno_st_zaporedje(pogodba, tip):
         obdobje_do=np.obdobje_do,
         izdajatelj_podpisnik_slika_pot=np.izdajatelj_podpisnik_slika_pot,
     )
-    NumberSequence.objects.create(
-        company=np.company, tip=NumberSequence.Tip.ST, leto=2026, zadnja_stevilka=1
-    )
+    NumberSequence.objects.filter(company=np.company, tip="ST", leto=2026).update(zadnja_stevilka=1)
     InvoiceLine.objects.create(
         invoice=original,
         opis="Storitev",
@@ -424,7 +427,7 @@ def test_korekcija_st_uporabi_letno_st_zaporedje(pogodba, tip):
         )
     assert potrdi_korekcijski_osnutek(popravek).stevilka == "ST-2027-0001"
     assert list(
-        NumberSequence.objects.filter(tip="ST")
+        NumberSequence.objects.filter(company=np.company, tip="ST")
         .order_by("leto")
         .values_list("leto", "zadnja_stevilka")
     ) == [(2026, 1), (2027, 1)]
@@ -446,7 +449,7 @@ def test_storno_vrstic_ni_mogoce_spremeniti_pred_potrditvijo(pogodba):
     InvoiceLine.objects.filter(pk=vrstica.pk).update(opis="Nedovoljeno")
     with pytest.raises(ValueError, match="ne ujemajo"):
         potrdi_korekcijski_osnutek(storno)
-    assert NumberSequence.objects.get(tip="NP").zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=original.company, tip="NP").zadnja_stevilka == 1
 
 
 def test_dobropis_nepotrjena_vrstica_mora_biti_konsistentna(pogodba):
@@ -473,7 +476,7 @@ def test_dobropis_nepotrjena_vrstica_mora_biti_konsistentna(pogodba):
     InvoiceLine.objects.filter(pk=vrstica.pk).update(skupaj=Decimal("-11.20"))
     with pytest.raises(ValidationError):
         potrdi_korekcijski_osnutek(dobropis)
-    assert NumberSequence.objects.get(tip="NP").zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=original.company, tip="NP").zadnja_stevilka == 1
 
 
 def test_napaka_po_stevilcenju_povrne_korekcijo_in_zaporedje(pogodba):
@@ -493,7 +496,7 @@ def test_napaka_po_stevilcenju_povrne_korekcijo_in_zaporedje(pogodba):
         None,
     )
     assert storno.eslog_konfiguracija_snapshot is None
-    assert NumberSequence.objects.get(tip="NP").zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=original.company, tip="NP").zadnja_stevilka == 1
 
 
 @pytest.mark.parametrize(

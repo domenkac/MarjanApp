@@ -15,6 +15,7 @@ from invoicing.services import (
     uvozi_migracijsko_stanje,
 )
 from tests.invoicing.test_priprava_np import dodaj_postavko
+from tests.setup_helpers import prepare_initial_setup
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
 
@@ -93,6 +94,7 @@ def test_prvi_np_uporabi_migracijsko_stanje_in_nato_pravi_racun(pogodba):
     assert not primerjava.obstaja_razlika
     assert {r.koda for r in primerjava.razlage} == {"BREZ_RAZLIKE"}
 
+    prepare_initial_setup(osnutek.company, osnutek.lease)
     izdani = potrdi_osnutek_np(osnutek)
     naslednji = pripravi_osnutek_np(
         pogodba, date(2026, 3, 1), date(2026, 3, 31), date(2026, 4, 1)

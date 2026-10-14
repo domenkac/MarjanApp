@@ -1,3 +1,5 @@
+import uuid
+
 from django.core.exceptions import ValidationError
 from django.db import models
 
@@ -205,8 +207,47 @@ class CompanySampleConfirmation(models.Model):
     pdf_template_version = models.CharField(max_length=64)
     source_fingerprint = models.CharField(max_length=64)
     fingerprint_schema_version = models.PositiveSmallIntegerField()
+    preview = models.ForeignKey(
+        "SamplePdfPreview", null=True, on_delete=models.PROTECT,
+        related_name="confirmations",
+    )
 
     class Meta:
         indexes = [  # noqa: RUF012
             models.Index(fields=["company", "-confirmed_at"]),
+        ]
+
+
+class SamplePdfPreview(models.Model):
+    id = models.UUIDField(primary_key=True, default=uuid.uuid4, editable=False)
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    lease = models.ForeignKey("contracts.Lease", on_delete=models.PROTECT)
+    rendered_at = models.DateTimeField(auto_now_add=True)
+    source_fingerprint = models.CharField(max_length=64)
+    fingerprint_schema_version = models.PositiveSmallIntegerField()
+    pdf_template_version = models.CharField(max_length=64)
+    pdf_checksum = models.CharField(max_length=64)
+    content_fingerprint = models.CharField(max_length=64)
+    datum_izdaje = models.DateField()
+    obdobje_od = models.DateField()
+    obdobje_do = models.DateField()
+
+
+class NumberingVerification(models.Model):
+    company = models.ForeignKey(Company, on_delete=models.PROTECT)
+    verified_at = models.DateTimeField(auto_now_add=True)
+    np_last = models.PositiveIntegerField()
+    st_last = models.PositiveIntegerField()
+    st_year = models.PositiveSmallIntegerField()
+
+
+class InitialSetupCompletion(models.Model):
+    completed_at = models.DateTimeField(auto_now_add=True)
+    evidence = models.JSONField()
+
+    class Meta:
+        constraints = [  # noqa: RUF012
+            models.CheckConstraint(
+                condition=models.Q(id=1), name="initial_setup_completion_singleton"
+            ),
         ]

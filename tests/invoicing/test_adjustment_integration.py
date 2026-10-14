@@ -49,6 +49,7 @@ from tests.invoicing.test_preflight import (  # noqa: F401
     potrdi_septembrski_vzorec,
     ready_company,
 )
+from tests.setup_helpers import first_np_number, initial_np_last, prepare_initial_setup
 
 
 def setup_adjustments(data, *, new="110.00", decision="approve", months=(2, 3)):
@@ -68,6 +69,7 @@ def setup_adjustments(data, *, new="110.00", decision="approve", months=(2, 3)):
 def refresh_sample(data, approve_sample):
     potrdi_ddv_nastavitve(data["company"])
     approve_sample(data["company"], data["lease"])
+    prepare_initial_setup(data["company"], data["lease"])
 
 
 def draft(data, month=9):
@@ -140,7 +142,7 @@ def test_two_periods_consumed_once_with_stored_vat_and_artifacts(
     # Retry remains valid even if today's event/source context later changes.
     IndexationEvent.objects.filter(pk=event.pk).update(indeks_vrednost=Decimal("111.000"))
     assert retry().pk == invoice.pk
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"]) + 1
     assert list(Invoice.objects.filter(pk__in=[line.invoice_id for line in sources]).values()) == originals
     assert list(InvoiceLine.objects.filter(pk__in=[line.pk for line in sources]).values()) == source_lines
     assert original_artifact.read_bytes() == b"immutable historical PDF"
@@ -170,12 +172,12 @@ def test_number_and_consumption_rollback_and_restart(
     monkeypatch.setattr(adjustments, "consume", fail_after_consumption)
     with pytest.raises(RuntimeError, match="failure after numbering"):
         issue()
-    assert not NumberSequence.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
     assert not PoracunIndeksacije.objects.filter(vkljucen_v_racun__isnull=False).exists()
     assert not AdjustmentReservation.objects.filter(consumed_at__isnull=False).exists()
     assert all(audit_count(row, "CONSUMED") == 0 for row in rows)
     monkeypatch.setattr(adjustments, "consume", original)
-    assert issue().stevilka == "NP-00001"
+    assert issue().stevilka == first_np_number(data["company"])
 
 
 @pytest.mark.parametrize("owner", ["direct", "monthly"])
@@ -198,7 +200,7 @@ def test_competing_draft_and_frozen_candidate_cannot_claim(
             services.zamrzni_paket_za_potrditev(data["cycle"])
         with pytest.raises(ValidationError, match="rezerviran"):
             draft(data, month=10)
-        assert services.potrdi_osnutek_np(invoice).stevilka == "NP-00001"
+        assert services.potrdi_osnutek_np(invoice).stevilka == first_np_number(data["company"])
     else:
         services.zamrzni_paket_za_potrditev(data["cycle"])
         with pytest.raises(ValidationError, match="rezerviran"):
@@ -278,7 +280,7 @@ def test_changed_evidence_or_reservation_blocks_before_numbering(
         AdjustmentReservation.objects.filter(adjustment=rows[0]).delete()
     with pytest.raises((ValidationError, ValueError)):
         issue()
-    assert not NumberSequence.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
     assert not AdjustmentReservation.objects.filter(consumed_at__isnull=False).exists()
 
 
@@ -427,7 +429,7 @@ def test_approval_after_draft_or_freeze_cannot_be_silently_omitted(
         review_decision(row, "approve")
     with pytest.raises(ValidationError, match="Manjka potrjen poračun"):
         issue()
-    assert not NumberSequence.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
     if path == "monthly":
         review.batch.refresh_from_db()
         assert review.batch.calculation_snapshot == frozen
@@ -447,7 +449,7 @@ def test_unselected_frozen_candidate_leaves_adjustments_outstanding(
     assert invoice.stevilka is None
     assert invoice.invoiceline_set.filter(adjustment__isnull=False).count() == 0
     assert all(row.vkljucen_v_racun_id is None for row in rows)
-    assert services.potrdi_osnutek_np(draft(data, month=10)).stevilka == "NP-00001"
+    assert services.potrdi_osnutek_np(draft(data, month=10)).stevilka == first_np_number(data["company"])
 
 
 def test_adjustment_only_draft_is_blocked(ready_company, potrdi_septembrski_vzorec):
@@ -458,7 +460,7 @@ def test_adjustment_only_draft_is_blocked(ready_company, potrdi_septembrski_vzor
     invoice.invoiceline_set.filter(adjustment__isnull=True).delete()
     with pytest.raises(ValidationError, match="Samostojen"):
         services.potrdi_osnutek_np(invoice)
-    assert not NumberSequence.objects.exists()
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
 
 
 @pytest.mark.parametrize("path", ["direct", "monthly"])
@@ -490,7 +492,7 @@ def test_real_concurrent_issuance_is_idempotent(
     with ThreadPoolExecutor(max_workers=2) as pool:
         issued_ids = list(pool.map(issue, range(2)))
     assert len(set(issued_ids)) == 1
-    assert NumberSequence.objects.get().zadnja_stevilka == 1
+    assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"]) + 1
     assert all(audit_count(row, "CONSUMED") == 1 for row in rows)
 
 
@@ -712,7 +714,7 @@ def test_cancel_reserved_draft_releases_claims_and_preserves_approval(
     cancel(Invoice(pk=invoice_id), razlog="Napačno izbrano obdobje")
     assert AdjustmentReservation.objects.filter(invoice=replacement).count() == len(rows)
     assert all(audit_count(row, "RELEASED") == 1 for row in rows)
-    assert services.potrdi_osnutek_np(replacement).stevilka == "NP-00001"
+    assert services.potrdi_osnutek_np(replacement).stevilka == first_np_number(data["company"])
 
 
 @pytest.mark.parametrize("failure", ["release_audit", "deletion_audit"])
@@ -832,7 +834,7 @@ def test_real_concurrent_cancellation_retry_has_one_release_audit(
     assert sorted(results) == [False, True]
     assert all(audit_count(row, "RELEASED") == 1 for row in rows)
     assert not AdjustmentReservation.objects.exists()
-    assert services.potrdi_osnutek_np(draft(data)).stevilka == "NP-00001"
+    assert services.potrdi_osnutek_np(draft(data)).stevilka == first_np_number(data["company"])
 
 
 def test_cancel_direct_draft_unblocks_previously_reviewed_monthly_candidate(
@@ -858,7 +860,7 @@ def test_cancel_direct_draft_unblocks_previously_reviewed_monthly_candidate(
     invoice, reused = services.materializiraj_zamrznjenega_mesecnega_kandidata(
         review.batch_id, review.lease_id, review.candidate_fingerprint,
     )
-    assert not reused and invoice.stevilka == "NP-00001"
+    assert not reused and invoice.stevilka == first_np_number(data["company"])
     assert all(audit_count(row, "RELEASED") == audit_count(row, "CONSUMED") == 1 for row in rows)
 
 
@@ -889,11 +891,11 @@ def test_real_concurrent_cancellation_and_issuance_never_release_consumption(
     assert sum(results.values()) == 1
     if results["cancel"]:
         assert not Invoice.objects.filter(pk=invoice.pk).exists()
-        assert not AdjustmentReservation.objects.exists() and not NumberSequence.objects.exists()
+        assert not AdjustmentReservation.objects.exists() and NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
         assert all(audit_count(row, "RELEASED") == 1 and audit_count(row, "CONSUMED") == 0 for row in rows)
-        assert services.potrdi_osnutek_np(draft(data)).stevilka == "NP-00001"
+        assert services.potrdi_osnutek_np(draft(data)).stevilka == first_np_number(data["company"])
     else:
         invoice.refresh_from_db()
-        assert invoice.stevilka == "NP-00001"
+        assert invoice.stevilka == first_np_number(data["company"])
         assert AdjustmentReservation.objects.filter(consumed_invoice=invoice).count() == len(rows)
         assert all(audit_count(row, "RELEASED") == 0 and audit_count(row, "CONSUMED") == 1 for row in rows)
