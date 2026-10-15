@@ -1,12 +1,13 @@
 from datetime import date
 
 import pytest
-from django.db import connection
+from django.db import connection, models
 from django.test import Client
 from django.urls import NoReverseMatch, reverse
 
 from contracts.models import RecipientContact, Tenant
 from contracts.services import deaktiviraj_prejemnika, ponovno_aktiviraj_prejemnika
+from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch, MonthlyCandidateReview, MonthlyCycle
 from tests.financial_fixtures import save_financial_fixture
 from tests.ui.test_contract_leases import make_hierarchy
@@ -28,7 +29,7 @@ def test_recipient_state_services_validate_and_write_inside_atomic(monkeypatch):
     recipient = contact(make_hierarchy())
     atomic_states = []
     original_clean = RecipientContact.full_clean
-    original_save = RecipientContact.save
+    original_save = models.Model.save
 
     def observed_clean(self, *args, **kwargs):
         atomic_states.append(("clean", connection.in_atomic_block))
@@ -40,7 +41,7 @@ def test_recipient_state_services_validate_and_write_inside_atomic(monkeypatch):
         return original_save(self, *args, **kwargs)
 
     monkeypatch.setattr(RecipientContact, "full_clean", observed_clean)
-    monkeypatch.setattr(RecipientContact, "save", observed_save)
+    monkeypatch.setattr(models.Model, "save", observed_save)
 
     assert deaktiviraj_prejemnika(recipient).uspesno
     assert ponovno_aktiviraj_prejemnika(recipient).uspesno
@@ -134,6 +135,7 @@ def test_edit_changes_only_email_and_role_and_preserves_non_pdf(client):
     recipient = contact(lease, kanal=RecipientContact.Kanal.ESLOG)
     other = make_hierarchy(unit=lease.unit, tenant=lease.tenant, oznaka_pogodbe="P-2")
     response = client.post(f"/pogodbe/prejemniki/{recipient.pk}/", {
+        "edit_fingerprint": record_edit_fingerprint(recipient), "razlog": "Popravek",
         "email": "changed@example.com", "vloga": "BCC", "kanal": "PDF",
         "lease": other.pk, "aktiven": "",
     })
@@ -143,7 +145,7 @@ def test_edit_changes_only_email_and_role_and_preserves_non_pdf(client):
         "changed@example.com", "BCC", "ESLOG", lease, True,
     )
     page = client.get(f"/pogodbe/prejemniki/{recipient.pk}/")
-    assert tuple(page.context["form"].fields) == ("email", "vloga")
+    assert set(page.context["form"].fields) == {"email", "vloga", "edit_fingerprint", "razlog"}
     assert "Kanal eSLOG v V1 ni urejljiv." in page.content.decode()
     assert 'name="kanal"' not in page.content.decode()
 

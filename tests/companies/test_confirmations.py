@@ -27,6 +27,7 @@ from companies.services import (
 )
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.services import odloci_o_fizicnem_izbrisu as odloci_o_izbrisu_pogodbe
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice, InvoiceLine
 from tests.financial_fixtures import update_financial_fixture
 from tests.setup_helpers import approve_sample as _approve_sample
@@ -304,8 +305,10 @@ def test_signature_filefield_replacement_stales_sample(confirmation_data):
     company = confirmation_data["company"]
     signatory = confirmation_data["signatory"]
     approve_sample(company, confirmation_data["lease"])
+    signatory.refresh_from_db()
     staro_ime = signatory.podpis_slika.name
 
+    signatory._business_edit = (record_edit_fingerprint(signatory), "Nov podpis")
     signatory.podpis_slika.save("nov-podpis.png", ContentFile(PNG_1), save=True)
 
     assert signatory.podpis_slika.name != staro_ime

@@ -20,6 +20,7 @@ from companies.setup import issuer_setup_issues
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from delivery.models import DeliveryAttempt
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.business_fixtures import update_business_fixture
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.setup_helpers import approve_sample
 from tests.ui import test_company_confirmations
@@ -141,11 +142,11 @@ def test_signatory_signature_and_numbering_are_required(setup_data):
             company=company, tip=tip, leto=year, zadnja_stevilka=17
         )
     assert not issuer_setup_issues(company, today)
-    company.signatory_set.update(podpis_slika="missing.png")
+    update_business_fixture(company.signatory_set.all(), podpis_slika="missing.png")
     assert any(
         "Slika podpisa" in message for _, message in issuer_setup_issues(company, today)
     )
-    company.signatory_set.update(velja_od=date(2099, 1, 1))
+    update_business_fixture(company.signatory_set.all(), velja_od=date(2099, 1, 1))
     assert any(
         "Ni veljavnega podpisnika" in message
         for _, message in issuer_setup_issues(company, today)
@@ -238,7 +239,7 @@ def test_stale_archived_selections_reloaded(client, setup_data, model, field):
 
 def test_incomplete_chain_and_existing_validations(client, setup_data):
     select_chain(client, setup_data)
-    Tenant.objects.filter(pk=setup_data.lease.tenant_id).update(email="bad")
+    update_business_fixture(Tenant.objects.filter(pk=setup_data.lease.tenant_id), email="bad")
     response = client.get(URL + "?korak=tenant")
     assert response.context["missing"]
     assert "veljaven e-poštni naslov" in response.content.decode().lower()
@@ -364,7 +365,7 @@ def test_legacy_company_without_name_renders_and_stays_incomplete(client, setup_
 
 def test_select_incomplete_tenant_keeps_edit_link_and_current_step(client, setup_data):
     select_chain(client, setup_data)
-    Tenant.objects.filter(pk=setup_data.lease.tenant_id).update(email="invalid")
+    update_business_fixture(Tenant.objects.filter(pk=setup_data.lease.tenant_id), email="invalid")
     response = select(client, "tenant", setup_data.lease.tenant)
     assert response.context["step"] == "tenant"
     assert response.context["missing"]
@@ -390,7 +391,7 @@ def test_reparented_unit_invalidates_saved_chain(client, setup_data):
     other_property = Property.objects.create(
         company=setup_data.company, naziv="Druga stavba", naslov="B 2"
     )
-    Unit.objects.filter(pk=setup_data.lease.unit_id).update(property=other_property)
+    update_business_fixture(Unit.objects.filter(pk=setup_data.lease.unit_id), property=other_property)
     state = Client().get(URL).context["state"]
     assert state.unit_id is None
     assert state.lease_id is None
@@ -411,7 +412,7 @@ def test_archived_company_clears_all_selections_on_resume(client, setup_data):
 
 def test_whitespace_legacy_property_is_not_checked(client, setup_data):
     select_chain(client, setup_data)
-    Property.objects.filter(pk=setup_data.lease.unit.property_id).update(naziv="   ")
+    update_business_fixture(Property.objects.filter(pk=setup_data.lease.unit.property_id), naziv="   ")
     response = client.get(URL + "?korak=property")
     assert "Manjka obvezen podatek" in response.content.decode()
     assert not response.context["steps"][1]["checked"]

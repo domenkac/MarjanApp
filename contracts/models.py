@@ -20,13 +20,33 @@ from core.validators import (
 
 
 class Property(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "company", "naziv", "naslov",
+    )
+
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     naziv = models.CharField()
     naslov = models.CharField()
     aktivna = models.BooleanField(default=True)
 
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_contract_data_edit
+
+            return save_contract_data_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
+
 
 class Unit(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "oznaka", "tip_enote", "povrsina_m2",
+    )
+
     class TipEnote(models.TextChoices):
         PISARNA = "PISARNA", "Pisarna"
         POSLOVNI_PROSTOR = "POSLOVNI_PROSTOR", "Poslovni prostor"
@@ -47,8 +67,26 @@ class Unit(models.Model):
     )
     aktivna = models.BooleanField(default=True)
 
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_contract_data_edit
+
+            return save_contract_data_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
+
 
 class Tenant(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "tip", "naziv", "davcna_stevilka", "ddv_identifikacijska_stevilka",
+        "maticna_stevilka", "naslov", "drzava_koda", "identificiran_za_ddv",
+        "ddv_zavezanec_s_polnim_odbitkom", "email",
+        "eslog_neobvezni_segmenti_override", "eslog_neobvezna_polja",
+    )
+
     class Tip(models.TextChoices):
         PRAVNA_OSEBA = "PRAVNA_OSEBA", "Pravna oseba"
         FIZICNA_OSEBA = "FIZICNA_OSEBA", "Fizična oseba"
@@ -139,6 +177,16 @@ class Tenant(models.Model):
 
         if napake:
             raise ValidationError(napake)
+
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_contract_data_edit
+
+            return save_contract_data_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
 
 
 class Lease(models.Model):
@@ -375,6 +423,11 @@ class LeaseItem(models.Model):
 
 
 class RecipientContact(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "email", "vloga",
+    )
+
     class Vloga(models.TextChoices):
         TO = "TO", "TO"
         CC = "CC", "CC"
@@ -399,6 +452,16 @@ class RecipientContact(models.Model):
             and self.kanal in {self.Kanal.ESLOG, self.Kanal.OBOJE}
         ):
             raise ValidationError({"kanal": "Za fizično osebo je dovoljen samo PDF."})
+
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_recipient_edit
+
+            return save_recipient_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
 
 
 class IndexationEvent(models.Model):

@@ -11,6 +11,7 @@ from catalogs.models import VatRegime
 from companies.models import Company, NumberSequence, Signatory
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     dodaj_vrstico,
@@ -25,6 +26,7 @@ from rendering.contexts import (
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
 )
+from tests.business_fixtures import save_business_fixture, save_business_record
 from tests.financial_fixtures import save_financial_fixture
 from tests.setup_helpers import prepare_initial_setup
 
@@ -291,7 +293,7 @@ def test_sprememba_zivega_vira_ne_spremeni_pdf_contexta(izdani_racun, vir):
     elif vir == "tenant":
         tenant = lease.tenant
         tenant.naziv = "Nov najemnik"
-        tenant.save(update_fields=["naziv"])
+        save_business_record(tenant, update_fields=["naziv"])
     elif vir == "vat_regime":
         regime = LeaseItem.objects.get(lease=lease).vat_regime
         regime.stopnja = Decimal("9.50")
@@ -300,7 +302,7 @@ def test_sprememba_zivega_vira_ne_spremeni_pdf_contexta(izdani_racun, vir):
         signatory = Signatory.objects.get(company=izdani_racun.company)
         signatory.ime_priimek = "Nova podpisnica"
         signatory.podpis_slika = "nov-podpis.png"
-        signatory.save(update_fields=["ime_priimek", "podpis_slika"])
+        save_business_fixture(signatory, update_fields=["ime_priimek", "podpis_slika"])
     assert pripravi_pdf_context(izdani_racun) == pred
 
 
@@ -458,6 +460,7 @@ def test_nova_logo_in_podpis_datoteka_ne_spremenita_snapshot_bytes(izdani_racun)
     podpisnik = Signatory.objects.get(company=company)
 
     company.logotip.save("nov-logo.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
+    podpisnik._business_edit = (record_edit_fingerprint(podpisnik), "Nov podpis")
     podpisnik.podpis_slika.save(
         "nov-podpis.png", ContentFile(VALID_PNG_NOV_ASSET), save=True
     )

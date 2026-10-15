@@ -112,6 +112,11 @@ ESLOG_KODE_DDV = {
 
 
 class ServiceCatalogItem(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "naziv", "privzeta_cena", "privzeti_ddv_rezim", "enota_mere",
+    )
+
     naziv = models.CharField()
     privzeta_cena = models.DecimalField(
         max_digits=10,
@@ -127,3 +132,13 @@ class ServiceCatalogItem(models.Model):
     )
     enota_mere = models.CharField()
     aktivna = models.BooleanField(default=True)
+
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_service_catalog_item_edit
+
+            return save_service_catalog_item_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)

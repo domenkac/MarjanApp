@@ -284,6 +284,7 @@ def test_service_catalog_create_edit_state_and_vat_label(client):
     edit = client.post(
         f"/nastavitve/storitve/{item.pk}/",
         {
+            "edit_fingerprint": record_edit_fingerprint(item), "razlog": "Popravek",
             "naziv": "Upravljanje",
             "privzeta_cena": "130.00",
             "privzeti_ddv_rezim": regime.pk,
@@ -332,6 +333,7 @@ def test_service_default_change_does_not_change_lease_item_or_cycle_membership(c
     client.post(
         f"/nastavitve/storitve/{service.pk}/",
         {
+            "edit_fingerprint": record_edit_fingerprint(service), "razlog": "Popravek",
             "naziv": "Najemnina",
             "privzeta_cena": "200.00",
             "privzeti_ddv_rezim": new_regime.pk,

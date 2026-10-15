@@ -48,6 +48,7 @@ from invoicing.services import (
 )
 from rendering.contexts import PdfRenderNapaka
 from rendering.services import renderiraj_koncne_pdfje_mesecnega_paketa
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_preflight import (
     _freeze_ready_package,
@@ -1126,7 +1127,7 @@ def test_step4_action_in_step5_reload_prikazeta_zamrznjen_snapshot(client):
     first.batch.company.naziv = "Spremenjeno podjetje"
     save_financial_fixture(first.batch.company, update_fields=["naziv"])
     first.lease.tenant.naziv = "Spremenjen najemnik"
-    first.lease.tenant.save(update_fields=["naziv"])
+    save_business_record(first.lease.tenant, update_fields=["naziv"])
     response = client.get("/mesecni-obracun/")
     content = response.content.decode()
     assert response.status_code == 200

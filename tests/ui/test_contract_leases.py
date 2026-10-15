@@ -14,6 +14,7 @@ from core.models import AuditLogEntry
 from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch
 from invoicing.services import shrani_prvi_korak
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture
 
 
@@ -186,7 +187,7 @@ def test_lease_edit_archive_reactivate_and_parent_failure(client):
     assert client.get(f"/pogodbe/{lease.pk}/arhiviraj/").status_code == 405
     client.post(f"/pogodbe/{lease.pk}/arhiviraj/")
     lease.unit.aktivna = False
-    lease.unit.save(update_fields=["aktivna"])
+    save_business_record(lease.unit, update_fields=["aktivna"])
     blocked = client.post(
         f"/pogodbe/{lease.pk}/reaktiviraj/",
         lease_data(lease, oznaka_pogodbe="VSAJENO", rok_placila_dni="99"),
@@ -199,7 +200,7 @@ def test_lease_edit_archive_reactivate_and_parent_failure(client):
     assert not blocked.context["form"].errors
     assert "ni aktiven" in blocked.content.decode()
     lease.unit.aktivna = True
-    lease.unit.save(update_fields=["aktivna"])
+    save_business_record(lease.unit, update_fields=["aktivna"])
     client.post(f"/pogodbe/{lease.pk}/reaktiviraj/")
     lease.refresh_from_db()
     assert lease.arhivirana is False

@@ -21,6 +21,7 @@ from rendering.eslog import (
     render_eslog,
     validiraj_eslog,
 )
+from tests.business_fixtures import save_business_record, update_business_fixture
 from tests.financial_fixtures import save_financial_fixture
 
 pytest_plugins = ["tests.rendering.test_contexts"]
@@ -153,7 +154,7 @@ def test_sprememba_zive_company_in_tenant_konfiguracije_ne_spremeni_xml(
         "elektronski_naslov_kupca": "nov@example.com",
         "kontaktna_tocka_kupca": "Nova nabava",
     }
-    tenant.save()
+    save_business_record(tenant)
 
     assert render_eslog(izdani_racun) == prvi
 
@@ -165,7 +166,7 @@ def test_context_je_nespremenljiv_in_uporablja_samo_snapshote(izdani_racun):
     regime = LeaseItem.objects.get(lease=izdani_racun.lease).vat_regime
     item = LeaseItem.objects.get(lease=izdani_racun.lease)
     tenant.naziv = "Spremenjen kupec"
-    tenant.save(update_fields=["naziv"])
+    save_business_record(tenant, update_fields=["naziv"])
     company.naziv = "Spremenjen prodajalec"
     save_financial_fixture(company, update_fields=["naziv"])
     regime.eslog_koda = "E"
@@ -181,7 +182,7 @@ def test_context_je_nespremenljiv_in_uporablja_samo_snapshote(izdani_racun):
         "kontaktni_podatki_kupca_vkljuceni": True
     }
     tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Nova nabava"}
-    tenant.save(
+    save_business_record(tenant,
         update_fields=[
             "eslog_neobvezni_segmenti_override",
             "eslog_neobvezna_polja",
@@ -320,7 +321,7 @@ def test_korekcija_uporabi_svoj_konfiguracijski_snapshot(izdani_racun):
         "kontaktni_podatki_kupca_vkljuceni": True
     }
     tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Korekcije"}
-    tenant.save()
+    save_business_record(tenant)
     osnutek = pripravi_korekcijski_osnutek(
         izdani_racun, Invoice.DocumentType.STORNO, "Popravek", izdani_racun.datum_izdaje
     )
@@ -373,7 +374,7 @@ def test_shema_zavrne_omrezni_import(tmp_path, monkeypatch):
 
 def test_fizicna_oseba_brez_davcne_odpove_samo_pri_renderju(izdani_racun):
     invoice_before = Invoice.objects.get(pk=izdani_racun.pk)
-    Tenant.objects.filter(pk=izdani_racun.lease.tenant_id).update(
+    update_business_fixture(Tenant.objects.filter(pk=izdani_racun.lease.tenant_id),
         tip=Tenant.Tip.FIZICNA_OSEBA, davcna_stevilka=""
     )
     Invoice.objects.filter(pk=izdani_racun.pk).update(
@@ -409,7 +410,7 @@ def test_partnerji_uporabljajo_snapshote_va_ahp_0199_in_drzavo(izdani_racun):
     save_financial_fixture(izdani_racun.company, update_fields=["ddv_zavezanec", "drzava_koda"])
     izdani_racun.lease.tenant.identificiran_za_ddv = False
     izdani_racun.lease.tenant.drzava_koda = "HR"
-    izdani_racun.lease.tenant.save(
+    save_business_record(izdani_racun.lease.tenant,
         update_fields=["identificiran_za_ddv", "drzava_koda"]
     )
     assert render_eslog(izdani_racun) == xml_bytes

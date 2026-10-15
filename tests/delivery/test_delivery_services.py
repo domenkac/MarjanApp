@@ -40,6 +40,7 @@ from delivery.transport import (
     test_smtp_connection as check_smtp_connection,
 )
 from invoicing.models import Invoice, InvoiceLine, MonthlyCycle
+from tests.business_fixtures import update_business_records
 
 
 @pytest.fixture
@@ -803,7 +804,7 @@ def test_explicit_not_sent_creates_snapshot_retry_and_audit(issued_invoice):
         email_posiljatelj="new-sender@example.com",
         email_racunovodja="new-accountant@example.com",
     )
-    RecipientContact.objects.filter(lease=issued_invoice.lease).update(
+    update_business_records(RecipientContact.objects.filter(lease=issued_invoice.lease),
         email="new-contact@example.com"
     )
 
@@ -1018,7 +1019,7 @@ def test_build_pdf_email_uses_snapshots_envelope_and_verified_attachment(
     prepared_email_data,
 ):
     invoice, attempt, _, pdf_bytes = prepared_email_data
-    RecipientContact.objects.filter(lease=invoice.lease).update(
+    update_business_records(RecipientContact.objects.filter(lease=invoice.lease),
         email="changed@example.com", aktiven=False
     )
     Company.objects.filter(pk=invoice.company_id).update(

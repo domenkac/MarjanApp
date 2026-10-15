@@ -310,8 +310,7 @@ def _recipient_form(request, contact, action_errors=None, *, bind_post=True):
         request.POST if bind_post and request.method == "POST" else None,
         instance=contact,
     )
-    if bind_post and request.method == "POST" and form.is_valid():
-        form.save()
+    if bind_post and request.method == "POST" and form.is_valid() and _save_financial_form(form):
         return redirect("ui:prejemnik_detail", contact_id=contact.pk)
     return render(request, "ui/prejemnik_form.html", _contracts_context(
         form=form, contact=contact, lease=contact.lease, action_errors=action_errors,
@@ -488,8 +487,8 @@ def nepremicnina_detail(request, property_id):
 
 def _property_form(request, property_=None, action_errors=None):
     form = PropertyForm(request.POST or None, instance=property_)
-    if request.method == "POST" and form.is_valid():
-        property_ = form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
+        property_ = form.instance
         return redirect("ui:nepremicnina_detail", property_id=property_.pk)
     units = Unit.objects.filter(property=property_).order_by("-aktivna", "oznaka", "pk") if property_ else ()
     return render(request, "ui/nepremicnina_form.html", _contracts_context(
@@ -540,8 +539,7 @@ def enota_detail(request, unit_id):
 
 def _unit_form(request, unit, action_errors=None):
     form = UnitForm(request.POST or None, instance=unit)
-    if request.method == "POST" and form.is_valid():
-        form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
         return redirect("ui:enota_detail", unit_id=unit.pk)
     return render(request, "ui/enota_form.html", _contracts_context(
         form=form, unit=unit, property=unit.property, action_errors=action_errors,
@@ -584,8 +582,8 @@ def najemnik_detail(request, tenant_id):
 
 def _tenant_form(request, tenant=None, action_errors=None):
     form = TenantForm(request.POST or None, instance=tenant)
-    if request.method == "POST" and form.is_valid():
-        tenant = form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
+        tenant = form.instance
         return redirect("ui:najemnik_detail", tenant_id=tenant.pk)
     return render(request, "ui/najemnik_form.html", _contracts_context(
         form=form, tenant=tenant, action_errors=action_errors,
@@ -827,8 +825,8 @@ def storitev_detail(request, item_id):
 
 def _storitev_form(request, item=None, action_errors=None):
     form = ServiceCatalogItemForm(request.POST or None, instance=item)
-    if request.method == "POST" and form.is_valid():
-        item = form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
+        item = form.instance
         return redirect("ui:storitev_detail", item_id=item.pk)
     return render(
         request,
@@ -1102,8 +1100,7 @@ def podpisnik_nov(request, company_id):
 def podpisnik_detail(request, signatory_id):
     signatory = get_object_or_404(Signatory.objects.select_related("company"), pk=signatory_id)
     form = SignatoryForm(request.POST or None, request.FILES or None, instance=signatory)
-    if request.method == "POST" and form.is_valid():
-        form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
         return redirect("ui:podjetje_detail", company_id=signatory.company_id)
     return render(
         request,

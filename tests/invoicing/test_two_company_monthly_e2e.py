@@ -42,6 +42,7 @@ from invoicing.models import (
     MonthlyCycle,
 )
 from tests.accounting_export.test_workflow import Smtp
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.invoicing.test_preflight import _add_ready_company
 from tests.invoicing.test_preflight import (
@@ -138,7 +139,7 @@ def flow(ready_company, client, settings, tmp_path, monkeypatch, external_bounda
         company.email_racunovodja = f"accountant-{index}@example.com"
         save_financial_fixture(company)
         lease.tenant.identificiran_za_ddv = True
-        lease.tenant.save()
+        save_business_record(lease.tenant)
         RecipientContact.objects.create(
             lease=lease,
             email=f"tenant-{index}@example.com",
@@ -551,7 +552,7 @@ def _finish(flow):
         company.naziv = f"Changed issuer {index}"
         save_financial_fixture(company, update_fields=["naziv"])
         lease.tenant.naziv = f"Changed tenant {index}"
-        lease.tenant.save(update_fields=["naziv"])
+        save_business_record(lease.tenant, update_fields=["naziv"])
         update_financial_fixture(lease.leaseitem_set.all(), znesek_neto_mesecno=Decimal("999.00"))
         invoice.refresh_from_db()
         assert _issued_content(invoice) == flow["fiscal"][index]

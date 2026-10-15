@@ -47,6 +47,11 @@ from rendering.services import (
     renderiraj_koncne_pdfje_mesecnega_paketa,
     stanje_koncnega_pdf,
 )
+from tests.business_fixtures import (
+    save_business_record,
+    update_business_fixture,
+    update_business_records,
+)
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.setup_helpers import approve_sample, prepare_initial_setup
 
@@ -265,7 +270,7 @@ def test_mesecni_pdf_context_se_po_spremembah_zivih_podatkov_ne_spremeni(
     before = pripravi_mesecni_pdf_context(snapshot, candidate)
 
     update_financial_fixture(Company.objects.filter(pk=data["company"].pk), naziv="Novo podjetje")
-    Tenant.objects.filter(pk=data["tenant"].pk).update(naziv="Nov najemnik")
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), naziv="Nov najemnik")
     update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk), oznaka_pogodbe="NOVA")
     update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         naziv_postavke="Nova postavka", znesek_neto_mesecno=Decimal("999.00")
@@ -420,7 +425,7 @@ def test_source_change_requires_explicit_rerun_and_replaces_snapshot(ready_compa
     izracunaj_mesecne_kandidate(data["cycle"])
     data["batch"].refresh_from_db()
     original = data["batch"].calculation_snapshot
-    Tenant.objects.filter(pk=data["tenant"].pk).update(email="novo@example.com")
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), email="novo@example.com")
     assert MonthlyBatch.objects.get(pk=data["batch"].pk).calculation_snapshot == original
 
     izracunaj_mesecne_kandidate(data["cycle"])
@@ -1405,7 +1410,7 @@ def test_invalid_company_master_data_blocks(ready_company, field, value):
 )
 def test_invalid_tenant_business_data_blocks(ready_company, changes, field):
     data = ready_company
-    Tenant.objects.filter(pk=data["tenant"].pk).update(**changes)
+    update_business_fixture(Tenant.objects.filter(pk=data['tenant'].pk), **changes)
 
     preveri_predhodno_kontrolo(data["cycle"])
     data["batch"].refresh_from_db()
@@ -1474,7 +1479,7 @@ def test_missing_company_requirements_block(ready_company, model, change, expect
 def test_overlapping_signatories_block(ready_company):
     data = ready_company
     data["signatory"].velja_do = date(2026, 12, 31)
-    data["signatory"].save(update_fields=["velja_do"])
+    save_business_record(data['signatory'], update_fields=["velja_do"])
     Signatory.objects.create(
         company=data["company"],
         ime_priimek="Drugi Podpisnik",
@@ -1562,7 +1567,7 @@ def test_proportional_and_expiry_are_warnings_only(
 
 def test_inactive_chain_is_excluded(ready_company):
     data = ready_company
-    Unit.objects.filter(pk=data["unit"].pk).update(aktivna=False)
+    update_business_records(Unit.objects.filter(pk=data['unit'].pk), aktivna=False)
     update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=0)
 
     preveri_predhodno_kontrolo(data["cycle"])
@@ -1673,7 +1678,7 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     update_financial_fixture(Company.objects.filter(pk=data["company"].pk),
         naziv="Changed", naslov="Changed 9", trr="SI56191000000999999"
     )
-    Tenant.objects.filter(pk=data["tenant"].pk).update(
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk),
         naziv="Changed tenant", naslov="Changed 3"
     )
     update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk), rok_placila_dni=90)
@@ -1689,10 +1694,10 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     )
     update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), vat_regime=replacement)
     settings.PDF_TEMPLATE_VERSION = "changed-after-freeze"
-    Signatory.objects.filter(pk=data["signatory"].pk).update(
+    update_business_records(Signatory.objects.filter(pk=data['signatory'].pk),
         ime_priimek="Changed signer"
     )
-    RecipientContact.objects.filter(lease=data["lease"]).update(
+    update_business_records(RecipientContact.objects.filter(lease=data['lease']),
         email="changed@example.com"
     )
 

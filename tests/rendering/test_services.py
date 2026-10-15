@@ -23,6 +23,7 @@ from rendering.services import (
     render_pdf,
     sestavi_ddv_rekapitulacijo,
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture
 from tests.rendering.test_contexts import izdani_racun
 
@@ -87,7 +88,7 @@ def test_zivi_podatki_ne_spremenijo_html_izdanega_racuna(izdani_racun, vir):
     lease = izdani_racun.lease
     if vir == "tenant":
         lease.tenant.naziv = "Nov najemnik"
-        lease.tenant.save(update_fields=["naziv"])
+        save_business_record(lease.tenant, update_fields=["naziv"])
     elif vir == "company":
         izdani_racun.company.naziv = "Novo podjetje"
         save_financial_fixture(izdani_racun.company, update_fields=["naziv"])
@@ -102,7 +103,7 @@ def test_zivi_podatki_ne_spremenijo_html_izdanega_racuna(izdani_racun, vir):
     else:
         podpisnik = Signatory.objects.get(company=izdani_racun.company)
         podpisnik.ime_priimek = "Nov podpisnik"
-        podpisnik.save(update_fields=["ime_priimek"])
+        save_business_record(podpisnik, update_fields=["ime_priimek"])
 
     assert pripravi_html(pripravi_pdf_context(izdani_racun)) == prej
 
@@ -315,4 +316,3 @@ def test_pdf_ne_prepise_neregistriranega_drugacnega_artifacta(
 
     assert error.value.koda == "PDF_POT_ZASEDENA"
     assert pot.read_bytes() == b"drug artifact"
-

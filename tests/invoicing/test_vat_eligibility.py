@@ -27,6 +27,7 @@ from invoicing.services import (
     pripravi_osnutek_np,
     spremeni_vrstico,
 )
+from tests.business_fixtures import update_business_fixture, update_business_records
 from tests.catalogs.test_models import podatki_rezima
 from tests.financial_fixtures import update_financial_fixture
 from tests.invoicing.test_preflight import (
@@ -123,7 +124,7 @@ def test_catalog_ui_rejects_inconsistent_canonical_configuration(client, code, r
 
 def _set_eligibility(data, *, restricted=True, tip="PRAVNA_OSEBA", registered=True, full=True):
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=restricted)
-    Tenant.objects.filter(pk=data["tenant"].pk).update(
+    update_business_fixture(Tenant.objects.filter(pk=data['tenant'].pk),
         tip=tip, identificiran_za_ddv=registered, ddv_zavezanec_s_polnim_odbitkom=full
     )
     for key in ("tenant", "regime", "lease", "item"):
@@ -166,7 +167,7 @@ def test_standard_taxable_items_allow_ineligible_recipient(ready_company, unit_t
     data = ready_company
     _set_eligibility(data, restricted=False, tip="FIZICNA_OSEBA", registered=False, full=False)
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), sifra="OBDAVCENO_STANDARD")
-    Unit.objects.filter(pk=data["unit"].pk).update(tip_enote=unit_type)
+    update_business_records(Unit.objects.filter(pk=data['unit'].pk), tip_enote=unit_type)
     data["item"].refresh_from_db()
     data["item"].full_clean()
     potrdi_ddv_nastavitve(data["company"])
@@ -241,7 +242,7 @@ def test_direct_issuance_rejects_before_numbering(ready_company, damage):
     _set_eligibility(data)
     invoice = pripravi_osnutek_np(data["lease"], date(2026, 9, 1), date(2026, 9, 30), date(2026, 9, 10)).invoice
     if damage == "live_status":
-        Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
+        update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), ddv_zavezanec_s_polnim_odbitkom=False)
     elif damage in {"snapshot_status", "missing_evidence"}:
         Invoice.objects.filter(pk=invoice.pk).update(prejemnik_polni_odbitek=False if damage == "snapshot_status" else None)
     elif damage in {"article45_false", "standard_true"}:
@@ -318,15 +319,15 @@ def test_frozen_evidence_is_immutable_and_retry_consumes_no_number(ready_company
     data = ready_company
     _set_eligibility(data)
     candidate, _review = _freeze_ready_package(data)
-    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), ddv_zavezanec_s_polnim_odbitkom=False)
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=None)
     blocked = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert not blocked["ok"] and not Invoice.objects.exists()
     assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 0
-    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=True)
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), ddv_zavezanec_s_polnim_odbitkom=True)
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=True)
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
-    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), ddv_zavezanec_s_polnim_odbitkom=False)
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=None)
     second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert first["ok"] and second["ok"] and second["reused"]
@@ -344,7 +345,7 @@ def test_eligibility_change_changes_candidate_and_confirmation_fingerprints(read
     data = ready_company
     before = _calculate(data)[0]["candidate_fingerprint"]
     update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=True)
-    Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=True)
+    update_business_records(Tenant.objects.filter(pk=data['tenant'].pk), ddv_zavezanec_s_polnim_odbitkom=True)
     assert veljavna_potrditev_ddv(data["company"]).stanje == "stale"
     potrdi_ddv_nastavitve(data["company"])
     data["lease"].refresh_from_db()

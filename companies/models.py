@@ -129,6 +129,12 @@ class Company(models.Model):
 
 
 class Signatory(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    business_edit_fields = (
+        "ime_priimek", "funkcija", "podpis_slika", "velja_od", "velja_do",
+    )
+    financial_fields = business_edit_fields + ("company",)
+
     company = models.ForeignKey(Company, on_delete=models.PROTECT)
     ime_priimek = models.CharField()
     funkcija = models.CharField(blank=True)
@@ -165,6 +171,16 @@ class Signatory(models.Model):
 
         if napake:
             raise ValidationError(napake)
+
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_business_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_signatory_edit
+
+            return save_signatory_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
 
 
 class NumberSequence(models.Model):

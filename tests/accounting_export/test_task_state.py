@@ -24,6 +24,7 @@ from tests.accounting_export.test_report_snapshot import (
 from tests.accounting_export.test_report_snapshot import (
     company as company,  # noqa: PLC0414
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 pytestmark = pytest.mark.django_db
@@ -202,7 +203,8 @@ def test_unrelated_month_company_and_live_edits_do_not_stale(reported):
     lease.oznaka_pogodbe = "Edited contract"
     save_financial_fixture(lease)
     lease.tenant.naziv = "Edited tenant"
-    lease.tenant.save()
+    lease.tenant.davcna_stevilka = "15012557"
+    save_business_record(lease.tenant)
     update_financial_fixture(Company.objects.filter(pk=reported.company_id), naziv="Edited", ddv_zavezanec=False)
     assert state().state == "ZAKLJUCENO"
 

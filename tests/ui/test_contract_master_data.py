@@ -6,6 +6,7 @@ from django.urls import NoReverseMatch, reverse
 
 from companies.models import Company
 from contracts.models import Property, Tenant, Unit
+from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch
 from invoicing.services import shrani_prvi_korak
 
@@ -84,6 +85,7 @@ def test_property_create_filters_company_and_hides_state(client):
 def test_property_edit_list_archive_and_reactivate(client):
     property_ = Property.objects.create(company=company(), naziv="Stavba", naslov="A")
     assert client.post(f"/pogodbe/nepremicnine/{property_.pk}/", {
+        "edit_fingerprint": record_edit_fingerprint(property_), "razlog": "Popravek",
         "company": property_.company_id, "naziv": "Stavba B", "naslov": "B",
         "aktivna": "",
     }).status_code == 302
@@ -111,6 +113,7 @@ def test_unit_nested_creation_and_edit_cannot_change_property(client):
     unit = Unit.objects.get()
     assert response.status_code == 302 and unit.property == first
     client.post(f"/pogodbe/enote/{unit.pk}/", {
+        "edit_fingerprint": record_edit_fingerprint(unit), "razlog": "Popravek",
         "oznaka": "P2", "tip_enote": Unit.TipEnote.SKLADISCE,
         "povrsina_m2": "13.00", "property": second.pk, "aktivna": "",
     })
@@ -139,7 +142,9 @@ def test_tenant_create_edit_fields_and_model_validation(client):
     response = client.post("/pogodbe/najemniki/nov/", tenant_data())
     tenant = Tenant.objects.get()
     assert response.status_code == 302 and tenant.aktiven is True
-    client.post(f"/pogodbe/najemniki/{tenant.pk}/", tenant_data(naziv="Janez N."))
+    client.post(f"/pogodbe/najemniki/{tenant.pk}/", tenant_data(
+        naziv="Janez N.", edit_fingerprint=record_edit_fingerprint(tenant), razlog="Popravek",
+    ))
     tenant.refresh_from_db()
     assert tenant.naziv == "Janez N."
 

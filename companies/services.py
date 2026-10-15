@@ -29,6 +29,7 @@ from core.services import (
     StanjeRezultat,
     audit_field_changes,
     financial_changes,
+    save_business_edit,
     validate_edit_source,
 )
 
@@ -36,6 +37,23 @@ COMPANY_FINANCIAL_FIELDS = (
     "naziv", "davcna_stevilka", "maticna_stevilka", "naslov", "drzava_koda",
     "trr", "ddv_zavezanec", "rok_placila_dni_privzeto",
 )
+
+
+@transaction.atomic
+def save_signatory_edit(signatory, *, source_fingerprint, razlog=""):
+    previous = Signatory.objects.select_for_update().filter(pk=signatory.pk).first()
+    if previous is None:
+        raise ValidationError("Zapis ne obstaja več. Osvežite obrazec.")
+    replaced = signatory.podpis_slika.name != previous.podpis_slika.name or not signatory.podpis_slika._committed
+    save_business_edit(
+        signatory, Signatory.business_edit_fields, source_fingerprint=source_fingerprint,
+        razlog=razlog, file_field="podpis_slika",
+    )
+    if replaced:
+        # A checksum describes an asset, never its replacement.
+        Signatory.objects.filter(pk=signatory.pk).update(podpis_checksum="")
+        signatory.podpis_checksum = ""
+    return signatory
 
 
 @transaction.atomic

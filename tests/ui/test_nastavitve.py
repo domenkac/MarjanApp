@@ -201,6 +201,7 @@ def test_signatory_history_create_upload_dates_and_edit(client, settings, tmp_pa
     edit = client.post(
         f"/nastavitve/podpisniki/{current.pk}/",
         {
+            "edit_fingerprint": record_edit_fingerprint(current), "razlog": "Popravek",
             "ime_priimek": "Ana Kovač",
             "funkcija": "Direktorica",
             "velja_od": "2026-02-01",

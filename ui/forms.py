@@ -154,7 +154,74 @@ class SampleLeaseSelectionForm(forms.Form):
         ).fields["lease"].queryset
 
 
-class PropertyForm(forms.ModelForm):
+class FinancialEditForm(forms.ModelForm):
+    edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
+    razlog = forms.CharField(
+        required=False, label="Razlog spremembe", widget=forms.Textarea(attrs={"rows": 3}),
+        help_text="Obvezen pri spremembi finančno pomembnih podatkov.",
+    )
+    financial_fields = ()
+    edit_attribute = "_financial_edit"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.initial["edit_fingerprint"] = record_edit_fingerprint(self.instance)
+        else:
+            self.fields.pop("razlog")
+            self.fields.pop("edit_fingerprint")
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.instance.pk:
+            previous = type(self.instance).objects.get(pk=self.instance.pk)
+            validate_edit_source(previous, cleaned.get("edit_fingerprint", ""))
+        return cleaned
+
+    def _post_clean(self):
+        super()._post_clean()
+        if self.instance.pk and not self.errors:
+            previous = type(self.instance).objects.get(pk=self.instance.pk)
+            try:
+                financial_changes(previous, self.instance, self.financial_fields, self.cleaned_data.get("razlog", ""))
+            except forms.ValidationError as error:
+                self._update_errors(error)
+
+    def save(self, commit=True):
+        record = super().save(commit=False)
+        if record.pk:
+            setattr(record, self.edit_attribute, (
+                self.cleaned_data["edit_fingerprint"], self.cleaned_data.get("razlog", ""),
+            ))
+        if commit:
+            record.save()
+            self._save_m2m()
+        return record
+
+
+class BusinessEditForm(FinancialEditForm):
+    edit_attribute = "_business_edit"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.financial_fields = self.instance.business_edit_fields
+        if "razlog" in self.fields:
+            self.fields["razlog"].help_text = "Obvezen pri spremembi poslovnih podatkov."
+
+    def clean(self):
+        try:
+            return super().clean()
+        except self._meta.model.DoesNotExist:
+            raise forms.ValidationError("Zapis ne obstaja več. Osvežite obrazec.") from None
+
+    def _post_clean(self):
+        try:
+            super()._post_clean()
+        except self._meta.model.DoesNotExist:
+            self.add_error(None, "Zapis ne obstaja več. Osvežite obrazec.")
+
+
+class PropertyForm(BusinessEditForm):
     company = CompanyChoiceField(queryset=Company.objects.none(), label="Podjetje")
 
     class Meta:
@@ -174,7 +241,7 @@ class PropertyForm(forms.ModelForm):
         ).order_by("naziv", "pk")
 
 
-class UnitForm(forms.ModelForm):
+class UnitForm(BusinessEditForm):
     class Meta:
         model = Unit
         fields = ("oznaka", "tip_enote", "povrsina_m2")
@@ -185,7 +252,7 @@ class UnitForm(forms.ModelForm):
         }
 
 
-class TenantForm(forms.ModelForm):
+class TenantForm(BusinessEditForm):
     class Meta:
         model = Tenant
         fields = (
@@ -228,50 +295,6 @@ class TenantChoiceField(forms.ModelChoiceField):
 class VatRegimeChoiceField(forms.ModelChoiceField):
     def label_from_instance(self, obj):
         return f"{obj.sifra} — {obj.naziv}"
-
-
-class FinancialEditForm(forms.ModelForm):
-    edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
-    razlog = forms.CharField(
-        required=False, label="Razlog spremembe", widget=forms.Textarea(attrs={"rows": 3}),
-        help_text="Obvezen pri spremembi finančno pomembnih podatkov.",
-    )
-    financial_fields = ()
-
-    def __init__(self, *args, **kwargs):
-        super().__init__(*args, **kwargs)
-        if self.instance.pk:
-            self.initial["edit_fingerprint"] = record_edit_fingerprint(self.instance)
-        else:
-            self.fields.pop("razlog")
-            self.fields.pop("edit_fingerprint")
-
-    def clean(self):
-        cleaned = super().clean()
-        if self.instance.pk:
-            previous = type(self.instance).objects.get(pk=self.instance.pk)
-            validate_edit_source(previous, cleaned.get("edit_fingerprint", ""))
-        return cleaned
-
-    def _post_clean(self):
-        super()._post_clean()
-        if self.instance.pk and not self.errors:
-            previous = type(self.instance).objects.get(pk=self.instance.pk)
-            try:
-                financial_changes(previous, self.instance, self.financial_fields, self.cleaned_data.get("razlog", ""))
-            except forms.ValidationError as error:
-                self._update_errors(error)
-
-    def save(self, commit=True):
-        record = super().save(commit=False)
-        if record.pk:
-            record._financial_edit = (
-                self.cleaned_data["edit_fingerprint"], self.cleaned_data.get("razlog", ""),
-            )
-        if commit:
-            record.save()
-            self._save_m2m()
-        return record
 
 
 class LeaseForm(FinancialEditForm):
@@ -357,7 +380,7 @@ class LeaseForm(FinancialEditForm):
         return cleaned
 
 
-class RecipientContactForm(forms.ModelForm):
+class RecipientContactForm(BusinessEditForm):
     class Meta:
         model = RecipientContact
         fields = ("email", "vloga")
@@ -518,7 +541,7 @@ class VatRegimeForm(FinancialEditForm):
         return cleaned
 
 
-class ServiceCatalogItemForm(forms.ModelForm):
+class ServiceCatalogItemForm(BusinessEditForm):
     privzeti_ddv_rezim = VatRegimeChoiceField(
         queryset=VatRegime.objects.all(),
         required=False,
@@ -587,7 +610,7 @@ class CompanyForm(_KeepExistingFileMixin, FinancialEditForm):
         }
 
 
-class SignatoryForm(_KeepExistingFileMixin, forms.ModelForm):
+class SignatoryForm(_KeepExistingFileMixin, BusinessEditForm):
     file_field_name = "podpis_slika"
 
     class Meta:

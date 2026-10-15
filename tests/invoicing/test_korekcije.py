@@ -20,6 +20,7 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture
 from tests.image_data import slika_bytes
 from tests.invoicing.test_priprava_np import dodaj_postavko
@@ -129,7 +130,7 @@ def test_storno_ohrani_eslog_snapshote_po_spremembi_zivih_podatkov(pogodba):
     )
 
     pogodba.tenant.tip = pogodba.tenant.Tip.FIZICNA_OSEBA
-    pogodba.tenant.save(update_fields=["tip"])
+    save_business_record(pogodba.tenant, update_fields=["tip"])
     approve_sample(original.company, pogodba)
     for postavka in pogodba.leaseitem_set.select_related("vat_regime"):
         postavka.vat_regime.eslog_koda = "SPREMENJENA"
@@ -153,7 +154,7 @@ def test_korekcija_uporabi_podpisnika_veljavnega_na_svoj_datum(
     original = izdan_np(pogodba)
     podpisnik_a = Signatory.objects.get(company=original.company)
     podpisnik_a.velja_do = date(2026, 9, 1)
-    podpisnik_a.save(update_fields=["velja_do"])
+    save_business_record(podpisnik_a, update_fields=["velja_do"])
     (tmp_path / "podpis-b.png").write_bytes(slika_bytes(size=(3, 3)))
     Signatory.objects.create(
         company=original.company,
@@ -205,7 +206,7 @@ def test_neveljaven_podpisnik_korekcije_ne_porabi_stevilke(
     podpisnik = Signatory.objects.get(company=original.company)
     if napaka == "manjka":
         podpisnik.velja_do = date(2026, 9, 1)
-        podpisnik.save(update_fields=["velja_do"])
+        save_business_record(podpisnik, update_fields=["velja_do"])
     else:
         (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
         Signatory.objects.create(

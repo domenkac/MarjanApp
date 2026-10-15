@@ -5,6 +5,7 @@ import pytest
 from django.core.files.base import ContentFile
 
 from companies.models import Signatory
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice
 from rendering.contexts import pripravi_pdf_context
 from rendering.services import _generiraj_pdf_bytes, pripravi_html, render_pdf
@@ -56,6 +57,7 @@ def test_renderer_vgradi_veljavna_snapshot_logo_in_podpis(
     company = invoice.company
     podpisnik = Signatory.objects.get(company=company)
     company.logotip.save("nov-logo.png", ContentFile(VALID_PNG_NOV_ASSET), save=True)
+    podpisnik._business_edit = (record_edit_fingerprint(podpisnik), "Nov podpis")
     podpisnik.podpis_slika.save(
         "nov-podpis.png", ContentFile(VALID_PNG_NOV_ASSET), save=True
     )

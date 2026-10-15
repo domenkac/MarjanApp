@@ -30,6 +30,7 @@ from contracts.models import (
 from contracts.services import izracunaj_postavko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.business_fixtures import save_business_record
 from tests.contracts.test_indeksacija import postavka, racun_s_postavkami  # noqa: F401
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
@@ -172,7 +173,7 @@ def test_source_changes_invalidate_preview(postavka, change):  # noqa: F811
     elif change == "tenant":
         tenant = postavka.lease.tenant
         tenant.naziv = "Spremenjen najemnik"
-        tenant.save()
+        save_business_record(tenant)
     elif change == "clause":
         update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
             ima_klavzulo_indeksacije=False

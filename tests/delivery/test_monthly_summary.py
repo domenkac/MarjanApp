@@ -38,6 +38,7 @@ from invoicing.services import (
     zamrzni_paket_za_potrditev,
 )
 from rendering.services import renderiraj_koncne_pdfje_mesecnega_paketa
+from tests.business_fixtures import update_business_records
 from tests.invoicing.test_preflight import (
     _calculate,
     _freeze_ready_package,
@@ -188,7 +189,7 @@ def test_success_snapshot_body_and_idempotency(ready_company, configuration, set
 def test_attention_uses_persisted_attempt_recipients(ready_company, configuration, settings, tmp_path):
     invoice = _step_6(ready_company, settings, tmp_path)
     _attempt(invoice, DeliveryAttempt.Result.CONFIRMED_FAILURE, message="Mailbox rejected")
-    RecipientContact.objects.filter(lease=invoice.lease).update(email="live@example.com")
+    update_business_records(RecipientContact.objects.filter(lease=invoice.lease), email="live@example.com")
 
     attempt = prepare_monthly_summary(ready_company["cycle"], configuration)
 

@@ -25,8 +25,9 @@ def validate_financial_save(record, update_fields=None, using=None):
             update_fields is not None and field.name not in update_fields and field.attname not in update_fields
         ):
             continue
-        if getattr(previous, field.attname) != field.to_python(getattr(record, field.attname)):
-            raise ValidationError("Finančne spremembe zahtevajo razlog in namensko revizijsko storitev.")
+        value = getattr(record, field.attname)
+        if getattr(previous, field.attname) != field.to_python(value) or not getattr(value, "_committed", True):
+            raise ValidationError("Spremembe poslovnih podatkov zahtevajo razlog in namensko revizijsko storitev.")
 
 
 class FinancialQuerySet(models.QuerySet):

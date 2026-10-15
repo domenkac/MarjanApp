@@ -18,6 +18,7 @@ from core.services import (
     StanjeRezultat,
     audit_field_changes,
     financial_changes,
+    save_business_edit,
     validate_edit_source,
 )
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
@@ -37,6 +38,20 @@ LEASE_ITEM_METADATA_FIELDS = (
     "naziv_postavke", "vat_regime", "referenca_listine", "datum_reference",
     "indeks_ob_osnovi", "datum_osnove_indeksacije", "osnovna_najemnina_ob_sklenitvi",
 )
+
+
+def save_contract_data_edit(record, *, source_fingerprint, razlog=""):
+    if type(record) not in (Tenant, Property, Unit):
+        raise TypeError("Unsupported contract business record.")
+    return save_business_edit(
+        record, record.business_edit_fields, source_fingerprint=source_fingerprint, razlog=razlog,
+    )
+
+
+def save_recipient_edit(record, *, source_fingerprint, razlog=""):
+    return save_business_edit(
+        record, RecipientContact.business_edit_fields, source_fingerprint=source_fingerprint, razlog=razlog,
+    )
 
 
 @transaction.atomic
@@ -128,7 +143,8 @@ def deaktiviraj_prejemnika(prejemnik: RecipientContact) -> StanjeRezultat:
         if not svezi.aktiven:
             return StanjeRezultat(False, (StanjeRazlog("ZE_NEAKTIVEN", "Prejemnik je že neaktiven."),))
         svezi.aktiven = False
-        svezi.save(update_fields=["aktiven"])
+        models.Model.save(svezi, update_fields=["aktiven"])
+        audit_field_changes(svezi, {"aktiven": True}, "Deaktiviranje prejemnika")
         return StanjeRezultat(True)
 
 
@@ -154,7 +170,8 @@ def ponovno_aktiviraj_prejemnika(prejemnik: RecipientContact) -> StanjeRezultat:
                 StanjeRazlog("NEVELJAVEN_PREJEMNIK", message)
                 for message in error.messages
             ))
-        svezi.save(update_fields=["aktiven"])
+        models.Model.save(svezi, update_fields=["aktiven"])
+        audit_field_changes(svezi, {"aktiven": False}, "Ponovna aktivacija prejemnika")
         return StanjeRezultat(True)
 
 

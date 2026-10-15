@@ -7,6 +7,7 @@ from invoicing.services import (
     primerjaj_delta_np,
     pripravi_osnutek_np,
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_priprava_np import (
     DATUM_IZDAJE,
@@ -65,15 +66,15 @@ def test_faza1_pot_od_pogodbe_do_izdanega_posnetka(pogodba):
     }
 
     tenant.naziv = "Nov najemnik"
-    tenant.save(update_fields=["naziv"])
+    save_business_record(tenant, update_fields=["naziv"])
     company.naziv = "Nov izdajatelj"
     save_financial_fixture(company, update_fields=["naziv"])
     podpisnik.ime_priimek = "Nov podpisnik"
-    podpisnik.save(update_fields=["ime_priimek"])
+    save_business_record(podpisnik, update_fields=["ime_priimek"])
     property.naziv = "Nov objekt"
-    property.save(update_fields=["naziv"])
+    save_business_record(property, update_fields=["naziv"])
     unit.oznaka = "Nova enota"
-    unit.save(update_fields=["oznaka"])
+    save_business_record(unit, update_fields=["oznaka"])
     pogodba.oznaka_pogodbe = "Nova oznaka"
     save_financial_fixture(pogodba, update_fields=["oznaka_pogodbe"])
     obdavcena.znesek_neto_mesecno = Decimal("200.00")

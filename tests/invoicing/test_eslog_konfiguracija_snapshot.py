@@ -13,6 +13,7 @@ from invoicing.services import (
     pripravi_korekcijski_osnutek,
     pripravi_osnutek_np,
 )
+from tests.business_fixtures import save_business_record
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import prepare_initial_setup
 
@@ -83,7 +84,7 @@ def test_np_snapshot_nastane_ob_potrditvi_in_ostane_nespremenjen(pogodba):
     company.eslog_privzeti_neobvezni_segmenti = {E_NASLOV: True, KONTAKT: False}
     company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
     tenant.eslog_neobvezna_polja = {"elektronski_naslov_kupca": " racuni@x.si "}
-    tenant.save(update_fields=["eslog_neobvezna_polja"])
+    save_business_record(tenant, update_fields=["eslog_neobvezna_polja"])
 
     prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
@@ -95,7 +96,7 @@ def test_np_snapshot_nastane_ob_potrditvi_in_ostane_nespremenjen(pogodba):
     company.eslog_privzeti_neobvezni_segmenti = BASELINE["segments"]
     company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
     tenant.eslog_neobvezna_polja = {}
-    tenant.save(update_fields=["eslog_neobvezna_polja"])
+    save_business_record(tenant, update_fields=["eslog_neobvezna_polja"])
     potrjen.refresh_from_db()
     assert potrjen.eslog_konfiguracija_snapshot["segments"][E_NASLOV] is True
 
@@ -150,7 +151,7 @@ def test_korekcija_uporabi_trenutno_konfiguracijo_ob_lastni_potrditvi(
     company.eslog_privzeti_neobvezni_segmenti = {E_NASLOV: False, KONTAKT: True}
     company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
     tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Nabava"}
-    tenant.save(update_fields=["eslog_neobvezna_polja"])
+    save_business_record(tenant, update_fields=["eslog_neobvezna_polja"])
 
     potrjen = potrdi_korekcijski_osnutek(popravek)
     assert potrjen.eslog_konfiguracija_snapshot["segments"][KONTAKT] is True
@@ -161,7 +162,7 @@ def test_korekcija_uporabi_trenutno_konfiguracijo_ob_lastni_potrditvi(
     assert original.eslog_konfiguracija_snapshot == BASELINE
 
     tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Drugo"}
-    tenant.save(update_fields=["eslog_neobvezna_polja"])
+    save_business_record(tenant, update_fields=["eslog_neobvezna_polja"])
     potrjen.refresh_from_db()
     assert potrjen.eslog_konfiguracija_snapshot["fields"] == {
         "kontaktna_tocka_kupca": "Nabava"
@@ -268,7 +269,7 @@ def test_lease_st_korekcija_uporabi_trenutno_konfiguracijo(pogodba):
     company.eslog_privzeti_neobvezni_segmenti = {E_NASLOV: False, KONTAKT: True}
     company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
     tenant.eslog_neobvezna_polja = {"kontaktna_tocka_kupca": "Nabava"}
-    tenant.save(update_fields=["eslog_neobvezna_polja"])
+    save_business_record(tenant, update_fields=["eslog_neobvezna_polja"])
 
     potrjen = potrdi_korekcijski_osnutek(storno)
 

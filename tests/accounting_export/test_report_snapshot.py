@@ -20,6 +20,7 @@ from invoicing.models import (
     MonthlyCycle,
 )
 from invoicing.services import CALCULATION_SNAPSHOT_VERSION, _candidate_fingerprint
+from tests.business_fixtures import update_business_records
 from tests.financial_fixtures import update_financial_fixture
 
 
@@ -683,7 +684,10 @@ def test_live_tenant_lease_item_and_vat_changes_do_not_change_report(company):
     before = report.snapshot
     historical_regimes = before["issued_rows"][0]["vat_regimes"]
 
-    Tenant.objects.filter(pk=lease.tenant_id).update(naziv="Nov živi najemnik")
+    # Repair the legacy fixture's invalid tax ID through the audited edit too.
+    update_business_records(
+        Tenant.objects.filter(pk=lease.tenant_id), naziv="Nov živi najemnik", davcna_stevilka="15012557",
+    )
     update_financial_fixture(Lease.objects.filter(pk=lease.pk), oznaka_pogodbe="NOVA")
     update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), znesek_neto_mesecno=Decimal("999.00"))
     update_financial_fixture(VatRegime.objects.filter(pk=regime.pk),

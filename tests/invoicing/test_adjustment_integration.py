@@ -36,6 +36,7 @@ from invoicing.models import (
 )
 from rendering.contexts import pripravi_pdf_context
 from rendering.eslog import pripravi_eslog_context, render_eslog, validiraj_eslog
+from tests.business_fixtures import update_business_records
 from tests.contracts.test_late_adjustments import (
     detect,
     event_for,
@@ -269,7 +270,7 @@ def test_changed_evidence_or_reservation_blocks_before_numbering(
     elif mutation == "vat":
         update_financial_fixture(type(data["regime"]).objects.filter(pk=data["regime"].pk), stopnja=Decimal("9.50"))
     elif mutation == "recipient":
-        type(data["tenant"]).objects.filter(pk=data["tenant"].pk).update(naziv="Other recipient")
+        update_business_records(type(data["tenant"]).objects.filter(pk=data["tenant"].pk), naziv="Other recipient")
     elif mutation == "approval":
         models.QuerySet(model=PoracunIndeksacije).filter(pk=rows[0].pk).update(status="ZAVRNJEN")
     elif mutation == "line":

@@ -17,6 +17,7 @@ from companies.models import (
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.business_fixtures import update_business_records
 from tests.financial_fixtures import save_financial_fixture
 from tests.setup_helpers import approve_sample
 
@@ -249,7 +250,7 @@ def test_sample_post_is_immutable_safe_and_errors_are_controlled(client, confirm
         MonthlyBatch.objects.count(),
     ) == counts
 
-    Signatory.objects.filter(company=data.company).update(velja_do=date(2020, 1, 2))
+    update_business_records(Signatory.objects.filter(company=data.company), velja_do=date(2020, 1, 2))
     response = client.post(url, {"lease": data.lease.pk})
     assert response.status_code == 409 and "Ni veljavnega podpisnika" in response.content.decode()
 

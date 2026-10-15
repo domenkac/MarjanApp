@@ -16,6 +16,7 @@ from contracts.models import (
     Tenant,
     Unit,
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 
@@ -498,7 +499,7 @@ def test_recipient_contact_pravna_oseba_dovoljuje_vse_vloge_in_kanale(vloga, kan
 def test_recipient_contact_fizicna_oseba_samo_pdf(kanal, dovoljen):
     pogodba = nova_pogodba()
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
-    pogodba.tenant.save(update_fields=["tip"])
+    save_business_record(pogodba.tenant, update_fields=["tip"])
     pogodba.save()
     kontakt = RecipientContact(
         lease=pogodba,

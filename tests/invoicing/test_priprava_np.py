@@ -23,6 +23,7 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.business_fixtures import save_business_record
 from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.image_data import slika_bytes
 from tests.setup_helpers import prepare_initial_setup
@@ -186,12 +187,12 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
     assert line.je_sorazmerno is False
 
     pogodba.tenant.naziv = "Spremenjen najemnik"
-    pogodba.tenant.save()
+    save_business_record(pogodba.tenant)
     pogodba.unit.property.company.naziv = "Spremenjen izdajatelj"
     save_financial_fixture(pogodba.unit.property.company)
     podpisnik = Signatory.objects.get(company=pogodba.unit.property.company)
     podpisnik.ime_priimek = "Spremenjena podpisnica"
-    podpisnik.save()
+    save_business_record(podpisnik)
     item.vat_regime.stopnja = Decimal("9.50")
     item.vat_regime.klavzula = "Nova klavzula"
     save_financial_fixture(item.vat_regime)
@@ -295,7 +296,7 @@ def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
     prvotni_naziv = invoice.prejemnik_naziv
     prvotna_vrstica = InvoiceLine.objects.get(invoice=invoice)
     pogodba.tenant.naziv = "Spremenjen najemnik"
-    pogodba.tenant.save(update_fields=["naziv"])
+    save_business_record(pogodba.tenant, update_fields=["naziv"])
     postavka.naziv_postavke = "Spremenjena postavka"
     save_financial_fixture(postavka, update_fields=["naziv_postavke"])
 
@@ -327,7 +328,7 @@ def test_potrditev_ne_prebere_drzave_in_ddv_statusa_iz_zivih_partnerjev(pogodba)
     tenant = pogodba.tenant
     tenant.drzava_koda = "AT"
     tenant.identificiran_za_ddv = False
-    tenant.save(update_fields=["drzava_koda", "identificiran_za_ddv"])
+    save_business_record(tenant, update_fields=["drzava_koda", "identificiran_za_ddv"])
     company = pogodba.unit.property.company
     company.drzava_koda = "AT"
     company.ddv_zavezanec = False
@@ -366,7 +367,7 @@ def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
     assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
 
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
-    pogodba.tenant.save(update_fields=["tip"])
+    save_business_record(pogodba.tenant, update_fields=["tip"])
     postavka.vat_regime.eslog_koda = "SPREMENJENA"
     save_financial_fixture(postavka.vat_regime, update_fields=["eslog_koda"])
     potrjen.refresh_from_db()
@@ -385,7 +386,7 @@ def test_potrditev_ne_prebere_tipa_in_ddv_rezima_iz_zivih_modelov(pogodba):
     )
 
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
-    pogodba.tenant.save(update_fields=["tip"])
+    save_business_record(pogodba.tenant, update_fields=["tip"])
     postavka.vat_regime = VatRegime.objects.create(
         zahteva_polni_odbitek=False, sifra="NOV_OPROSCEN", naziv="Oprostitev",
         nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO, stopnja=Decimal("0.00"),
@@ -438,7 +439,7 @@ def test_fizicna_oseba_brez_davcne_stevilke_se_lahko_izda(pogodba):
     pogodba.tenant.davcna_stevilka = ""
     pogodba.tenant.maticna_stevilka = ""
     pogodba.tenant.identificiran_za_ddv = False
-    pogodba.tenant.save(update_fields=["tip", "davcna_stevilka", "maticna_stevilka", "identificiran_za_ddv"])
+    save_business_record(pogodba.tenant, update_fields=["tip", "davcna_stevilka", "maticna_stevilka", "identificiran_za_ddv"])
     dodaj_postavko(pogodba)
 
     prepare_initial_setup(pogodba.unit.property.company, pogodba)
@@ -625,7 +626,7 @@ def test_np_ob_potrditvi_uporabi_podpisnika_za_koncni_datum(
     invoice = pripravi(pogodba).invoice
     podpisnik_a = Signatory.objects.get(company=invoice.company)
     podpisnik_a.velja_do = date(2026, 9, 1)
-    podpisnik_a.save(update_fields=["velja_do"])
+    save_business_record(podpisnik_a, update_fields=["velja_do"])
     (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
     Signatory.objects.create(
         company=invoice.company,
@@ -655,7 +656,7 @@ def test_np_neveljaven_koncni_podpisnik_ne_porabi_stevilke(
     podpisnik = Signatory.objects.get(company=invoice.company)
     if napaka == "manjka":
         podpisnik.velja_do = date(2026, 8, 31)
-        podpisnik.save(update_fields=["velja_do"])
+        save_business_record(podpisnik, update_fields=["velja_do"])
     else:
         (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
         Signatory.objects.create(
