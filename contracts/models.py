@@ -11,6 +11,7 @@ from core.eslog_konfiguracija import (
     normaliziraj_neobvezna_polja,
     normaliziraj_segmentne_nastavitve,
 )
+from core.models import FinancialQuerySet, validate_financial_save
 from core.validators import (
     preveri_davcno_stevilko,
     preveri_kodo_drzave,
@@ -141,6 +142,8 @@ class Tenant(models.Model):
 
 
 class Lease(models.Model):
+    objects = FinancialQuerySet.as_manager()
+
     class TipTrajanja(models.TextChoices):
         DOLOCEN_CAS = "DOLOCEN_CAS", "Določen čas"
         NEDOLOCEN_CAS = "NEDOLOCEN_CAS", "Nedoločen čas"
@@ -258,6 +261,11 @@ class Lease(models.Model):
             raise ValidationError(napake)
 
     def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_financial_edit")
+        if edit is not None and self.pk is not None:
+            from .renewals import save_lease_edit
+
+            return save_lease_edit(self, source_fingerprint=edit[0], razlog=edit[1])
         self._nastavi_privzeti_rok_placila()
         from .renewals import validate_lease_edit
 
@@ -273,12 +281,15 @@ class Lease(models.Model):
                 validate_lease_edit(previous, changes, source_fingerprint=getattr(
                     self, "_edit_source_fingerprint", None,
                 ))
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
             result = super().save(*args, **kwargs)
             self.__dict__.pop("_edit_source_fingerprint", None)
             return result
 
 
 class LeaseItem(models.Model):
+    objects = FinancialQuerySet.as_manager()
+
     lease = models.ForeignKey(Lease, on_delete=models.PROTECT)
     naziv_postavke = models.CharField(default="Najemnina")
     znesek_neto_mesecno = models.DecimalField(
@@ -314,8 +325,15 @@ class LeaseItem(models.Model):
     def save(self, *args, **kwargs):
         from .services import pripravi_referencno_najemnino
 
-        pripravi_referencno_najemnino(self)
-        super().save(*args, **kwargs)
+        edit = self.__dict__.get("_financial_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_lease_item_edit
+
+            return save_lease_item_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            pripravi_referencno_najemnino(self)
+            return super().save(*args, **kwargs)
 
     def clean(self):
         super().clean()

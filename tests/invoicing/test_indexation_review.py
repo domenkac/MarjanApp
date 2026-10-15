@@ -20,6 +20,7 @@ from invoicing.services import (
     zamrzni_paket_za_potrditev,
 )
 from tests.contracts.test_indeksacija import racun_s_postavkami
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.invoicing.test_preflight import (  # noqa: F401
     potrdi_septembrski_vzorec,
     ready_company,
@@ -31,8 +32,8 @@ def approve(data, value="110.000"):
     lease = data["lease"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    save_financial_fixture(lease)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         indeks_ob_osnovi=Decimal("100.000"),
         datum_osnove_indeksacije=date(2026, 1, 1),
     )

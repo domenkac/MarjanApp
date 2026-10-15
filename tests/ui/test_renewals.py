@@ -14,6 +14,7 @@ from contracts.renewals import (
 )
 from core.models import AuditLogEntry
 from tests.contracts.test_renewals import automatic_lease
+from tests.financial_fixtures import update_financial_fixture
 from tests.ui.test_contract_leases import lease_data
 from ui.forms import LeaseForm
 
@@ -191,7 +192,7 @@ def test_stale_detail_post_requires_new_review(client, monkeypatch, changes):
     monkeypatch.setattr("ui.views.timezone.localdate", lambda: date(2024, 1, 31))
     lease = automatic_lease()
     proposal = renewal_proposal(lease, date(2024, 1, 31))
-    Lease.objects.filter(pk=lease.pk).update(**changes)
+    update_financial_fixture(Lease.objects.filter(pk=lease.pk), **changes)
     response = client.post(reverse("ui:pogodba_podaljsaj", args=[lease.pk]), {
         "source_fingerprint": proposal["source_fingerprint"],
     })

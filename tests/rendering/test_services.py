@@ -23,6 +23,7 @@ from rendering.services import (
     render_pdf,
     sestavi_ddv_rekapitulacijo,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.rendering.test_contexts import izdani_racun
 
 
@@ -89,15 +90,15 @@ def test_zivi_podatki_ne_spremenijo_html_izdanega_racuna(izdani_racun, vir):
         lease.tenant.save(update_fields=["naziv"])
     elif vir == "company":
         izdani_racun.company.naziv = "Novo podjetje"
-        izdani_racun.company.save(update_fields=["naziv"])
+        save_financial_fixture(izdani_racun.company, update_fields=["naziv"])
     elif vir == "vat":
         regime = LeaseItem.objects.get(lease=lease).vat_regime
         regime.stopnja = Decimal("9.50")
-        regime.save(update_fields=["stopnja"])
+        save_financial_fixture(regime, update_fields=["stopnja"])
     elif vir == "lease_item":
         item = LeaseItem.objects.get(lease=lease)
         item.naziv_postavke = "Nova postavka"
-        item.save(update_fields=["naziv_postavke"])
+        save_financial_fixture(item, update_fields=["naziv_postavke"])
     else:
         podpisnik = Signatory.objects.get(company=izdani_racun.company)
         podpisnik.ime_priimek = "Nov podpisnik"

@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 from django.contrib.contenttypes.models import ContentType
+from django.core.exceptions import ValidationError
 from django.db import connection
 
 from archive.models import ArchivedFile
@@ -129,7 +130,7 @@ def test_invalid_delivery_evidence_writes_nothing(sent_invoice, roots, case):
             result=DeliveryAttempt.Result.UNKNOWN
         )
         if case in {"forged_unknown", "forged_unknown_action"}:
-            AuditLogEntry.objects.create(
+            audit = AuditLogEntry(
                 content_type=ContentType.objects.get_for_model(DeliveryAttempt),
                 object_id=attempt.pk,
                 dejanje=(
@@ -144,6 +145,13 @@ def test_invalid_delivery_evidence_writes_nothing(sent_invoice, roots, case):
                 nova_vrednost=UNKNOWN_RESOLUTION_SENT_VERIFIED,
                 razlog="Invalid transition",
             )
+            if case == "forged_unknown_action":
+                with pytest.raises(ValidationError):
+                    audit.save()
+                # Legacy corrupt evidence must remain unusable by the archive.
+                audit.save_base(force_insert=True)
+            else:
+                audit.save()
     else:
         DeliveryAttempt.objects.filter(pk=attempt.pk).update(pdf_checksum="b" * 64)
     result = archive_pdf(invoice, roots)

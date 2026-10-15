@@ -5,6 +5,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from django.core.exceptions import ValidationError
+from django.db import DatabaseError
 from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -63,6 +64,7 @@ from contracts.services import (
 from contracts.services import (
     ponovno_aktiviraj_poslovni_zapis as ponovno_aktiviraj_pogodbeni_zapis,
 )
+from core.services import record_edit_fingerprint
 from delivery.configuration import (
     SmtpConfigurationError,
     resolve_keyring_credential_ref,
@@ -192,6 +194,8 @@ def _lease_form(request, lease=None, action_errors=None, *, bind_post=True):
             lease = form.save()
         except ValidationError as exc:
             form.add_error(None, " ".join(exc.messages))
+        except DatabaseError:
+            form.add_error(None, "Spremembe ni bilo mogoče shraniti. Osvežite obrazec in poskusite znova.")
         else:
             return redirect("ui:pogodba_detail", lease_id=lease.pk)
     if lease and form.is_bound:
@@ -369,13 +373,25 @@ def postavka_detail(request, item_id):
     return _item_form(request, item)
 
 
+def _save_financial_form(form):
+    try:
+        form.save()
+    except ValidationError as error:
+        for field, messages in getattr(error, "message_dict", {None: error.messages}).items():
+            form.add_error(field if field in form.fields else None, messages)
+    except DatabaseError:
+        form.add_error(None, "Spremembe ni bilo mogoče shraniti. Osvežite obrazec in poskusite znova.")
+    else:
+        return True
+    return False
+
+
 def _item_form(request, item, action_errors=None, *, bind_post=True):
     form = LeaseItemDetailsForm(
         request.POST if bind_post and request.method == "POST" else None,
         instance=item,
     )
-    if bind_post and request.method == "POST" and form.is_valid():
-        form.save()
+    if bind_post and request.method == "POST" and form.is_valid() and _save_financial_form(form):
         return redirect("ui:postavka_detail", item_id=item.pk)
     return render(request, "ui/postavka_form.html", _contracts_context(
         form=form, item=item, lease=item.lease, action_errors=action_errors,
@@ -388,6 +404,7 @@ def postavka_popravek(request, item_id):
         LeaseItem.objects.select_related("lease"), pk=item_id
     )
     initial = {
+        "edit_fingerprint": record_edit_fingerprint(item),
         "znesek_neto_mesecno": item.znesek_neto_mesecno,
         "datum_zacetka_postavke": item.datum_zacetka_postavke,
         "datum_prenehanja_postavke": item.datum_prenehanja_postavke,
@@ -397,6 +414,7 @@ def postavka_popravek(request, item_id):
         try:
             rocno_popravi_postavko(
                 item,
+                source_fingerprint=form.cleaned_data["edit_fingerprint"],
                 razlog=form.cleaned_data["razlog"],
                 znesek_neto_mesecno=form.cleaned_data["znesek_neto_mesecno"],
                 datum_zacetka_postavke=form.cleaned_data["datum_zacetka_postavke"],
@@ -409,6 +427,8 @@ def postavka_popravek(request, item_id):
                 error, "message_dict", {None: error.messages}
             ).items():
                 form.add_error(field if field in form.fields else None, messages)
+        except DatabaseError:
+            form.add_error(None, "Spremembe ni bilo mogoče shraniti. Osvežite obrazec in poskusite znova.")
         else:
             return redirect("ui:postavka_detail", item_id=item.pk)
     return render(request, "ui/postavka_popravek.html", _contracts_context(
@@ -733,8 +753,8 @@ def ddv_rezim_detail(request, regime_id):
 
 def _ddv_rezim_form(request, regime=None):
     form = VatRegimeForm(request.POST or None, instance=regime)
-    if request.method == "POST" and form.is_valid():
-        regime = form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
+        regime = form.instance
         return redirect("ui:ddv_rezim_detail", regime_id=regime.pk)
     return render(
         request,
@@ -856,8 +876,7 @@ def podjetje_detail(request, company_id):
             company, request.GET["vzorec_pogodba"]
         )
     form = CompanyForm(request.POST or None, request.FILES or None, instance=company)
-    if request.method == "POST" and form.is_valid():
-        form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
         return redirect("ui:podjetje_detail", company_id=company.pk)
     return render(
         request,

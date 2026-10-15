@@ -15,6 +15,7 @@ from invoicing.services import (
     pripravi_osnutek_np,
 )
 from rendering.contexts import pripravi_vzorcni_pdf_context
+from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import prepare_initial_setup
 
@@ -128,7 +129,7 @@ def test_zastarela_ddv_potrditev_blokira_predpogoje(pogodba):
         velja_od=date(2026, 1, 1),
     )
     postavka.vat_regime = drug_rezim
-    postavka.save(update_fields=["vat_regime"])
+    save_financial_fixture(postavka, update_fields=["vat_regime"])
 
     assert veljavna_potrditev_ddv(company).stanje == "stale"
     assert "DDV_NEPOTRJEN" in {
@@ -174,7 +175,7 @@ def test_obicajen_celomescni_kandidat_brez_izjem_in_stranskih_ucinkov(pogodba):
 def test_manjkajoca_obvezna_referenca_ostane_blokada(pogodba):
     postavka = dodaj_postavko(pogodba)
     postavka.vat_regime.zahteva_referenco = True
-    postavka.vat_regime.save(update_fields=["zahteva_referenco"])
+    save_financial_fixture(postavka.vat_regime, update_fields=["zahteva_referenco"])
 
     with pytest.raises(ValidationError) as error:
         izracunaj_kandidata(
@@ -188,7 +189,7 @@ def test_sorazmerno_vedno_sprozi_izjemo(pogodba):
     postavka = dodaj_postavko(pogodba, znesek="0.01")
     _izdaj_avgust(pogodba)
     postavka.datum_prenehanja_postavke = date(2026, 9, 29)
-    postavka.save(update_fields=["datum_prenehanja_postavke"])
+    save_financial_fixture(postavka, update_fields=["datum_prenehanja_postavke"])
 
     kandidat = izracunaj_kandidata(
         pogodba, SEPTEMBER_OD, SEPTEMBER_DO, DATUM_IZDAJE
@@ -206,7 +207,7 @@ def test_ena_sorazmerna_med_vec_postavkami_ena_izjema(pogodba):
     delna = dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00", nacin="OPROSCENO")
     _izdaj_avgust(pogodba)
     delna.datum_prenehanja_postavke = date(2026, 9, 15)
-    delna.save(update_fields=["datum_prenehanja_postavke"])
+    save_financial_fixture(delna, update_fields=["datum_prenehanja_postavke"])
 
     kandidat = izracunaj_kandidata(
         pogodba, SEPTEMBER_OD, SEPTEMBER_DO, DATUM_IZDAJE

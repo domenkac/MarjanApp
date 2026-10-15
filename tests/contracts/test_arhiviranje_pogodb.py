@@ -13,6 +13,7 @@ from contracts.services import (
 from core.models import AuditLogEntry
 from invoicing.models import InvoiceLine
 from invoicing.services import potrdi_osnutek_np, pripravi_osnutek_np
+from tests.financial_fixtures import update_financial_fixture
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import prepare_initial_setup
 
@@ -143,7 +144,7 @@ def test_neaktiven_nadrejeni_blokira_reaktivacijo(pogodba, nadrejeni, otrok):
 def test_neveljaven_zapis_ostane_arhiviran(pogodba):
     item = cleni(pogodba)["LeaseItem"]
     assert arhiviraj_poslovni_zapis(item).uspesno is True
-    LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("0.00"))
+    update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), znesek_neto_mesecno=Decimal("0.00"))
 
     rezultat = ponovno_aktiviraj_poslovni_zapis(item)
 

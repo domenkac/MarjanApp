@@ -1,5 +1,4 @@
 """First-run evidence and the production issuance boundary."""
-
 from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from threading import Barrier
@@ -39,6 +38,7 @@ from invoicing.services import (
     pripravi_korekcijski_osnutek,
     pripravi_osnutek_np,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.setup_helpers import (
     add_setup_issuers,
     approve_sample,
@@ -111,7 +111,7 @@ def test_five_issuer_completion_has_audit_and_actual_evidence(five_issuers):
 
 def test_missing_fifth_issuer_blocks_completion_and_numbering(five_issuers):
     data, others = five_issuers
-    Company.objects.filter(pk=others[-1].pk).update(aktivno=False)
+    update_financial_fixture(Company.objects.filter(pk=others[-1].pk), aktivno=False)
     with pytest.raises(ValidationError, match="najmanj pet"):
         readiness.complete_initial_setup()
     with pytest.raises(ValidationError, match="Začetna nastavitev"):
@@ -130,7 +130,7 @@ def test_stale_forged_and_cross_company_preview_is_rejected(
     preview_id = preview.preview_id
     if change == "amount":
         data.item.znesek_neto_mesecno = "125.00"
-        data.item.save()
+        save_financial_fixture(data.item)
     elif change == "template":
         settings.PDF_TEMPLATE_VERSION = "changed"
     elif change == "forged":
@@ -233,7 +233,7 @@ def test_ui_resume_restart_and_repeated_finish_recompute_current_data(
     assert SetupNavigation.objects.get().step == "company"
     assert InitialSetupCompletion.objects.count() == 1
     data.company.trr = "invalid"
-    data.company.save()
+    save_financial_fixture(data.company)
     response = client.post(url, {"action": "finish"})
     assert response.status_code == 200 and "IBAN" in response.content.decode()
     with pytest.raises(ValidationError, match="IBAN"):
@@ -250,7 +250,7 @@ def test_direct_and_correction_issuance_recheck_each_company(five_issuers):
     correction = pripravi_korekcijski_osnutek(
         original, Invoice.DocumentType.STORNO, "Popravek", date(2026, 10, 2)
     )
-    Company.objects.filter(pk=data.company.pk).update(naziv="Novo ime")
+    update_financial_fixture(Company.objects.filter(pk=data.company.pk), naziv="Novo ime")
     with pytest.raises(ValidationError, match="Potrditev vzorca"):
         potrdi_korekcijski_osnutek(correction)
     correction.refresh_from_db()
@@ -353,7 +353,7 @@ def test_actual_allocation_rechecks_after_outer_validation(five_issuers, monkeyp
     allocate = dodeli_naslednjo_stevilko
 
     def change_then_allocate(company, tip, issue_date):
-        Company.objects.filter(pk=company.pk).update(naziv="Spremenjeno med izdajo")
+        update_financial_fixture(Company.objects.filter(pk=company.pk), naziv="Spremenjeno med izdajo")
         return allocate(company, tip, issue_date)
 
     monkeypatch.setattr(

@@ -4,14 +4,22 @@ from decimal import Decimal
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models.deletion import ProtectedError
 
 from catalogs.models import VatRegime
 from companies.models import Company, CompanySampleConfirmation
 from core.models import AuditLogEntry
 from core.pravila import zaokrozi
-from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
+from core.services import (
+    IzbrisOdlocitev,
+    IzbrisRazlog,
+    StanjeRazlog,
+    StanjeRezultat,
+    audit_field_changes,
+    financial_changes,
+    validate_edit_source,
+)
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 
 from .models import (
@@ -24,6 +32,29 @@ from .models import (
     Tenant,
     Unit,
 )
+
+LEASE_ITEM_METADATA_FIELDS = (
+    "naziv_postavke", "vat_regime", "referenca_listine", "datum_reference",
+    "indeks_ob_osnovi", "datum_osnove_indeksacije", "osnovna_najemnina_ob_sklenitvi",
+)
+
+
+@transaction.atomic
+def save_lease_item_edit(item, *, source_fingerprint, razlog=""):
+    previous = LeaseItem.objects.select_for_update().get(pk=item.pk)
+    validate_edit_source(previous, source_fingerprint)
+    # Rent and validity changes belong to the existing correction service.
+    for field in item._meta.concrete_fields:
+        if field.name not in LEASE_ITEM_METADATA_FIELDS and getattr(item, field.attname) != getattr(previous, field.attname):
+            raise ValidationError("Za spremembo zneska ali veljavnosti uporabite ročni popravek.")
+    item._state.fields_cache.clear()
+    item.clean_fields()
+    item.full_clean()
+    changes = financial_changes(previous, item, LEASE_ITEM_METADATA_FIELDS, razlog)
+    models.Model.save(item)
+    item.refresh_from_db()
+    audit_field_changes(item, changes, razlog)
+    return item
 
 
 @dataclass(frozen=True)
@@ -308,14 +339,13 @@ _ROCNO_UREDLJIVA_POLJA_POSTAVKE = frozenset(
 
 @transaction.atomic
 def rocno_popravi_postavko(
-    postavka: LeaseItem, *, razlog: str, **spremembe
+    postavka: LeaseItem, *, razlog: str, source_fingerprint="", **spremembe
 ) -> LeaseItem:
-    if not isinstance(razlog, str) or not razlog.strip():
-        raise ValidationError({"razlog": "Razlog ročnega popravka je obvezen."})
     if spremembe.keys() - _ROCNO_UREDLJIVA_POLJA_POSTAVKE:
         raise ValueError("Nedovoljena poslovna polja za ročni popravek postavke.")
 
-    sveza = LeaseItem.objects.get(pk=postavka.pk)
+    sveza = LeaseItem.objects.select_for_update().get(pk=postavka.pk)
+    validate_edit_source(sveza, source_fingerprint)
     if (
         "znesek_neto_mesecno" in spremembe
         and Decimal(spremembe["znesek_neto_mesecno"]) != sveza.znesek_neto_mesecno
@@ -335,8 +365,10 @@ def rocno_popravi_postavko(
         polje for polje, stara in stare_vrednosti.items()
         if stara != getattr(sveza, polje)
     ]
+    if spremenjena and (not isinstance(razlog, str) or not razlog.strip()):
+        raise ValidationError({"razlog": "Razlog ročnega popravka je obvezen."})
     if spremenjena:
-        sveza.save(update_fields=spremenjena)
+        models.Model.save(sveza, update_fields=spremenjena)
         sveza.refresh_from_db(fields=spremenjena)
         for polje in spremenjena:
             _audit(
@@ -523,7 +555,7 @@ def razveljavi_indeksacijo(indexation_event: IndexationEvent) -> IndexationEvent
             postavka, "znesek_neto_mesecno", prejsnja_vrednost,
             postavka.znesek_neto_mesecno, razlog,
         ))
-        postavka.save(update_fields=["znesek_neto_mesecno"])
+        models.Model.save(postavka, update_fields=["znesek_neto_mesecno"])
     dogodek.save(update_fields=["izkljucen", "razlog_izkljucitve"])
     for audit in auditi:
         audit.save()
@@ -598,7 +630,7 @@ def arhiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
             not aktivna_vrednost,
             "Arhiviranje poslovnega zapisa",
         )
-        svezi.save(update_fields=[polje])
+        models.Model.save(svezi, update_fields=[polje])
         revizija.save()
         return StanjeRezultat(True)
 
@@ -661,7 +693,7 @@ def ponovno_aktiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
                 aktivna_vrednost,
                 "Ponovna aktivacija poslovnega zapisa",
             )
-            svezi.save()
+            models.Model.save(svezi, update_fields=[polje])
             revizija.save()
             return StanjeRezultat(True)
     except IntegrityError:

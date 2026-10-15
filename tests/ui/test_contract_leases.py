@@ -11,8 +11,10 @@ from companies.models import Company
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.renewals import lease_source_fingerprint
 from core.models import AuditLogEntry
+from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch
 from invoicing.services import shrani_prvi_korak
+from tests.financial_fixtures import save_financial_fixture
 
 
 def make_company(**changes):
@@ -67,6 +69,7 @@ def make_vat(sifra="DDV22", aktiven=True, zahteva_referenco=False):
 def lease_data(lease, **changes):
     data = {
         "edit_fingerprint": lease_source_fingerprint(lease) if lease.pk else "",
+        "razlog": "Aneks",
         "unit": lease.unit_id, "tenant": lease.tenant_id,
         "oznaka_pogodbe": lease.oznaka_pogodbe,
         "tip_trajanja": Lease.TipTrajanja.NEDOLOCEN_CAS,
@@ -231,7 +234,7 @@ def test_item_create_parent_guard_and_model_validation(client):
     assert "znesek_neto_mesecno" in invalid.context["form"].errors
     assert "field-error" in invalid.content.decode()
     lease.arhivirana = True
-    lease.save(update_fields=["arhivirana"])
+    save_financial_fixture(lease, update_fields=["arhivirana"])
     blocked = client.post(f"/pogodbe/{lease.pk}/postavke/nova/", item_data(required))
     assert blocked.status_code == 200 and "ni aktiven" in blocked.content.decode()
     assert LeaseItem.objects.count() == 0
@@ -264,6 +267,7 @@ def test_item_metadata_edit_keeps_audited_values_and_filters_inactive_vat(client
     assert 'name="znesek_neto_mesecno"' not in page
     response = client.post(f"/pogodbe/postavke/{item.pk}/", {
         "naziv_postavke": "Parkiranje", "vat_regime": current.pk,
+        "edit_fingerprint": record_edit_fingerprint(item), "razlog": "Aneks",
         "referenca_listine": "", "datum_reference": "",
         "indeks_ob_osnovi": "", "datum_osnove_indeksacije": "",
         "osnovna_najemnina_ob_sklenitvi": "", "znesek_neto_mesecno": "999",
@@ -289,6 +293,7 @@ def test_item_correction_requires_reason_audits_all_fields_and_rolls_back(client
     }).status_code == 200
     assert not AuditLogEntry.objects.exists()
     response = client.post(url, {
+        "edit_fingerprint": record_edit_fingerprint(item),
         "znesek_neto_mesecno": "120", "datum_zacetka_postavke": "2026-02-01",
         "datum_prenehanja_postavke": "2026-12-31", "razlog": "Aneks",
     })
@@ -303,6 +308,7 @@ def test_item_correction_requires_reason_audits_all_fields_and_rolls_back(client
     }
     before = audits.count()
     invalid = client.post(url, {
+        "edit_fingerprint": record_edit_fingerprint(item),
         "znesek_neto_mesecno": "0", "datum_zacetka_postavke": "2027-01-01",
         "datum_prenehanja_postavke": "", "razlog": "Napačno",
     })
@@ -320,7 +326,7 @@ def test_item_archive_reactivate_and_parent_failure(client):
     assert client.get(f"/pogodbe/postavke/{item.pk}/arhiviraj/").status_code == 405
     client.post(f"/pogodbe/postavke/{item.pk}/arhiviraj/")
     lease.arhivirana = True
-    lease.save(update_fields=["arhivirana"])
+    save_financial_fixture(lease, update_fields=["arhivirana"])
     blocked = client.post(
         f"/pogodbe/postavke/{item.pk}/reaktiviraj/",
         {
@@ -337,7 +343,7 @@ def test_item_archive_reactivate_and_parent_failure(client):
     assert not blocked.context["form"].errors
     assert "ni aktiven" in blocked.content.decode()
     lease.arhivirana = False
-    lease.save(update_fields=["arhivirana"])
+    save_financial_fixture(lease, update_fields=["arhivirana"])
     client.post(f"/pogodbe/postavke/{item.pk}/reaktiviraj/")
     item.refresh_from_db()
     assert item.arhivirana is False

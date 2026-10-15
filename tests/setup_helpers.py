@@ -21,6 +21,7 @@ from companies.readiness import complete_initial_setup, verify_numbering
 from contracts.models import Lease, LeaseItem, Property, Unit
 from core.validators import preveri_davcno_stevilko
 from rendering.services import render_sample_pdf
+from tests.financial_fixtures import update_financial_fixture
 
 
 def preview_sample(company, lease):
@@ -183,7 +184,7 @@ def prepare_initial_setup(company, lease):
     if not ArchiveConfiguration.objects.exists():
         verified_archive_configuration()
     complete_initial_setup()
-    Company.objects.filter(pk__in=[issuer.pk for issuer in others]).update(
+    update_financial_fixture(Company.objects.filter(pk__in=[issuer.pk for issuer in others]),
         aktivno=False
     )
 

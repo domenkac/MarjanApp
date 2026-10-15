@@ -19,8 +19,10 @@ from contracts.models import (
     Unit,
 )
 from core.models import AuditLogEntry
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import potrdi_korekcijski_osnutek, pripravi_korekcijski_osnutek
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.image_data import slika_bytes
 from tests.setup_helpers import prepare_initial_setup
 
@@ -136,7 +138,7 @@ def test_predlog_pogoji_brez_spremembe_postavke(
     lease = postavka.lease
     lease.tip_pogoja_indeksacije = tip
     lease.prag_spremembe_odstotek = Decimal(prag) if prag else None
-    lease.save(update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"])
+    save_financial_fixture(lease, update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"])
 
     predlog = services.izracunaj_indeksacijo(postavka, Decimal(nov_indeks), DANES, indeks_leto=LETO - 1)
 
@@ -181,7 +183,7 @@ def test_potrditev_shrani_zgodovino_ne_spremeni_reference(postavka):
 def test_neizpolnjen_pogoj_ne_ustvari_dogodka(postavka):
     postavka.lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
     postavka.lease.prag_spremembe_odstotek = Decimal("2.00")
-    postavka.lease.save(
+    save_financial_fixture(postavka.lease,
         update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"]
     )
 
@@ -262,7 +264,7 @@ def test_storno_vrstica_ne_podvoji_poracuna_istega_meseca(postavka, tmp_path, se
         date(LETO, 4, 1),
     )
     postavka.vat_regime.eslog_koda = "S"
-    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    save_financial_fixture(postavka.vat_regime, update_fields=["eslog_koda"])
     prepare_initial_setup(original.company, postavka.lease)
     potrdi_korekcijski_osnutek(storno)
 
@@ -322,7 +324,7 @@ def test_izpuscen_letnik_samodejno_dohiti(postavka):
     lease = postavka.lease
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
     lease.prag_spremembe_odstotek = Decimal("2.00")
-    lease.save(update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"])
+    save_financial_fixture(lease, update_fields=["tip_pogoja_indeksacije", "prag_spremembe_odstotek"])
 
     preskocen = services.izracunaj_indeksacijo(
         postavka, Decimal("101.000"), date(LETO, 1, 20), indeks_leto=LETO - 1
@@ -386,7 +388,7 @@ def test_razveljavitev_auditira_dogodek_brez_izmisljene_spremembe_najemnine(post
 
 def test_razveljavitev_legacy_predpomnjene_najemnine_zapise_dejanski_spremembi(postavka):
     event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES, indeks_leto=LETO - 1)
-    LeaseItem.objects.filter(pk=postavka.pk).update(znesek_neto_mesecno=event.nova_vrednost)
+    update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk), znesek_neto_mesecno=event.nova_vrednost)
     services.razveljavi_indeksacijo(event)
     postavka.refresh_from_db()
     event.refresh_from_db()
@@ -473,7 +475,7 @@ def test_vrstica_druge_postavke_ne_blokira_razveljavitve(postavka):
 def test_razveljavitev_rollback_ob_napaki_audita(postavka, monkeypatch, legacy, fail_on):
     event = services.potrdi_indeksacijo(postavka, Decimal("110.000"), DANES, indeks_leto=LETO - 1)
     if legacy:
-        LeaseItem.objects.filter(pk=postavka.pk).update(znesek_neto_mesecno=event.nova_vrednost)
+        update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk), znesek_neto_mesecno=event.nova_vrednost)
     persisted_rent = LeaseItem.objects.get(pk=postavka.pk).znesek_neto_mesecno
     history = list(AuditLogEntry.objects.values())
     original_save = AuditLogEntry.save
@@ -546,11 +548,11 @@ def test_prag_enakost_in_padec(postavka):
     lease = postavka.lease
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.PRAG_SPREMEMBE
     lease.prag_spremembe_odstotek = Decimal("2.00")
-    lease.save()
+    save_financial_fixture(lease)
     for indeks in (Decimal("102.000"), Decimal("98.000")):
         assert services.izracunaj_indeksacijo(postavka, indeks, DANES, indeks_leto=2025).pogoj_izpolnjen
     lease.ima_klavzulo_indeksacije = False
-    lease.save()
+    save_financial_fixture(lease)
     assert not services.izracunaj_indeksacijo(postavka, Decimal("110.000"), DANES, indeks_leto=2025).pogoj_izpolnjen
 
 
@@ -595,7 +597,7 @@ def test_razveljavitev_po_obdobju_ne_datumu_izdaje(postavka):
 def test_sorazmerni_prestopni_februar(postavka):
     services.potrdi_indeksacijo(postavka, Decimal("110.000"), date(2028, 1, 20), indeks_leto=2027)
     postavka.datum_prenehanja_postavke = date(2028, 2, 15)
-    postavka.save()
+    save_financial_fixture(postavka)
     izracun = services.izracunaj_postavko(postavka, date(2028, 2, 1), date(2028, 2, 29))
     assert izracun.osnova == Decimal("56.93")
     assert izracun.ddv_znesek == Decimal("12.52")
@@ -603,14 +605,14 @@ def test_sorazmerni_prestopni_februar(postavka):
 
 
 def test_legacy_reference_in_rocni_popravki_blokirani(postavka):
-    LeaseItem.objects.filter(pk=postavka.pk).update(referencna_najemnina=None, datum_referencne_najemnine=None)
+    update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk), referencna_najemnina=None, datum_referencne_najemnine=None)
     postavka.refresh_from_db()
     postavka.save()
     assert postavka.referencna_najemnina is None
     with pytest.raises(ValidationError, match="nerazjasnjena"):
         services.najemnina_na_datum(postavka, date(2026, 1, 1))
     with pytest.raises(ValidationError, match="datumu učinkovanja"):
-        services.rocno_popravi_postavko(postavka, razlog="Popravek", znesek_neto_mesecno=Decimal("200.00"))
+        services.rocno_popravi_postavko(postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog="Popravek", znesek_neto_mesecno=Decimal("200.00"))
     assert postavka.znesek_neto_mesecno == Decimal("100.05")
 
 
@@ -618,7 +620,7 @@ def test_neznan_rocni_znesek_in_obdobje_pred_referenco(postavka):
     with pytest.raises(ValidationError, match="pred preverjeno"):
         services.najemnina_na_datum(postavka, date(2024, 1, 1))
     postavka.znesek_neto_mesecno = Decimal("200.00")
-    postavka.save()
+    save_financial_fixture(postavka)
     with pytest.raises(ValidationError, match="nepojasnjen ročni"):
         services.najemnina_na_datum(postavka, date(2026, 1, 1))
 
@@ -671,6 +673,6 @@ def test_referenca_ob_preklopu_ne_dokazuje_najemnine_ob_sklenitvi(postavka):
 
 def test_samo_navzgor_zelo_majhen_indeks_ostane_neizpolnjen(postavka):
     postavka.lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.SAMO_NAVZGOR
-    postavka.lease.save()
+    save_financial_fixture(postavka.lease)
     predlog = services.izracunaj_indeksacijo(postavka, Decimal("0.001"), DANES, indeks_leto=2025)
     assert not predlog.pogoj_izpolnjen

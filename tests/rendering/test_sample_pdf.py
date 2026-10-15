@@ -18,6 +18,7 @@ from rendering.services import (
     render_sample_pdf,
     sestavi_ddv_rekapitulacijo,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.rendering.test_contexts import (
     izdani_racun as source_izdani_racun,  # noqa: F401
 )
@@ -116,7 +117,7 @@ def test_vzorca_podjetij_z_enakim_slugom_se_ne_prepiseta(
     podjetje.pk = None
     podjetje.davcna_stevilka = "99999999"
     podjetje.aktivno = True
-    podjetje.save()
+    save_financial_fixture(podjetje)
     podpisnik = copy(Signatory.objects.get(company=izdani_racun.company))
     podpisnik.pk = None
     podpisnik.company = podjetje

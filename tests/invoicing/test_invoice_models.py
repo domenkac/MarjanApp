@@ -10,6 +10,7 @@ from catalogs.models import VatRegime
 from companies.models import Company
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine
+from tests.financial_fixtures import save_financial_fixture
 
 
 @pytest.fixture
@@ -363,10 +364,10 @@ def test_snapshot_vrstice_ostane_po_spremembi_lease_item_in_ddv(company):
         )
     )
     lease_item.znesek_neto_mesecno = Decimal("200.00")
-    lease_item.save()
+    save_financial_fixture(lease_item)
     vat_regime.stopnja = Decimal("9.50")
     vat_regime.klavzula = "Nova klavzula"
-    vat_regime.save()
+    save_financial_fixture(vat_regime)
 
     line.refresh_from_db()
     assert line.opis == "Najemnina za avgust 2026"

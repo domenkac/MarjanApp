@@ -7,12 +7,20 @@ from django.utils import timezone
 from accounting_export.arbitrary_export import validate_arbitrary_date_range
 from archive.configuration import ArchiveConfigurationError, validate_archive_locations
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
+from catalogs.services import VAT_FINANCIAL_FIELDS
 from companies.models import Company, Signatory
+from companies.services import COMPANY_FINANCIAL_FIELDS
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from contracts.renewals import (
+    LEASE_FINANCIAL_FIELDS,
     lease_source_fingerprint,
-    save_lease_edit,
     validate_lease_edit,
+)
+from contracts.services import LEASE_ITEM_METADATA_FIELDS
+from core.services import (
+    financial_changes,
+    record_edit_fingerprint,
+    validate_edit_source,
 )
 from delivery.models import MonthlySummaryConfiguration
 
@@ -222,8 +230,52 @@ class VatRegimeChoiceField(forms.ModelChoiceField):
         return f"{obj.sifra} — {obj.naziv}"
 
 
-class LeaseForm(forms.ModelForm):
+class FinancialEditForm(forms.ModelForm):
     edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
+    razlog = forms.CharField(
+        required=False, label="Razlog spremembe", widget=forms.Textarea(attrs={"rows": 3}),
+        help_text="Obvezen pri spremembi finančno pomembnih podatkov.",
+    )
+    financial_fields = ()
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.initial["edit_fingerprint"] = record_edit_fingerprint(self.instance)
+        else:
+            self.fields.pop("razlog")
+            self.fields.pop("edit_fingerprint")
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.instance.pk:
+            previous = type(self.instance).objects.get(pk=self.instance.pk)
+            validate_edit_source(previous, cleaned.get("edit_fingerprint", ""))
+        return cleaned
+
+    def _post_clean(self):
+        super()._post_clean()
+        if self.instance.pk and not self.errors:
+            previous = type(self.instance).objects.get(pk=self.instance.pk)
+            try:
+                financial_changes(previous, self.instance, self.financial_fields, self.cleaned_data.get("razlog", ""))
+            except forms.ValidationError as error:
+                self._update_errors(error)
+
+    def save(self, commit=True):
+        record = super().save(commit=False)
+        if record.pk:
+            record._financial_edit = (
+                self.cleaned_data["edit_fingerprint"], self.cleaned_data.get("razlog", ""),
+            )
+        if commit:
+            record.save()
+            self._save_m2m()
+        return record
+
+
+class LeaseForm(FinancialEditForm):
+    financial_fields = LEASE_FINANCIAL_FIELDS
     unit = UnitChoiceField(queryset=Unit.objects.none(), label="Enota")
     tenant = TenantChoiceField(queryset=Tenant.objects.none(), label="Najemnik")
     rok_placila_dni = forms.IntegerField(
@@ -304,18 +356,6 @@ class LeaseForm(forms.ModelForm):
             validate_lease_edit(previous, cleaned, source_fingerprint=cleaned.get("edit_fingerprint", ""))
         return cleaned
 
-    def save(self, commit=True):
-        lease = super().save(commit=False)
-        if lease.pk:
-            lease._edit_source_fingerprint = self.cleaned_data.get("edit_fingerprint", "")
-        if commit:
-            if lease.pk:
-                save_lease_edit(lease, source_fingerprint=lease._edit_source_fingerprint)
-            else:
-                lease.save()
-            self._save_m2m()
-        return lease
-
 
 class RecipientContactForm(forms.ModelForm):
     class Meta:
@@ -332,11 +372,6 @@ LEASE_ITEM_CREATE_FIELDS = (
     "referenca_listine", "datum_reference", "datum_zacetka_postavke",
     "datum_prenehanja_postavke", "indeks_ob_osnovi",
     "datum_osnove_indeksacije", "osnovna_najemnina_ob_sklenitvi",
-)
-LEASE_ITEM_METADATA_FIELDS = (
-    "naziv_postavke", "vat_regime", "referenca_listine", "datum_reference",
-    "indeks_ob_osnovi", "datum_osnove_indeksacije",
-    "osnovna_najemnina_ob_sklenitvi",
 )
 LEASE_ITEM_LABELS = {
     "naziv_postavke": "Naziv postavke",
@@ -378,7 +413,8 @@ class LeaseItemCreateForm(forms.ModelForm):
         ).order_by("sifra", "pk")
 
 
-class LeaseItemDetailsForm(forms.ModelForm):
+class LeaseItemDetailsForm(FinancialEditForm):
+    financial_fields = LEASE_ITEM_METADATA_FIELDS
     vat_regime = VatRegimeChoiceField(
         queryset=VatRegime.objects.none(), label="DDV režim"
     )
@@ -398,6 +434,7 @@ class LeaseItemDetailsForm(forms.ModelForm):
 
 
 class LeaseItemCorrectionForm(forms.Form):
+    edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
     znesek_neto_mesecno = forms.DecimalField(
         max_digits=10, decimal_places=2, label="Neto mesečni znesek"
     )
@@ -410,13 +447,15 @@ class LeaseItemCorrectionForm(forms.Form):
         widget=forms.DateInput(format="%Y-%m-%d", attrs={"type": "date"}),
     )
     razlog = forms.CharField(
+        required=False,
         label="Razlog spremembe",
         widget=forms.Textarea(attrs={"rows": 3}),
         help_text="Razlog je obvezen, ker se sprememba zapiše v revizijsko sled.",
     )
 
 
-class VatRegimeForm(forms.ModelForm):
+class VatRegimeForm(FinancialEditForm):
+    financial_fields = VAT_FINANCIAL_FIELDS
     zahteva_polni_odbitek = forms.TypedChoiceField(
         label="Zahteva polni odbitek DDV",
         choices=(("", "Izberite"), ("True", "Da"), ("False", "Ne")),
@@ -464,11 +503,19 @@ class VatRegimeForm(forms.ModelForm):
             "klavzula": forms.Textarea(attrs={"rows": 3}),
         }
 
-    def save(self, commit=True):
-        self.instance.eslog_koda = ESLOG_KODE_DDV[
-            self.cleaned_data["nacin_obracuna"]
-        ]
-        return super().save(commit=commit)
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance.pk:
+            self.fields["nacin_obracuna"].disabled = True
+            self.fields["nacin_obracuna"].help_text = "Za drug način obračuna dodajte nov DDV režim."
+
+    def clean(self):
+        cleaned = super().clean()
+        if self.instance.pk and "nacin_obracuna" in self.data and self.data["nacin_obracuna"] != self.instance.nacin_obracuna:
+            self.add_error("nacin_obracuna", "Načina obračuna ni dovoljeno spreminjati. Dodajte nov DDV režim.")
+        if "nacin_obracuna" in cleaned:
+            self.instance.eslog_koda = ESLOG_KODE_DDV[cleaned["nacin_obracuna"]]
+        return cleaned
 
 
 class ServiceCatalogItemForm(forms.ModelForm):
@@ -504,7 +551,8 @@ class _KeepExistingFileMixin:
         return exclude
 
 
-class CompanyForm(_KeepExistingFileMixin, forms.ModelForm):
+class CompanyForm(_KeepExistingFileMixin, FinancialEditForm):
+    financial_fields = COMPANY_FINANCIAL_FIELDS
     file_field_name = "logotip"
 
     class Meta:

@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 from django.core.exceptions import ValidationError
-from django.db import IntegrityError, connection
+from django.db import IntegrityError, connection, models
 from django.utils import timezone
 
 from catalogs.models import VatRegime
@@ -47,6 +47,7 @@ from rendering.services import (
     renderiraj_koncne_pdfje_mesecnega_paketa,
     stanje_koncnega_pdf,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.setup_helpers import approve_sample, prepare_initial_setup
 
 PNG = base64.b64decode(
@@ -263,13 +264,13 @@ def test_mesecni_pdf_context_se_po_spremembah_zivih_podatkov_ne_spremeni(
     snapshot = data["batch"].calculation_snapshot
     before = pripravi_mesecni_pdf_context(snapshot, candidate)
 
-    Company.objects.filter(pk=data["company"].pk).update(naziv="Novo podjetje")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), naziv="Novo podjetje")
     Tenant.objects.filter(pk=data["tenant"].pk).update(naziv="Nov najemnik")
-    Lease.objects.filter(pk=data["lease"].pk).update(oznaka_pogodbe="NOVA")
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk), oznaka_pogodbe="NOVA")
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         naziv_postavke="Nova postavka", znesek_neto_mesecno=Decimal("999.00")
     )
-    VatRegime.objects.filter(pk=data["regime"].pk).update(stopnja=Decimal("9.50"))
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), stopnja=Decimal("9.50"))
 
     assert pripravi_mesecni_pdf_context(snapshot, candidate) == before
 
@@ -358,7 +359,7 @@ def test_monthly_calculation_persists_deterministic_snapshot_without_side_effect
     data = ready_company
     settings.FEATURE_ESLOG = False
     data["regime"].eslog_koda = ""
-    data["regime"].save(update_fields=["eslog_koda"])
+    save_financial_fixture(data["regime"], update_fields=["eslog_koda"])
     preveri_predhodno_kontrolo(data["cycle"])
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
     data["cycle"].save(update_fields=["trenutni_korak"])
@@ -384,7 +385,7 @@ def test_step3_revalidation_blocks_without_overwriting_step2_result(ready_compan
     preveri_predhodno_kontrolo(data["cycle"])
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
     data["cycle"].save(update_fields=["trenutni_korak"])
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     izracunaj_mesecne_kandidate(data["cycle"])
     data["batch"].refresh_from_db()
@@ -401,7 +402,7 @@ def test_revalidation_isolates_blocked_company_from_valid_company(ready_company)
     preveri_predhodno_kontrolo(data["cycle"])
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.IZRACUN_OSNUTKOV
     data["cycle"].save(update_fields=["trenutni_korak"])
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     izracunaj_mesecne_kandidate(data["cycle"])
     data["batch"].refresh_from_db()
@@ -552,9 +553,9 @@ def test_document_input_change_changes_fingerprint(
     ready_company, model, field, value
 ):
     first = _calculate(ready_company)[0]["candidate_fingerprint"]
-    model.objects.filter(
+    models.QuerySet.update(model.objects.filter(
         pk=(ready_company["item"].pk if model is LeaseItem else ready_company["tenant"].pk)
-    ).update(**{field: value})
+    ), **{field: value})
     approve_sample(ready_company["company"], ready_company["lease"])
     second = _calculate(ready_company)[0]["candidate_fingerprint"]
 
@@ -563,7 +564,7 @@ def test_document_input_change_changes_fingerprint(
 
 def test_issuer_change_changes_fingerprint(ready_company):
     first = _calculate(ready_company)[0]["candidate_fingerprint"]
-    Company.objects.filter(pk=ready_company["company"].pk).update(naziv="Nova Alfa d.o.o.")
+    update_financial_fixture(Company.objects.filter(pk=ready_company["company"].pk), naziv="Nova Alfa d.o.o.")
     approve_sample(ready_company["company"], ready_company["lease"])
     second = _calculate(ready_company)[0]["candidate_fingerprint"]
 
@@ -579,7 +580,7 @@ def test_other_candidate_change_does_not_change_fingerprint(ready_company):
     untouched = next(
         item for item in first_candidates if item["lease_id"] == ready_company["lease"].pk
     )["candidate_fingerprint"]
-    LeaseItem.objects.filter(pk=second_item.pk).update(znesek_neto_mesecno=Decimal("51.00"))
+    update_financial_fixture(LeaseItem.objects.filter(pk=second_item.pk), znesek_neto_mesecno=Decimal("51.00"))
     approve_sample(ready_company["company"], ready_company["lease"])
     second_candidates = _calculate(ready_company)
 
@@ -589,7 +590,7 @@ def test_other_candidate_change_does_not_change_fingerprint(ready_company):
 
 
 def test_first_issue_and_proportional_exceptions(ready_company):
-    Lease.objects.filter(pk=ready_company["lease"].pk).update(
+    update_financial_fixture(Lease.objects.filter(pk=ready_company["lease"].pk),
         datum_zacetka=date(2026, 9, 10)
     )
     approve_sample(ready_company["company"], ready_company["lease"])
@@ -662,7 +663,7 @@ def test_amount_master_data_and_vat_change_exceptions(ready_company):
 def test_contract_lifecycle_exceptions(
     ready_company, potrdi_septembrski_vzorec, updates, expected
 ):
-    Lease.objects.filter(pk=ready_company["lease"].pk).update(**updates)
+    update_financial_fixture(Lease.objects.filter(pk=ready_company["lease"].pk), **updates)
     potrdi_septembrski_vzorec(ready_company["company"], ready_company["lease"])
 
     assert expected in _candidate_codes(_calculate(ready_company)[0])
@@ -836,7 +837,7 @@ def test_step3_get_uses_persisted_snapshot_without_writes(ready_company, client)
     data["batch"].refresh_from_db()
     snapshot = data["batch"].calculation_snapshot
     calculated_at = data["batch"].calculated_at
-    LeaseItem.objects.filter(pk=data["item"].pk).update(znesek_neto_mesecno=Decimal("999.00"))
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=Decimal("999.00"))
 
     from django.test import Client
 
@@ -851,14 +852,14 @@ def test_step4_allows_previously_blocked_company_to_join(ready_company, client):
     data = ready_company
     _, valid_batch = _add_ready_company(data)
     original_iban = data["company"].trr
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
     client.post("/mesecni-obracun/", {"action": "continue_step4"})
     assert MonthlyCycle.objects.get().trenutni_korak == MonthlyCycle.Korak.PAKETNI_PREGLED
     assert valid_batch.__class__.objects.get(pk=valid_batch.pk).calculation_status == "CALCULATED"
 
-    Company.objects.filter(pk=data["company"].pk).update(trr=original_iban)
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr=original_iban)
     client.post("/mesecni-obracun/", {"action": "refresh_review"})
     data["batch"].refresh_from_db()
 
@@ -871,7 +872,7 @@ def test_step4_late_join_preserves_existing_active_snapshot(ready_company, clien
     data = ready_company
     second_company, second_batch = _add_ready_company(data)
     second_iban = second_company.trr
-    Company.objects.filter(pk=second_company.pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=second_company.pk), trr="SI00NEVELJAVEN")
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
     client.post("/mesecni-obracun/", {"action": "continue_step4"})
@@ -879,11 +880,11 @@ def test_step4_late_join_preserves_existing_active_snapshot(ready_company, clien
     original_snapshot = data["batch"].calculation_snapshot
     original_calculated_at = data["batch"].calculated_at
 
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         znesek_neto_mesecno=Decimal("125.00")
     )
     approve_sample(data["company"], data["lease"])
-    Company.objects.filter(pk=second_company.pk).update(trr=second_iban)
+    update_financial_fixture(Company.objects.filter(pk=second_company.pk), trr=second_iban)
 
     client.post("/mesecni-obracun/", {"action": "refresh_review"})
     data["batch"].refresh_from_db()
@@ -955,7 +956,7 @@ def test_stepper_marks_step3_and_step4_states(ready_company, client):
         in step4
     )
 
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
     refreshed = client.post(
         "/mesecni-obracun/", {"action": "refresh_review"}, follow=True
     ).content.decode()
@@ -970,7 +971,7 @@ def test_not_calculated_does_not_show_stale_calculated_timestamp(ready_company, 
     data = ready_company
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     content = client.post(
         "/mesecni-obracun/", {"action": "rerun_preflight"}, follow=True
@@ -991,7 +992,7 @@ def test_preflight_block_invalidates_stale_calculation_until_explicit_rerun(
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
     data["batch"].refresh_from_db()
     old_snapshot = data["batch"].calculation_snapshot
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     client.post("/mesecni-obracun/", {"action": "rerun_preflight"})
     data["batch"].refresh_from_db()
@@ -1002,7 +1003,7 @@ def test_preflight_block_invalidates_stale_calculation_until_explicit_rerun(
     assert data["batch"].calculation_snapshot == old_snapshot
     assert MonthlyCycle.objects.get().trenutni_korak == MonthlyCycle.Korak.IZRACUN_OSNUTKOV
 
-    Company.objects.filter(pk=data["company"].pk).update(trr=original_iban)
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr=original_iban)
     client.post("/mesecni-obracun/", {"action": "rerun_preflight"})
     data["batch"].refresh_from_db()
     assert data["batch"].preflight_status == MonthlyBatch.PreflightStatus.PASSED
@@ -1019,7 +1020,7 @@ def test_step4_refresh_excludes_newly_blocked_stale_member(ready_company, client
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
     client.post("/mesecni-obracun/", {"action": "continue_step4"})
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     response = client.post(
         "/mesecni-obracun/", {"action": "refresh_review"}, follow=True
@@ -1131,7 +1132,7 @@ def test_step4_http_refresh_adds_late_join_review_without_resetting_existing(
     second_company, second_batch = _add_ready_company(data)
     second_lease = Lease.objects.get(unit__property__company=second_company)
     second_iban = second_company.trr
-    Company.objects.filter(pk=second_company.pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=second_company.pk), trr="SI00NEVELJAVEN")
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
     client.post("/mesecni-obracun/", {"action": "continue_step4"})
@@ -1146,7 +1147,7 @@ def test_step4_http_refresh_adds_late_join_review_without_resetting_existing(
         non_issue_reason="Ne izdaj A",
     )
 
-    Company.objects.filter(pk=second_company.pk).update(trr=second_iban)
+    update_financial_fixture(Company.objects.filter(pk=second_company.pk), trr=second_iban)
     response = client.post("/mesecni-obracun/", {"action": "refresh_review"})
     data["batch"].refresh_from_db()
     second_batch.refresh_from_db()
@@ -1327,7 +1328,7 @@ def test_step5_and_step6_freeze_preflight_and_calculation(ready_company, client,
     calculated_at = data["batch"].calculated_at
     data["cycle"].trenutni_korak = step
     data["cycle"].save(update_fields=["trenutni_korak"])
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     client.post("/mesecni-obracun/", {"action": "rerun_preflight"})
     client.post("/mesecni-obracun/", {"action": "rerun_calculation"})
@@ -1348,7 +1349,7 @@ def test_valid_company_passes_and_rerun_replaces_snapshot(ready_company):
     first_checked = data["batch"].preflight_checked_at
     assert data["batch"].preflight_status == MonthlyBatch.PreflightStatus.PASSED
 
-    Company.objects.filter(pk=data["company"].pk).update(ddv_zavezanec=False)
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), ddv_zavezanec=False)
     preveri_predhodno_kontrolo(data["cycle"])
     assert "DDV_POTRDITEV_ZASTARELA" in _codes(data["batch"])
     data["batch"].refresh_from_db()
@@ -1359,7 +1360,7 @@ def test_valid_company_passes_and_rerun_replaces_snapshot(ready_company):
 
 def test_stale_sample_blocks(ready_company):
     data = ready_company
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         znesek_neto_mesecno=Decimal("110.00")
     )
 
@@ -1379,7 +1380,7 @@ def test_stale_sample_blocks(ready_company):
 )
 def test_invalid_company_master_data_blocks(ready_company, field, value):
     data = ready_company
-    Company.objects.filter(pk=data["company"].pk).update(**{field: value})
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), **{field: value})
 
     preveri_predhodno_kontrolo(data["cycle"])
     data["batch"].refresh_from_db()
@@ -1418,7 +1419,7 @@ def test_invalid_tenant_business_data_blocks(ready_company, changes, field):
 def test_malformed_company_is_isolated_from_valid_company(ready_company):
     data = ready_company
     _, valid_batch = _add_ready_company(data)
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     preveri_predhodno_kontrolo(data["cycle"])
     data["batch"].refresh_from_db()
@@ -1433,7 +1434,7 @@ def test_vat_problem_blocks_only_affected_company(ready_company, stale):
     data = ready_company
     _, valid_batch = _add_ready_company(data)
     if stale:
-        Company.objects.filter(pk=data["company"].pk).update(ddv_zavezanec=False)
+        update_financial_fixture(Company.objects.filter(pk=data["company"].pk), ddv_zavezanec=False)
         expected = "DDV_POTRDITEV_ZASTARELA"
     else:
         data["company"].vat_settings_confirmations.all().delete()
@@ -1489,7 +1490,7 @@ def test_overlapping_signatories_block(ready_company):
 
 def test_required_reference_fields_block(ready_company):
     data = ready_company
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_referenco=True)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_referenco=True)
 
     preveri_predhodno_kontrolo(data["cycle"])
 
@@ -1500,8 +1501,8 @@ def test_required_reference_fields_block(ready_company):
 
 def test_valid_required_reference_passes(ready_company):
     data = ready_company
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_referenco=True)
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_referenco=True)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         referenca_listine="POG-1", datum_reference=date(2026, 1, 1)
     )
     potrdi_ddv_nastavitve(data["company"])
@@ -1524,14 +1525,14 @@ def test_valid_required_reference_passes(ready_company):
 )
 def test_lease_month_scope(ready_company, start, end, included):
     data = ready_company
-    Lease.objects.filter(pk=data["lease"].pk).update(
+    update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk),
         datum_zacetka=start,
         tip_trajanja=(
             Lease.TipTrajanja.DOLOCEN_CAS if end else Lease.TipTrajanja.NEDOLOCEN_CAS
         ),
         datum_konca=end,
     )
-    LeaseItem.objects.filter(pk=data["item"].pk).update(znesek_neto_mesecno=0)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=0)
 
     preveri_predhodno_kontrolo(data["cycle"])
 
@@ -1542,7 +1543,7 @@ def test_proportional_and_expiry_are_warnings_only(
     ready_company, potrdi_septembrski_vzorec
 ):
     data = ready_company
-    Lease.objects.filter(pk=data["lease"].pk).update(
+    update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk),
         datum_zacetka=date(2026, 9, 10),
         tip_trajanja=Lease.TipTrajanja.DOLOCEN_CAS,
         datum_konca=date(2026, 9, 30),
@@ -1562,7 +1563,7 @@ def test_proportional_and_expiry_are_warnings_only(
 def test_inactive_chain_is_excluded(ready_company):
     data = ready_company
     Unit.objects.filter(pk=data["unit"].pk).update(aktivna=False)
-    LeaseItem.objects.filter(pk=data["item"].pk).update(znesek_neto_mesecno=0)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=0)
 
     preveri_predhodno_kontrolo(data["cycle"])
 
@@ -1573,8 +1574,8 @@ def test_inactive_chain_is_excluded(ready_company):
 def test_each_inactive_chain_member_is_excluded(ready_company, model, field):
     data = ready_company
     key = {Property: "property", Unit: "unit", Tenant: "tenant"}[model]
-    model.objects.filter(pk=data[key].pk).update(**{field: False})
-    LeaseItem.objects.filter(pk=data["item"].pk).update(znesek_neto_mesecno=0)
+    models.QuerySet.update(model.objects.filter(pk=data[key].pk), **{field: False})
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=0)
 
     preveri_predhodno_kontrolo(data["cycle"])
 
@@ -1592,7 +1593,7 @@ def test_each_inactive_chain_member_is_excluded(ready_company, model, field):
 )
 def test_lease_item_month_boundaries(ready_company, start, end, included):
     data = ready_company
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         datum_zacetka_postavke=start,
         datum_prenehanja_postavke=end,
         znesek_neto_mesecno=0,
@@ -1613,7 +1614,7 @@ def test_company_issue_is_deduplicated_across_multiple_leases(ready_company):
     LeaseItem.objects.create(
         lease=second, znesek_neto_mesecno=Decimal("50.00"), vat_regime=data["regime"]
     )
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI00NEVELJAVEN")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI00NEVELJAVEN")
 
     preveri_predhodno_kontrolo(data["cycle"])
     data["batch"].refresh_from_db()
@@ -1643,7 +1644,7 @@ def test_ui_shows_precise_contract_location_and_persists_for_fresh_client(
     ready_company, client
 ):
     data = ready_company
-    LeaseItem.objects.filter(pk=data["item"].pk).update(znesek_neto_mesecno=0)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), znesek_neto_mesecno=0)
     preveri_predhodno_kontrolo(data["cycle"])
 
     from django.test import Client
@@ -1669,19 +1670,24 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     )
     candidate, _review = _freeze_ready_package(data)
     frozen = data["batch"].calculation_snapshot
-    Company.objects.filter(pk=data["company"].pk).update(
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk),
         naziv="Changed", naslov="Changed 9", trr="SI56191000000999999"
     )
     Tenant.objects.filter(pk=data["tenant"].pk).update(
         naziv="Changed tenant", naslov="Changed 3"
     )
-    Lease.objects.filter(pk=data["lease"].pk).update(rok_placila_dni=90)
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    update_financial_fixture(Lease.objects.filter(pk=data["lease"].pk), rok_placila_dni=90)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         naziv_postavke="Changed", znesek_neto_mesecno=Decimal("999.00")
     )
-    VatRegime.objects.filter(pk=data["regime"].pk).update(
-        stopnja=Decimal("9.50"), nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), stopnja=Decimal("9.50"))
+    replacement = VatRegime.objects.create(
+        zahteva_polni_odbitek=False, sifra="AFTER_FREEZE", naziv="New exemption",
+        nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO, stopnja=Decimal("9.50"),
+        eslog_koda="E", klavzula="New clause", rekapitulacijska_skupina="OPROSCENO",
+        velja_od=date(2026, 1, 1),
     )
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), vat_regime=replacement)
     settings.PDF_TEMPLATE_VERSION = "changed-after-freeze"
     Signatory.objects.filter(pk=data["signatory"].pk).update(
         ime_priimek="Changed signer"
@@ -1694,11 +1700,9 @@ def test_frozen_selected_candidate_is_snapshot_only_and_idempotent(
     assert not blocked["ok"]
     assert not Invoice.objects.exists()
     assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 0
-    Company.objects.filter(pk=data["company"].pk).update(trr="SI56191000000123438")
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), trr="SI56191000000123438")
     settings.PDF_TEMPLATE_VERSION = candidate["pdf_template_version"]
-    VatRegime.objects.filter(pk=data["regime"].pk).update(
-        nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
-    )
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk), vat_regime=data["regime"])
     potrdi_ddv_nastavitve(data["company"])
     approve_sample(data["company"], data["lease"])
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
@@ -2262,7 +2266,7 @@ def test_step3_rerun_with_zero_passed_is_truthful(ready_company, client):
     data = ready_company
     preveri_predhodno_kontrolo(data["cycle"])
     client.post("/mesecni-obracun/", {"action": "continue_step3"})
-    Company.objects.filter(pk=data["company"].pk).update(ddv_zavezanec=False)
+    update_financial_fixture(Company.objects.filter(pk=data["company"].pk), ddv_zavezanec=False)
 
     response = client.post(
         "/mesecni-obracun/", {"action": "rerun_preflight"}, follow=True

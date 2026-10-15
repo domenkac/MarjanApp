@@ -31,6 +31,7 @@ from contracts.services import izracunaj_postavko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 from tests.contracts.test_indeksacija import postavka  # noqa: F401
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 
 def event_for(item, new="110.06", year=2026):
@@ -147,9 +148,9 @@ def test_verified_proration_rounds_new_period_before_subtraction(
     # Historical coverage comes from verified evidence, never today's lease dates.
     if year < 2026:
         postavka.datum_referencne_najemnine = date(year - 1, 1, 1)
-        postavka.save(update_fields=["datum_referencne_najemnine"])
+        save_financial_fixture(postavka, update_fields=["datum_referencne_najemnine"])
         postavka.vat_regime.velja_od = date(year - 1, 1, 1)
-        postavka.vat_regime.save(update_fields=["velja_od"])
+        save_financial_fixture(postavka.vat_regime, update_fields=["velja_od"])
     line = issued_line(postavka, year=year, net=old, proportional=True)
     event = event_for(postavka, new=new, year=year)
     row = detect(
@@ -446,7 +447,7 @@ def test_two_companies_do_not_share_adjustments_or_warnings(postavka):  # noqa: 
     company.pk = None
     company.naziv = "Drugo podjetje"
     company.davcna_stevilka = "12345678"
-    company.save()
+    save_financial_fixture(company)
     property_ = Property.objects.create(
         company=company, naziv="Druga stavba", naslov="Naslov"
     )
@@ -476,7 +477,7 @@ def test_required_full_deduction_and_reference_not_guessed(postavka):  # noqa: F
     regime = postavka.vat_regime
     regime.sifra, regime.zahteva_polni_odbitek = "OBDAVCENO_45", True
     regime.zahteva_referenco = True
-    regime.save()
+    save_financial_fixture(regime)
     InvoiceLine.objects.filter(pk=line.pk).update(
         ddv_rezim_sifra=regime.sifra, ddv_zahteva_polni_odbitek=True
     )
@@ -486,7 +487,7 @@ def test_required_full_deduction_and_reference_not_guessed(postavka):  # noqa: F
 def test_uncertain_issuance_and_unverified_rent_remain_visible(postavka):  # noqa: F811
     line = issued_line(postavka)
     Invoice.objects.filter(pk=line.invoice_id).update(stevilka=None)
-    LeaseItem.objects.filter(pk=postavka.pk).update(referencna_najemnina=None)
+    update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk), referencna_najemnina=None)
     row = detect(event_for(postavka))[0]
     assert {"ISSUANCE_UNVERIFIED", "RENT_HISTORY_UNVERIFIED"} <= reasons(row)
     assert row.evidence_state == "UNRESOLVED"

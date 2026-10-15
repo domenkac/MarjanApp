@@ -14,6 +14,7 @@ from invoicing.services import (
     pripravi_osnutek_np,
     uvozi_migracijsko_stanje,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import prepare_initial_setup
 
@@ -109,7 +110,7 @@ def test_delta_pravilno_primerja_dve_postavki_z_migracijo(pogodba):
     )
     migracija = uvozi_migracijsko_stanje(pogodba, date(2026, 1, 1), date(2026, 1, 31))
     prva.znesek_neto_mesecno = Decimal("110.00")
-    prva.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(prva, update_fields=["znesek_neto_mesecno"])
     osnutek = pripravi_osnutek_np(
         pogodba, date(2026, 2, 1), date(2026, 2, 28), date(2026, 3, 1)
     ).invoice
@@ -168,7 +169,7 @@ def test_obicajen_arhiviran_osnutek_ne_preglasi_migracije(pogodba):
 def test_uvoz_ohrani_indeksacijsko_osnovo_iz_referencnega_obdobja(pogodba):
     pogodba.ima_klavzulo_indeksacije = True
     pogodba.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    pogodba.save(update_fields=["ima_klavzulo_indeksacije", "tip_pogoja_indeksacije"])
+    save_financial_fixture(pogodba, update_fields=["ima_klavzulo_indeksacije", "tip_pogoja_indeksacije"])
     item = dodaj_postavko(
         pogodba,
         indeks_ob_osnovi=Decimal("123.456"),
@@ -187,7 +188,7 @@ def test_uvoz_ohrani_indeksacijsko_osnovo_iz_referencnega_obdobja(pogodba):
 def test_uvoz_zavrne_manjkajoco_obvezno_indeksacijsko_osnovo(pogodba):
     pogodba.ima_klavzulo_indeksacije = True
     pogodba.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    pogodba.save(update_fields=["ima_klavzulo_indeksacije", "tip_pogoja_indeksacije"])
+    save_financial_fixture(pogodba, update_fields=["ima_klavzulo_indeksacije", "tip_pogoja_indeksacije"])
     dodaj_postavko(pogodba)
 
     with pytest.raises(ValidationError):

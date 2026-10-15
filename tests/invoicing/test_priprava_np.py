@@ -23,6 +23,7 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.image_data import slika_bytes
 from tests.setup_helpers import prepare_initial_setup
 
@@ -187,13 +188,13 @@ def test_ena_postavka_in_snapshote_ohrani_po_spremembah(pogodba):
     pogodba.tenant.naziv = "Spremenjen najemnik"
     pogodba.tenant.save()
     pogodba.unit.property.company.naziv = "Spremenjen izdajatelj"
-    pogodba.unit.property.company.save()
+    save_financial_fixture(pogodba.unit.property.company)
     podpisnik = Signatory.objects.get(company=pogodba.unit.property.company)
     podpisnik.ime_priimek = "Spremenjena podpisnica"
     podpisnik.save()
     item.vat_regime.stopnja = Decimal("9.50")
     item.vat_regime.klavzula = "Nova klavzula"
-    item.vat_regime.save()
+    save_financial_fixture(item.vat_regime)
     invoice.refresh_from_db()
     line.refresh_from_db()
     assert invoice.prejemnik_naziv == "Najemnik d.o.o."
@@ -248,7 +249,7 @@ def test_brez_obracunljivih_postavk_ne_ustvari_racuna(pogodba):
 def test_zunaj_obdobja_pogodbe_ne_ustvari_racuna(pogodba):
     dodaj_postavko(pogodba)
     pogodba.datum_zacetka = date(2026, 9, 1)
-    pogodba.save()
+    save_financial_fixture(pogodba)
     rezultat = pripravi(pogodba)
     assert rezultat.invoice is None
     assert rezultat.razlog_neizdaje == "Pogodba ne velja v tem obdobju"
@@ -296,7 +297,7 @@ def test_potrditev_ene_vrstice_ohrani_snapshote_in_nastavi_status(pogodba):
     pogodba.tenant.naziv = "Spremenjen najemnik"
     pogodba.tenant.save(update_fields=["naziv"])
     postavka.naziv_postavke = "Spremenjena postavka"
-    postavka.save(update_fields=["naziv_postavke"])
+    save_financial_fixture(postavka, update_fields=["naziv_postavke"])
 
     prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
@@ -330,7 +331,7 @@ def test_potrditev_ne_prebere_drzave_in_ddv_statusa_iz_zivih_partnerjev(pogodba)
     company = pogodba.unit.property.company
     company.drzava_koda = "AT"
     company.ddv_zavezanec = False
-    company.save(update_fields=["drzava_koda", "ddv_zavezanec"])
+    save_financial_fixture(company, update_fields=["drzava_koda", "ddv_zavezanec"])
 
     prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
@@ -367,7 +368,7 @@ def test_potrditev_shrani_eslog_snapshote(pogodba, nacin, koda):
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
     pogodba.tenant.save(update_fields=["tip"])
     postavka.vat_regime.eslog_koda = "SPREMENJENA"
-    postavka.vat_regime.save(update_fields=["eslog_koda"])
+    save_financial_fixture(postavka.vat_regime, update_fields=["eslog_koda"])
     potrjen.refresh_from_db()
     assert potrjen.prejemnik_tip == Tenant.Tip.PRAVNA_OSEBA
     assert InvoiceLine.objects.get(invoice=invoice).ddv_eslog_koda == koda
@@ -385,12 +386,13 @@ def test_potrditev_ne_prebere_tipa_in_ddv_rezima_iz_zivih_modelov(pogodba):
 
     pogodba.tenant.tip = Tenant.Tip.FIZICNA_OSEBA
     pogodba.tenant.save(update_fields=["tip"])
-    postavka.vat_regime.nacin_obracuna = VatRegime.NacinObracuna.OPROSCENO
-    postavka.vat_regime.eslog_koda = "E"
-    postavka.vat_regime.klavzula = "Spremenjena klavzula"
-    postavka.vat_regime.save(
-        update_fields=["nacin_obracuna", "eslog_koda", "klavzula"]
+    postavka.vat_regime = VatRegime.objects.create(
+        zahteva_polni_odbitek=False, sifra="NOV_OPROSCEN", naziv="Oprostitev",
+        nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO, stopnja=Decimal("0.00"),
+        eslog_koda="E", klavzula="Spremenjena klavzula",
+        rekapitulacijska_skupina="OPROSCENO", velja_od=date(2026, 1, 1),
     )
+    save_financial_fixture(postavka, update_fields=["vat_regime"])
 
     prepare_initial_setup(invoice.company, invoice.lease)
     potrjen = potrdi_osnutek_np(invoice)
@@ -423,7 +425,7 @@ def test_priprava_zavrne_manjkajoco_ali_napacno_kodo_v_ddv_rezimu(
     pogodba, koda
 ):
     postavka = dodaj_postavko(pogodba)
-    VatRegime.objects.filter(pk=postavka.vat_regime_id).update(eslog_koda=koda)
+    update_financial_fixture(VatRegime.objects.filter(pk=postavka.vat_regime_id), eslog_koda=koda)
 
     with pytest.raises(ValueError, match="eSLOG kod"):
         pripravi(pogodba)
@@ -470,7 +472,7 @@ def test_eslog_artifact_se_nastavi_samo_z_namensko_storitvijo(pogodba):
 
 def test_potrditev_vec_vrstic_sesteje_shranjene_zneske_in_rok_pogodbe(pogodba):
     pogodba.rok_placila_dni = 23
-    pogodba.save(update_fields=["rok_placila_dni"])
+    save_financial_fixture(pogodba, update_fields=["rok_placila_dni"])
     dodaj_postavko(pogodba)
     dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00", nacin="OPROSCENO")
     invoice = pripravi(pogodba).invoice
@@ -846,7 +848,7 @@ def test_sprememba_in_dodajanje_vrstice_brez_razloga_ne_obideta_validacije(pogod
 def test_priprava_zavrne_postavko_brez_obvezne_reference(pogodba):
     postavka = dodaj_postavko(pogodba)
     postavka.vat_regime.zahteva_referenco = True
-    postavka.vat_regime.save(update_fields=["zahteva_referenco"])
+    save_financial_fixture(postavka.vat_regime, update_fields=["zahteva_referenco"])
 
     with pytest.raises(ValidationError) as error:
         pripravi(pogodba)

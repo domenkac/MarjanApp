@@ -9,6 +9,7 @@ from django.db import IntegrityError
 from contracts.models import LeaseItem
 from contracts.services import rocno_popravi_postavko
 from core.models import AuditLogEntry
+from core.services import record_edit_fingerprint
 from tests.invoicing.test_priprava_np import dodaj_postavko
 
 pytest_plugins = ["tests.invoicing.test_priprava_np"]
@@ -27,7 +28,7 @@ def test_rocni_popravek_zahteva_razlog(pogodba, razlog):
     postavka = dodaj_postavko(pogodba)
     with pytest.raises(ValidationError) as error:
         rocno_popravi_postavko(
-            postavka, razlog=razlog, znesek_neto_mesecno=Decimal("120.00")
+            postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog=razlog, znesek_neto_mesecno=Decimal("120.00")
         )
     assert "razlog" in error.value.message_dict
     postavka.refresh_from_db()
@@ -37,10 +38,11 @@ def test_rocni_popravek_zahteva_razlog(pogodba, razlog):
 
 def test_sprememba_zneska_uporabi_sveze_stanje_in_zapise_audit(pogodba):
     postavka = dodaj_postavko(pogodba)
+    source = record_edit_fingerprint(postavka)
     postavka.znesek_neto_mesecno = Decimal("999.00")
 
     popravljena = rocno_popravi_postavko(
-        postavka, razlog="Dogovorjena najemnina", znesek_neto_mesecno=Decimal("120.0")
+        postavka, source_fingerprint=source, razlog="Dogovorjena najemnina", znesek_neto_mesecno=Decimal("120.0")
     )
 
     assert popravljena.znesek_neto_mesecno == Decimal("120.00")
@@ -66,7 +68,7 @@ def test_sprememba_zneska_uporabi_sveze_stanje_in_zapise_audit(pogodba):
 )
 def test_sprememba_datuma_zapise_audit(pogodba, polje, nova):
     postavka = dodaj_postavko(pogodba)
-    rocno_popravi_postavko(postavka, razlog="Aneks", **{polje: nova})
+    rocno_popravi_postavko(postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog="Aneks", **{polje: nova})
     postavka.refresh_from_db()
 
     assert getattr(postavka, polje) == nova
@@ -80,7 +82,7 @@ def test_sprememba_datuma_zapise_audit(pogodba, polje, nova):
 def test_vec_sprememb_ustvari_locene_audite(pogodba):
     postavka = dodaj_postavko(pogodba)
     rocno_popravi_postavko(
-        postavka,
+        postavka, source_fingerprint=record_edit_fingerprint(postavka),
         razlog="Aneks 2",
         znesek_neto_mesecno=Decimal("125.00"),
         datum_zacetka_postavke=date(2026, 2, 1),
@@ -100,7 +102,7 @@ def test_vec_sprememb_ustvari_locene_audite(pogodba):
 def test_ista_vrednost_ne_ustvari_audita(pogodba):
     postavka = dodaj_postavko(pogodba)
     rocno_popravi_postavko(
-        postavka,
+        postavka, source_fingerprint=record_edit_fingerprint(postavka),
         razlog="Preverjeno",
         znesek_neto_mesecno=Decimal("100.0"),
         datum_zacetka_postavke=None,
@@ -112,7 +114,7 @@ def test_nedovoljeno_polje_je_zavrnjeno(pogodba):
     postavka = dodaj_postavko(pogodba)
     with pytest.raises(ValueError, match="Nedovoljena"):
         rocno_popravi_postavko(
-            postavka, razlog="Poskus", naziv_postavke="Nov opis"
+            postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog="Poskus", naziv_postavke="Nov opis"
         )
     postavka.refresh_from_db()
     assert postavka.naziv_postavke == "Najemnina"
@@ -123,7 +125,7 @@ def test_neveljavna_nova_vrednost_rollbacka_vse(pogodba):
     postavka = dodaj_postavko(pogodba)
     with pytest.raises(ValidationError):
         rocno_popravi_postavko(
-            postavka, razlog="Napačen vnos",
+            postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog="Napačen vnos",
             znesek_neto_mesecno=Decimal("0.00"),
             datum_zacetka_postavke=date(2026, 2, 1),
         )
@@ -145,7 +147,7 @@ def test_db_napaka_pri_drugem_auditu_rollbacka_postavko_in_prvega(pogodba, monke
     monkeypatch.setattr(AuditLogEntry, "save", napaka_pri_drugem)
     with pytest.raises(IntegrityError, match="napaka pri auditu"):
         rocno_popravi_postavko(
-            postavka, razlog="Aneks",
+            postavka, source_fingerprint=record_edit_fingerprint(postavka), razlog="Aneks",
             znesek_neto_mesecno=Decimal("120.00"),
             datum_zacetka_postavke=date(2026, 2, 1),
         )
@@ -159,5 +161,8 @@ def test_db_napaka_pri_drugem_auditu_rollbacka_postavko_in_prvega(pogodba, monke
 def test_neposreden_orm_save_ni_rocni_domain_service(pogodba):
     postavka = dodaj_postavko(pogodba)
     postavka.znesek_neto_mesecno = Decimal("120.00")
-    postavka.save(update_fields=["znesek_neto_mesecno"])
+    with pytest.raises(ValidationError):
+        postavka.save(update_fields=["znesek_neto_mesecno"])
+    postavka.refresh_from_db()
+    assert postavka.znesek_neto_mesecno == Decimal("100.00")
     assert not revizije(postavka).exists()

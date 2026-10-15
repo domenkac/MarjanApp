@@ -1,7 +1,7 @@
 import uuid
 
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
 
 from core.eslog_konfiguracija import (
     SEGMENTI_V1,
@@ -9,6 +9,7 @@ from core.eslog_konfiguracija import (
     normaliziraj_segmentne_nastavitve,
     privzeti_segmenti_podjetja_v1,
 )
+from core.models import FinancialQuerySet, validate_financial_save
 from core.validators import (
     normaliziraj_iban,
     preveri_davcno_stevilko,
@@ -21,6 +22,12 @@ from core.validators import (
 
 
 class Company(models.Model):
+    objects = FinancialQuerySet.as_manager()
+    financial_fields = (
+        "naziv", "davcna_stevilka", "maticna_stevilka", "naslov", "drzava_koda",
+        "trr", "ddv_zavezanec", "rok_placila_dni_privzeto", "aktivno",
+    )
+
     class DostavniKanal(models.TextChoices):
         PDF = "PDF", "PDF"
         ESLOG = "ESLOG", "eSLOG"
@@ -110,8 +117,15 @@ class Company(models.Model):
             raise ValidationError(napake)
 
     def save(self, *args, **kwargs):
-        self.trr = normaliziraj_iban(self.trr)
-        return super().save(*args, **kwargs)
+        edit = self.__dict__.get("_financial_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_company_edit
+
+            return save_company_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic(using=kwargs.get("using") or self._state.db):
+            self.trr = normaliziraj_iban(self.trr)
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
 
 
 class Signatory(models.Model):

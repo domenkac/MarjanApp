@@ -20,6 +20,7 @@ from invoicing.services import (
     uskladi_preglede_mesecnega_cikla,
     zamrzni_paket_za_potrditev,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.invoicing.test_preflight import (  # noqa: F401
     potrdi_septembrski_vzorec,
     ready_company,
@@ -35,7 +36,7 @@ def set_automatic(data, end=date(2026, 8, 31), months=12):
     lease.datum_konca = end
     lease.samodejno_podaljsanje = True
     lease.obdobje_podaljsanja_mesecev = months
-    lease.save()
+    save_financial_fixture(lease)
     approve_sample(data["company"], lease)
     return lease
 
@@ -165,7 +166,7 @@ def test_renewal_preserves_frozen_snapshot_and_issued_invoice(ready_company):  #
 ])
 def test_actual_termination_archive_and_nonrenewing_terms(ready_company, changes, expected):  # noqa: F811
     lease = set_automatic(ready_company)
-    Lease.objects.filter(pk=lease.pk).update(**changes)
+    update_financial_fixture(Lease.objects.filter(pk=lease.pk), **changes)
     lease.refresh_from_db()
     assert renewal_proposal(lease, date(2026, 9, 30)) is None
     candidate = izracunaj_kandidata(lease, date(2026, 9, 1), date(2026, 9, 30), date(2026, 9, 10))

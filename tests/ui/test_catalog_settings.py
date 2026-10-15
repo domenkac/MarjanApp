@@ -9,6 +9,8 @@ from catalogs.models import ServiceCatalogItem, VatRegime
 from companies.models import Company, Signatory
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
+from core.models import AuditLogEntry
+from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch
 from invoicing.services import izracunaj_kandidata, shrani_prvi_korak
 
@@ -121,7 +123,8 @@ def test_vat_create_edit_dates_and_eslog_code(client):
         f"/nastavitve/ddv/{regime.pk}/",
         vat_data(
             naziv="Spremenjeni DDV",
-            nacin_obracuna=VatRegime.NacinObracuna.OPROSCENO,
+            edit_fingerprint=record_edit_fingerprint(regime), razlog="Popravek",
+            nacin_obracuna=VatRegime.NacinObracuna.OBDAVCENO,
             stopnja="0.00",
             klavzula="Oprostitev",
             velja_do="2028-06-30",
@@ -131,7 +134,8 @@ def test_vat_create_edit_dates_and_eslog_code(client):
     assert edit.status_code == 302
     assert regime.naziv == "Spremenjeni DDV"
     assert regime.velja_do == date(2028, 6, 30)
-    assert regime.eslog_koda == "E"
+    assert regime.eslog_koda == "S"
+    assert regime.nacin_obracuna == "OBDAVCENO"
 
 
 @pytest.mark.django_db
@@ -141,12 +145,14 @@ def test_vat_edit_repairs_missing_or_wrong_eslog_code(client, stara_koda):
 
     response = client.post(
         f"/nastavitve/ddv/{regime.pk}/",
-        vat_data(),
+        vat_data(edit_fingerprint=record_edit_fingerprint(regime), razlog="Popravek eSLOG kode"),
     )
 
     regime.refresh_from_db()
     assert response.status_code == 302
     assert regime.eslog_koda == "S"
+    entry = AuditLogEntry.objects.get(polje="eslog_koda")
+    assert (entry.stara_vrednost, entry.nova_vrednost) == (stara_koda, "S")
 
 
 @pytest.mark.django_db

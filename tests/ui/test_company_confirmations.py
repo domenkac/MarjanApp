@@ -17,6 +17,7 @@ from companies.models import (
 from companies.services import potrdi_ddv_nastavitve
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.financial_fixtures import save_financial_fixture
 from tests.setup_helpers import approve_sample
 
 PNG = base64.b64decode(
@@ -111,7 +112,7 @@ def test_review_excludes_unrelated_archived_and_unused_rows(client, confirmation
         velja_od=date(2020, 1, 1),
     )
     data.item.arhivirana = True
-    data.item.save(update_fields=["arhivirana"])
+    save_financial_fixture(data.item, update_fields=["arhivirana"])
     content = client.get(detail_url(data)).content.decode()
     assert "Najemnina" not in content and unused.naziv not in content
 
@@ -260,7 +261,7 @@ def test_stale_states_and_dashboard_tasks(client, confirmation_ui_data):
     assert "Potrebne potrditve" not in client.get("/").content.decode()
 
     data.regime.stopnja = Decimal("9.50")
-    data.regime.save(update_fields=["stopnja"])
+    save_financial_fixture(data.regime, update_fields=["stopnja"])
     content = client.get(detail_url(data)).content.decode()
     dashboard = client.get("/").content.decode()
     assert content.count("Zastarela") >= 2

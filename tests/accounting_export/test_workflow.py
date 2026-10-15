@@ -16,6 +16,7 @@ from tests.accounting_export.test_report_snapshot import _invoice, _line
 from tests.accounting_export.test_report_snapshot import (
     company as company,  # noqa: PLC0414
 )
+from tests.financial_fixtures import update_financial_fixture
 
 pytestmark = pytest.mark.django_db(transaction=True)
 PERIOD = date(2026, 9, 1)
@@ -316,7 +317,7 @@ def test_configuration_failure_resumes_same_prepared_attempt(setup, settings, tm
 
 @pytest.mark.parametrize("field", ["email_posiljatelj", "email_racunovodja"])
 def test_invalid_addresses_never_send(setup, field, tmp_path):
-    Company.objects.filter(pk=setup.pk).update(**{field: "invalid-address"})
+    update_financial_fixture(Company.objects.filter(pk=setup.pk), **{field: "invalid-address"})
     calls = []
     assert run(setup, calls).code == "PREPARATION_FAILED"
     assert not calls and not Attempt.objects.exists()

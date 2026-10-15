@@ -9,7 +9,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.files.base import ContentFile
 from django.core.files.storage import default_storage
-from django.db import IntegrityError, transaction
+from django.db import IntegrityError, models, transaction
 from django.db.models import F, Q
 from django.db.models.deletion import ProtectedError
 
@@ -22,7 +22,40 @@ from companies.models import (
     VatSettingsConfirmation,
 )
 from core.models import AuditLogEntry
-from core.services import IzbrisOdlocitev, IzbrisRazlog, StanjeRazlog, StanjeRezultat
+from core.services import (
+    IzbrisOdlocitev,
+    IzbrisRazlog,
+    StanjeRazlog,
+    StanjeRezultat,
+    audit_field_changes,
+    financial_changes,
+    validate_edit_source,
+)
+
+COMPANY_FINANCIAL_FIELDS = (
+    "naziv", "davcna_stevilka", "maticna_stevilka", "naslov", "drzava_koda",
+    "trr", "ddv_zavezanec", "rok_placila_dni_privzeto",
+)
+
+
+@transaction.atomic
+def save_company_edit(company, *, source_fingerprint, razlog=""):
+    previous = Company.objects.select_for_update().get(pk=company.pk)
+    validate_edit_source(previous, source_fingerprint)
+    editable = set(COMPANY_FINANCIAL_FIELDS) | {
+        "logotip", "email_racunovodja", "email_posiljatelj", "keychain_kljuc_posiljatelja",
+    }
+    for field in company._meta.concrete_fields:
+        if field.name not in editable and getattr(company, field.attname) != getattr(previous, field.attname):
+            raise ValidationError("Za to spremembo uporabite namensko storitev podjetja.")
+    exclude = {"logotip"} if company.logotip.name == previous.logotip.name and company.logotip._committed else set()
+    company.full_clean(exclude=exclude)
+    changes = financial_changes(previous, company, COMPANY_FINANCIAL_FIELDS, razlog)
+    models.Model.save(company)
+    company.refresh_from_db()
+    audit_field_changes(company, changes, razlog)
+    return company
+
 
 FINGERPRINT_DDV_VERSION = 2
 FINGERPRINT_VZORCA_VERSION = 2
@@ -487,7 +520,7 @@ def arhiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
 
         svezi.aktivno = False
         revizija = _audit(svezi, True, False, "Arhiviranje poslovnega zapisa")
-        svezi.save(update_fields=["aktivno"])
+        models.Model.save(svezi, update_fields=["aktivno"])
         revizija.save()
         return StanjeRezultat(True)
 
@@ -548,7 +581,7 @@ def ponovno_aktiviraj_poslovni_zapis(zapis) -> StanjeRezultat:
             revizija = _audit(
                 svezi, False, True, "Ponovna aktivacija poslovnega zapisa"
             )
-            svezi.save()
+            models.Model.save(svezi, update_fields=["aktivno"])
             revizija.save()
             return StanjeRezultat(True)
     except IntegrityError:

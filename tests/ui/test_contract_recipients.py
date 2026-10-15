@@ -8,6 +8,7 @@ from django.urls import NoReverseMatch, reverse
 from contracts.models import RecipientContact, Tenant
 from contracts.services import deaktiviraj_prejemnika, ponovno_aktiviraj_prejemnika
 from invoicing.models import MonthlyBatch, MonthlyCandidateReview, MonthlyCycle
+from tests.financial_fixtures import save_financial_fixture
 from tests.ui.test_contract_leases import make_hierarchy
 
 
@@ -105,7 +106,7 @@ def test_create_invalid_email_and_unusable_hierarchy(client):
     })
     assert "Vnesite veljaven e-poštni naslov." in invalid.content.decode()
     lease.unit.property.company.aktivno = False
-    lease.unit.property.company.save(update_fields=["aktivno"])
+    save_financial_fixture(lease.unit.property.company, update_fields=["aktivno"])
     blocked = client.post(f"/pogodbe/{lease.pk}/prejemniki/nov/", {
         "email": "blocked@example.com", "vloga": "TO",
     })
@@ -158,7 +159,7 @@ def test_state_actions_and_failed_reactivation_ignore_edit_post(client):
     recipient.refresh_from_db()
     assert recipient.aktiven is False
     lease.arhivirana = True
-    lease.save(update_fields=["arhivirana"])
+    save_financial_fixture(lease, update_fields=["arhivirana"])
     blocked = client.post(f"{base}/reaktiviraj/", {
         "email": "crafted@example.com", "vloga": "BCC", "kanal": "ESLOG",
     })
@@ -168,7 +169,7 @@ def test_state_actions_and_failed_reactivation_ignore_edit_post(client):
         "racuni@example.com", "TO", "PDF", False,
     )
     lease.arhivirana = False
-    lease.save(update_fields=["arhivirana"])
+    save_financial_fixture(lease, update_fields=["arhivirana"])
     assert client.post(f"{base}/reaktiviraj/").status_code == 302
     recipient.refresh_from_db()
     assert recipient.aktiven is True

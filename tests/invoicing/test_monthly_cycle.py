@@ -17,6 +17,7 @@ from invoicing.services import (
     shrani_prvi_korak,
     zacni_ali_nadaljuj_mesecni_cikel,
 )
+from tests.financial_fixtures import save_financial_fixture
 
 
 def ustvari_podjetje(naziv, davcna_stevilka, *, aktivno=True):
@@ -99,9 +100,9 @@ def test_prvi_zagon_posname_aktivna_podjetja_samo_enkrat():
         date(2026, 8, 1), date(2026, 8, 12)
     )
     aktivno.aktivno = False
-    aktivno.save(update_fields=["aktivno"])
+    save_financial_fixture(aktivno, update_fields=["aktivno"])
     neaktivno.aktivno = True
-    neaktivno.save(update_fields=["aktivno"])
+    save_financial_fixture(neaktivno, update_fields=["aktivno"])
 
     assert isti.pk == cycle.pk
     assert list(cycle.batches.values_list("company_id", flat=True)) == [aktivno.pk]

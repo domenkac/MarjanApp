@@ -1,5 +1,4 @@
 """Real two-company workflows; only SMTP and credential boundaries are fake."""
-
 import hashlib
 import json
 import re
@@ -43,6 +42,7 @@ from invoicing.models import (
     MonthlyCycle,
 )
 from tests.accounting_export.test_workflow import Smtp
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.invoicing.test_preflight import _add_ready_company
 from tests.invoicing.test_preflight import (
     ready_company as ready_company,  # noqa: PLC0414
@@ -136,7 +136,7 @@ def flow(ready_company, client, settings, tmp_path, monkeypatch, external_bounda
         company.ddv_zavezanec = True
         company.email_posiljatelj = f"issuer-{index}@example.com"
         company.email_racunovodja = f"accountant-{index}@example.com"
-        company.save()
+        save_financial_fixture(company)
         lease.tenant.identificiran_za_ddv = True
         lease.tenant.save()
         RecipientContact.objects.create(
@@ -549,10 +549,10 @@ def _finish(flow):
         zip(flow["companies"], flow["leases"], flow["invoices"], strict=True)
     ):
         company.naziv = f"Changed issuer {index}"
-        company.save(update_fields=["naziv"])
+        save_financial_fixture(company, update_fields=["naziv"])
         lease.tenant.naziv = f"Changed tenant {index}"
         lease.tenant.save(update_fields=["naziv"])
-        lease.leaseitem_set.update(znesek_neto_mesecno=Decimal("999.00"))
+        update_financial_fixture(lease.leaseitem_set.all(), znesek_neto_mesecno=Decimal("999.00"))
         invoice.refresh_from_db()
         assert _issued_content(invoice) == flow["fiscal"][index]
         assert _hash(_rendered(flow, invoice).read_bytes()) == invoice.checksum

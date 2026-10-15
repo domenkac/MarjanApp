@@ -15,6 +15,7 @@ from invoicing.services import (
     preveri_predhodno_kontrolo,
     pripravi_osnutek_np,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.invoicing.test_preflight import (  # noqa: F401
     _freeze_ready_package,
     potrdi_septembrski_vzorec,
@@ -27,7 +28,7 @@ from tests.setup_helpers import approve_sample, prepare_initial_setup
 def indeksirana(lease):
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
+    save_financial_fixture(lease)
     return dodaj_postavko(
         lease, indeks_ob_osnovi=Decimal("100.000"),
         datum_osnove_indeksacije=date(2026, 1, 1),
@@ -65,10 +66,10 @@ def test_zastarel_zamrznjen_paket_blokira_izdajo_in_ohrani_vsebino(ready_company
     lease = data["lease"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
+    save_financial_fixture(lease)
     item.indeks_ob_osnovi = Decimal("100.000")
     item.datum_osnove_indeksacije = date(2026, 1, 1)
-    item.save()
+    save_financial_fixture(item)
     potrdi_ddv_nastavitve(data["company"])
     potrdi_septembrski_vzorec(data["company"], lease)
     _freeze_ready_package(data)
@@ -95,10 +96,10 @@ def test_veljaven_indeksiran_zamrznjen_paket_ohrani_uspesno_izdajo_in_retry(
     item, lease = data["item"], data["lease"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
+    save_financial_fixture(lease)
     item.indeks_ob_osnovi = Decimal("100.000")
     item.datum_osnove_indeksacije = date(2026, 1, 1)
-    item.save()
+    save_financial_fixture(item)
     potrdi_indeksacijo(item, Decimal("110.000"), date(2026, 3, 15), indeks_leto=2025)
     potrdi_ddv_nastavitve(data["company"])
     potrdi_septembrski_vzorec(data["company"], lease)
@@ -121,8 +122,8 @@ def test_legacy_reference_reported_as_preflight_blocker(ready_company):  # noqa:
     lease = data["lease"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
-    LeaseItem.objects.filter(pk=data["item"].pk).update(
+    save_financial_fixture(lease)
+    update_financial_fixture(LeaseItem.objects.filter(pk=data["item"].pk),
         indeks_ob_osnovi=Decimal("100.000"), datum_osnove_indeksacije=date(2026, 1, 1),
         referencna_najemnina=None, datum_referencne_najemnine=None,
     )

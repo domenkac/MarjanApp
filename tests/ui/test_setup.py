@@ -2,6 +2,7 @@ from datetime import date
 from decimal import Decimal
 
 import pytest
+from django.db import models
 from django.test import Client
 from django.urls import reverse
 from django.utils import timezone
@@ -19,6 +20,7 @@ from companies.setup import issuer_setup_issues
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from delivery.models import DeliveryAttempt
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 from tests.setup_helpers import approve_sample
 from tests.ui import test_company_confirmations
 from tests.ui.test_nastavitve import company_data
@@ -115,7 +117,7 @@ def test_five_arbitrary_issuers_have_independent_status(client, setup_data):
     ],
 )
 def test_missing_or_invalid_issuer_configuration(client, setup_data, field, value):
-    Company.objects.filter(pk=setup_data.company.pk).update(**{field: value})
+    update_financial_fixture(Company.objects.filter(pk=setup_data.company.pk), **{field: value})
     setup_data.company.refresh_from_db()
     issues = issuer_setup_issues(setup_data.company, timezone.localdate())
     assert any(key == field for key, _ in issues)
@@ -228,7 +230,7 @@ def test_stale_archived_selections_reloaded(client, setup_data, model, field):
         Tenant: setup_data.lease.tenant,
         Lease: setup_data.lease,
     }[model]
-    model.objects.filter(pk=record.pk).update(**{field: field == "arhivirana"})
+    models.QuerySet.update(model.objects.filter(pk=record.pk), **{field: field == "arhivirana"})
     response = Client().get(URL)
     assert response.context["state"].lease_id is None
     assert response.context["missing"]
@@ -240,10 +242,10 @@ def test_incomplete_chain_and_existing_validations(client, setup_data):
     response = client.get(URL + "?korak=tenant")
     assert response.context["missing"]
     assert "veljaven e-poštni naslov" in response.content.decode().lower()
-    LeaseItem.objects.filter(pk=setup_data.item.pk).update(arhivirana=True)
+    update_financial_fixture(LeaseItem.objects.filter(pk=setup_data.item.pk), arhivirana=True)
     response = client.get(URL + "?korak=items")
     assert "Pogodba nima aktivnih pogodbenih postavk" in response.content.decode()
-    LeaseItem.objects.filter(pk=setup_data.item.pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=setup_data.item.pk),
         arhivirana=False, znesek_neto_mesecno=Decimal("0.00")
     )
     assert client.get(URL).context["missing"]
@@ -256,7 +258,7 @@ def test_stale_confirmations_are_derived_again(client, setup_data):
     rows = client.get(URL + "?korak=issuer").context["companies"]
     assert rows[0]["ddv"].stanje == rows[0]["sample"].stanje == "valid"
     setup_data.regime.stopnja = Decimal("9.50")
-    setup_data.regime.save(update_fields=["stopnja"])
+    save_financial_fixture(setup_data.regime, update_fields=["stopnja"])
     response = Client().get(URL)
     assert response.context["companies"][0]["ddv"].stanje == "stale"
     assert response.context["companies"][0]["sample"].stanje == "stale"
@@ -349,7 +351,7 @@ def test_create_edit_links_use_existing_forms(client, settings, tmp_path):
 
 
 def test_legacy_company_without_name_renders_and_stays_incomplete(client, setup_data):
-    Company.objects.filter(pk=setup_data.company.pk).update(naziv="")
+    update_financial_fixture(Company.objects.filter(pk=setup_data.company.pk), naziv="")
     response = client.get(URL)
     assert response.status_code == 200
     assert "manjka naziv" in response.content.decode()
@@ -374,7 +376,7 @@ def test_select_incomplete_tenant_keeps_edit_link_and_current_step(client, setup
 
 def test_ended_lease_cannot_pass_lease_or_items_step(client, setup_data):
     select_chain(client, setup_data)
-    Lease.objects.filter(pk=setup_data.lease.pk).update(status=Lease.Status.PRENEHALA)
+    update_financial_fixture(Lease.objects.filter(pk=setup_data.lease.pk), status=Lease.Status.PRENEHALA)
     response = select(client, "lease", setup_data.lease)
     assert response.context["step"] == "lease"
     assert "Izbrana pogodba ni aktivna" in response.content.decode()
@@ -397,7 +399,7 @@ def test_reparented_unit_invalidates_saved_chain(client, setup_data):
 
 def test_archived_company_clears_all_selections_on_resume(client, setup_data):
     select_chain(client, setup_data)
-    Company.objects.filter(pk=setup_data.company.pk).update(aktivno=False)
+    update_financial_fixture(Company.objects.filter(pk=setup_data.company.pk), aktivno=False)
     response = Client().get(URL)
     state = response.context["state"]
     assert all(

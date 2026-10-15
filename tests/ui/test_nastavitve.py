@@ -5,6 +5,7 @@ from django.core.files.uploadedfile import SimpleUploadedFile
 from django.urls import NoReverseMatch, reverse
 
 from companies.models import Company, Signatory
+from core.services import record_edit_fingerprint
 from invoicing.models import MonthlyBatch, MonthlyCycle
 from invoicing.services import shrani_prvi_korak
 from tests.image_data import slika_bytes
@@ -125,6 +126,7 @@ def test_company_edit_preserves_hidden_delivery_value(client):
     company = create_company(privzeti_dostavni_kanal=Company.DostavniKanal.OBOJE)
     data = company_data(naziv="Spremenjeno d.o.o.")
     data.pop("logotip")
+    data.update(edit_fingerprint=record_edit_fingerprint(company), razlog="Popravek naziva")
     response = client.post(f"/nastavitve/podjetja/{company.pk}/", data)
     company.refresh_from_db()
     assert response.status_code == 302

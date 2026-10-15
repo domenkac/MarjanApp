@@ -16,6 +16,7 @@ from contracts.models import (
     Tenant,
     Unit,
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 
 def ustvari_podjetje():
@@ -234,7 +235,7 @@ def test_tenant_tip_je_zaprt_textchoices_nabor_in_email_je_veljaven():
 def ustvari_pogodbeni_stranki(rok_placila_dni=15):
     company = ustvari_podjetje()
     company.rok_placila_dni_privzeto = rok_placila_dni
-    company.save(update_fields=["rok_placila_dni_privzeto"])
+    save_financial_fixture(company, update_fields=["rok_placila_dni_privzeto"])
     nepremicnina = Property.objects.create(
         company=company,
         naziv="Poslovna stavba",
@@ -432,7 +433,7 @@ def test_referenca_listine_in_datum_sta_obvezna_le_ce_ju_zahteva_rezim():
 def test_indeksacijska_klavzula_zahteva_oba_izhodiscna_podatka():
     postavka = nova_postavka()
     postavka.lease.ima_klavzulo_indeksacije = True
-    postavka.lease.save(update_fields=["ima_klavzulo_indeksacije"])
+    save_financial_fixture(postavka.lease, update_fields=["ima_klavzulo_indeksacije"])
 
     with pytest.raises(ValidationError) as napaka:
         postavka.full_clean()
@@ -585,7 +586,7 @@ def test_indexation_event_zahteva_datum_in_razlog_samo_ob_izkljucitvi():
 def aktivna_postavka():
     postavka = nova_postavka()
     postavka.lease.datum_zacetka = date.today() - timedelta(days=30)  # noqa: DTZ011
-    postavka.lease.save(update_fields=["datum_zacetka"])
+    save_financial_fixture(postavka.lease, update_fields=["datum_zacetka"])
     postavka.save()
     return postavka
 
@@ -608,7 +609,7 @@ def test_arhivirana_postavka_ali_pogodba_ne_blokira(arhiviran):
     postavka = aktivna_postavka()
     zapis = postavka if arhiviran == "postavka" else postavka.lease
     zapis.arhivirana = True
-    zapis.save(update_fields=["arhivirana"])
+    save_financial_fixture(zapis, update_fields=["arhivirana"])
 
     rezim = postavka.vat_regime
     rezim.aktiven = False
@@ -625,7 +626,7 @@ def test_neuporabljen_rezim_se_lahko_deaktivira():
 @pytest.mark.django_db
 def test_ze_neaktiven_rezim_in_reaktivacija_nista_blokirana():
     rezim = aktivna_postavka().vat_regime
-    VatRegime.objects.filter(pk=rezim.pk).update(aktiven=False)
+    update_financial_fixture(VatRegime.objects.filter(pk=rezim.pk), aktiven=False)
     rezim.refresh_from_db()
     rezim.full_clean()
 
@@ -637,7 +638,7 @@ def test_ze_neaktiven_rezim_in_reaktivacija_nista_blokirana():
 def test_drug_rezim_na_isti_pogodbi_ne_blokira():
     postavka = aktivna_postavka()
     postavka.arhivirana = True
-    postavka.save(update_fields=["arhivirana"])
+    save_financial_fixture(postavka, update_fields=["arhivirana"])
     drug_rezim = VatRegime.objects.create(
         zahteva_polni_odbitek=False,
         sifra="DDV9",
@@ -662,7 +663,7 @@ def test_drug_rezim_na_isti_pogodbi_ne_blokira():
 def test_ena_aktivna_postavka_med_vec_zadostuje_za_blokado():
     postavka = aktivna_postavka()
     postavka.arhivirana = True
-    postavka.save(update_fields=["arhivirana"])
+    save_financial_fixture(postavka, update_fields=["arhivirana"])
     LeaseItem.objects.create(
         lease=postavka.lease,
         vat_regime=postavka.vat_regime,
@@ -704,7 +705,7 @@ def test_deaktivacija_uposteva_efektivno_veljavnost(polje, odmik, status, blokir
     if polje == "datum_konca":
         zapis.tip_trajanja = Lease.TipTrajanja.DOLOCEN_CAS
         polja.append("tip_trajanja")
-    zapis.save(update_fields=polja)
+    save_financial_fixture(zapis, update_fields=polja)
 
     rezim = postavka.vat_regime
     rezim.aktiven = False

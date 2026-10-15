@@ -1,10 +1,49 @@
 from datetime import date
 
 from django.core.exceptions import ValidationError
-from django.db import models
+from django.db import models, transaction
+
+from core.models import FinancialQuerySet, validate_financial_save
+
+
+class VatRegimeQuerySet(FinancialQuerySet):
+    def bulk_update(self, objs, fields, batch_size=None):
+        if "nacin_obracuna" in fields:
+            raise ValidationError("Načina obračuna ni dovoljeno spreminjati. Dodajte nov DDV režim.")
+        return super().bulk_update(objs, fields, batch_size=batch_size)
+
+    def update(self, **kwargs):
+        if "nacin_obracuna" in kwargs:
+            raise ValidationError("Načina obračuna ni dovoljeno spreminjati. Dodajte nov DDV režim.")
+        return super().update(**kwargs)
+
+    def bulk_create(self, objs, **kwargs):
+        if "nacin_obracuna" in (kwargs.get("update_fields") or ()):
+            raise ValidationError("Načina obračuna ni dovoljeno spreminjati. Dodajte nov DDV režim.")
+        return super().bulk_create(objs, **kwargs)
 
 
 class VatRegime(models.Model):
+    objects = VatRegimeQuerySet.as_manager()
+
+    def _validate_method(self):
+        if self.pk is None:
+            return
+        previous = type(self).objects.filter(pk=self.pk).values_list("nacin_obracuna", flat=True).first()
+        if previous is not None and previous != self.nacin_obracuna:
+            raise ValidationError({"nacin_obracuna": "Načina obračuna ni dovoljeno spreminjati. Dodajte nov DDV režim."})
+
+    def save(self, *args, **kwargs):
+        edit = self.__dict__.get("_financial_edit")
+        if edit is not None and self.pk is not None:
+            from .services import save_vat_regime_edit
+
+            return save_vat_regime_edit(self, source_fingerprint=edit[0], razlog=edit[1])
+        with transaction.atomic():
+            self._validate_method()
+            validate_financial_save(self, kwargs.get("update_fields"), kwargs.get("using"))
+            return super().save(*args, **kwargs)
+
     class NacinObracuna(models.TextChoices):
         OBDAVCENO = "OBDAVCENO", "Obdavčeno"
         OPROSCENO = "OPROSCENO", "Oproščeno"
@@ -26,6 +65,7 @@ class VatRegime(models.Model):
 
     def clean(self):
         super().clean()
+        self._validate_method()
         from contracts.vat_eligibility import preveri_ddv_omejitev
 
         try:

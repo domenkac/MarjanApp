@@ -20,6 +20,7 @@ from invoicing.services import (
     spremeni_podatke_racuna,
     spremeni_vrstico,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.image_data import slika_bytes
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import approve_sample, prepare_initial_setup
@@ -132,7 +133,7 @@ def test_storno_ohrani_eslog_snapshote_po_spremembi_zivih_podatkov(pogodba):
     approve_sample(original.company, pogodba)
     for postavka in pogodba.leaseitem_set.select_related("vat_regime"):
         postavka.vat_regime.eslog_koda = "SPREMENJENA"
-        postavka.vat_regime.save(update_fields=["eslog_koda"])
+        save_financial_fixture(postavka.vat_regime, update_fields=["eslog_koda"])
 
     potrjen = potrdi_korekcijski_osnutek(storno)
     assert potrjen.prejemnik_tip == original.prejemnik_tip

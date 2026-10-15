@@ -7,6 +7,7 @@ from invoicing.services import (
     primerjaj_delta_np,
     pripravi_osnutek_np,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_priprava_np import (
     DATUM_IZDAJE,
     OBDOBJE_DO,
@@ -66,7 +67,7 @@ def test_faza1_pot_od_pogodbe_do_izdanega_posnetka(pogodba):
     tenant.naziv = "Nov najemnik"
     tenant.save(update_fields=["naziv"])
     company.naziv = "Nov izdajatelj"
-    company.save(update_fields=["naziv"])
+    save_financial_fixture(company, update_fields=["naziv"])
     podpisnik.ime_priimek = "Nov podpisnik"
     podpisnik.save(update_fields=["ime_priimek"])
     property.naziv = "Nov objekt"
@@ -74,11 +75,11 @@ def test_faza1_pot_od_pogodbe_do_izdanega_posnetka(pogodba):
     unit.oznaka = "Nova enota"
     unit.save(update_fields=["oznaka"])
     pogodba.oznaka_pogodbe = "Nova oznaka"
-    pogodba.save(update_fields=["oznaka_pogodbe"])
+    save_financial_fixture(pogodba, update_fields=["oznaka_pogodbe"])
     obdavcena.znesek_neto_mesecno = Decimal("200.00")
-    obdavcena.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(obdavcena, update_fields=["znesek_neto_mesecno"])
     obdavcena.vat_regime.stopnja = Decimal("9.50")
-    obdavcena.vat_regime.save(update_fields=["stopnja"])
+    save_financial_fixture(obdavcena.vat_regime, update_fields=["stopnja"])
 
     potrjen.refresh_from_db()
     assert (

@@ -6,6 +6,7 @@ import pytest
 from invoicing.models import Invoice, InvoiceLine
 from rendering.contexts import EslogRenderNapaka, PdfRenderNapaka
 from rendering.services import render_eslog, render_pdf
+from tests.financial_fixtures import save_financial_fixture
 
 pytest_plugins = ["tests.rendering.test_contexts"]
 
@@ -15,7 +16,7 @@ def _racun_drugega_podjetja(izdani_racun):
     podjetje.pk = None
     podjetje.naziv = "Beta d.o.o."
     podjetje.aktivno = False
-    podjetje.save()
+    save_financial_fixture(podjetje)
 
     racun = copy(Invoice.objects.get(pk=izdani_racun.pk))
     racun.pk = None

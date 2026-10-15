@@ -15,6 +15,7 @@ from contracts.renewals import (
 )
 from contracts.services import efektivna_veljavnost_pogodbe
 from core.models import AuditLogEntry
+from tests.financial_fixtures import update_financial_fixture
 from tests.ui.test_contract_leases import make_hierarchy
 
 
@@ -84,7 +85,7 @@ def test_confirmation_audit_and_retry_are_atomic_and_immutable(monkeypatch):
             mutation()
     with pytest.raises(ProtectedError):
         lease.delete()
-    with pytest.raises(ProtectedError):
+    with pytest.raises(ValidationError, match="Revizijske"):
         audit.delete()
 
 
@@ -120,7 +121,7 @@ def test_confirmation_rolls_back_on_evidence_failure(monkeypatch, failure):
 def test_stale_decisions_cannot_extend_changed_lease(changes):
     lease = automatic_lease()
     proposal = renewal_proposal(lease, date(2024, 1, 31))
-    Lease.objects.filter(pk=lease.pk).update(**changes)
+    update_financial_fixture(Lease.objects.filter(pk=lease.pk), **changes)
     with pytest.raises(ValidationError):
         confirm_renewal(lease.pk, proposal["source_fingerprint"], as_of=date(2024, 3, 31))
     assert not LeaseRenewalEvent.objects.exists()
@@ -167,7 +168,7 @@ def test_duplicate_old_end_is_rejected_after_manual_date_reversal():
     lease = automatic_lease()
     proposal = renewal_proposal(lease, date(2024, 1, 31))
     confirm_renewal(lease.pk, proposal["source_fingerprint"], as_of=date(2024, 1, 31))
-    Lease.objects.filter(pk=lease.pk).update(datum_konca=date(2024, 1, 31), rok_placila_dni=20)
+    update_financial_fixture(Lease.objects.filter(pk=lease.pk), datum_konca=date(2024, 1, 31), rok_placila_dni=20)
     lease.refresh_from_db()
     proposal = renewal_proposal(lease, date(2024, 1, 31))
     with pytest.raises(ValidationError), transaction.atomic():

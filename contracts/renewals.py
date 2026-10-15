@@ -1,27 +1,32 @@
 """Explicit automatic renewal decisions; reads never extend a lease."""
 
-import hashlib
-import json
 from calendar import monthrange
 from datetime import date
 
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
-from django.core.serializers.json import DjangoJSONEncoder
-from django.db import transaction
+from django.db import models, transaction
 from django.utils import timezone
 
 from core.models import AuditLogEntry
+from core.services import (
+    audit_field_changes,
+    financial_changes,
+    record_edit_fingerprint,
+    validate_edit_source,
+)
 
 from .models import Lease, LeaseRenewalEvent
 from .services import hierarhija_pogodbe_je_uporabna
 
 
 def lease_source_fingerprint(lease):
-    source = {field.attname: getattr(lease, field.attname) for field in Lease._meta.fields}
-    return hashlib.sha256(json.dumps(
-        source, cls=DjangoJSONEncoder, sort_keys=True, separators=(",", ":"),
-    ).encode()).hexdigest()
+    return record_edit_fingerprint(lease)
+
+
+LEASE_FINANCIAL_FIELDS = tuple(
+    field.name for field in Lease._meta.concrete_fields if field.name not in {"id", "arhivirana"}
+)
 
 
 def validate_lease_edit(previous, changes, *, source_fingerprint=None):
@@ -42,14 +47,22 @@ def validate_lease_edit(previous, changes, *, source_fingerprint=None):
 
 
 @transaction.atomic
-def save_lease_edit(lease, *, source_fingerprint):
+def save_lease_edit(lease, *, source_fingerprint, razlog=""):
     if not isinstance(source_fingerprint, str) or not source_fingerprint:
         raise ValidationError("Manjka veljaven pregled pogodbe. Osvežite obrazec.")
     previous = Lease.objects.select_for_update().get(pk=lease.pk)
+    if lease.arhivirana != previous.arhivirana:
+        raise ValidationError("Za arhiviranje uporabite namensko storitev pogodbe.")
     changes = {field.attname: getattr(lease, field.attname) for field in Lease._meta.fields}
     validate_lease_edit(previous, changes, source_fingerprint=source_fingerprint)
+    validate_edit_source(previous, source_fingerprint)
+    lease._state.fields_cache.clear()
+    lease.clean_fields()
     lease.full_clean()
-    lease.save()
+    changed = financial_changes(previous, lease, LEASE_FINANCIAL_FIELDS, razlog)
+    models.Model.save(lease)
+    lease.refresh_from_db()
+    audit_field_changes(lease, changed, razlog)
     return lease
 
 
@@ -112,7 +125,7 @@ def confirm_renewal(lease_id, source_fingerprint, *, as_of):
     lease.full_clean()
     # Ordinary saves cannot change expired renewal terms. This audited service
     # owns the exceptional write, in the same transaction as its evidence.
-    Lease.objects.filter(pk=lease.pk).update(datum_konca=new_end)
+    models.Model.save(lease, update_fields=["datum_konca"])
     audit = AuditLogEntry.objects.create(
         content_type=ContentType.objects.get_for_model(Lease), object_id=lease.pk,
         polje="datum_konca", stara_vrednost=old_end.isoformat(),

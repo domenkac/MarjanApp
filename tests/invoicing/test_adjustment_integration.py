@@ -1,7 +1,7 @@
+from tests.financial_fixtures import update_financial_fixture
+
 """T2-C3: stored evidence, real claims, atomic issuance, and frozen compatibility."""
-
 # ruff: noqa: F811 -- Imported pytest fixtures are injected by their names.
-
 import json
 from concurrent.futures import ThreadPoolExecutor
 from copy import deepcopy
@@ -42,6 +42,7 @@ from tests.contracts.test_late_adjustments import (
     issued_line,
     review_decision,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_preflight import (  # noqa: F401
     _calculate,
     _freeze_ready_package,
@@ -266,7 +267,7 @@ def test_changed_evidence_or_reservation_blocks_before_numbering(
     if mutation == "source":
         InvoiceLine.objects.filter(pk=sources[0].pk).update(opis="Changed evidence")
     elif mutation == "vat":
-        type(data["regime"]).objects.filter(pk=data["regime"].pk).update(stopnja=Decimal("9.50"))
+        update_financial_fixture(type(data["regime"]).objects.filter(pk=data["regime"].pk), stopnja=Decimal("9.50"))
     elif mutation == "recipient":
         type(data["tenant"]).objects.filter(pk=data["tenant"].pk).update(naziv="Other recipient")
     elif mutation == "approval":
@@ -305,7 +306,7 @@ def test_unsafe_items_never_consumed(ready_company, potrdi_septembrski_vzorec, c
 def test_no_regular_rent_keeps_adjustments_outstanding(ready_company, potrdi_septembrski_vzorec):
     data = ready_company
     rows, _, _ = setup_adjustments(data)
-    type(data["item"]).objects.filter(pk=data["item"].pk).update(datum_prenehanja_postavke=date(2026, 3, 31))
+    update_financial_fixture(type(data["item"]).objects.filter(pk=data["item"].pk), datum_prenehanja_postavke=date(2026, 3, 31))
     assert draft(data) is None
     assert not AdjustmentReservation.objects.exists()
     assert all(row.vkljucen_v_racun_id is None for row in rows)
@@ -390,10 +391,10 @@ def test_late_batch_approval_only_with_complete_verified_sources(ready_company):
     item, lease = data["item"], data["lease"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
+    save_financial_fixture(lease)
     item.indeks_ob_osnovi = Decimal("100.000")
     item.datum_osnove_indeksacije = date(2026, 1, 1)
-    item.save()
+    save_financial_fixture(item)
     for month in (2, 3):
         line = issued_line(item, month=month, net="100.00")
         InvoiceLine.objects.filter(pk=line.pk).update(
@@ -594,7 +595,7 @@ def test_first_actual_use_is_tracked_for_no_change_and_prorated_rent(
     data = ready_company
     setup_adjustments(data, new="110.00" if prorated else "100.00", decision=None)
     if prorated:
-        type(data["item"]).objects.filter(pk=data["item"].pk).update(datum_zacetka_postavke=date(2026, 9, 15))
+        update_financial_fixture(type(data["item"]).objects.filter(pk=data["item"].pk), datum_zacetka_postavke=date(2026, 9, 15))
     refresh_sample(data, potrdi_septembrski_vzorec)
     candidate = services.izracunaj_kandidata(data["lease"], date(2026, 9, 1), date(2026, 9, 30), date(2026, 9, 10))
     assert "PRVA_INDEKSACIJA" in {item.koda for item in candidate.izjeme}
@@ -638,10 +639,10 @@ def test_late_approval_of_completed_monthly_source_requires_exact_materializatio
     lease, item = data["lease"], data["item"]
     lease.ima_klavzulo_indeksacije = True
     lease.tip_pogoja_indeksacije = Lease.TipPogojaIndeksacije.VEDNO
-    lease.save()
+    save_financial_fixture(lease)
     item.indeks_ob_osnovi = Decimal("100.000")
     item.datum_osnove_indeksacije = date(2026, 1, 1)
-    item.save()
+    save_financial_fixture(item)
     if not intact:
         original.invoiceline_set.update(opis="Changed issued source")
     before = Invoice.objects.values().get(pk=original.pk), list(original.invoiceline_set.values())

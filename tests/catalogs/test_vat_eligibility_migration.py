@@ -6,6 +6,7 @@ from types import SimpleNamespace
 import pytest
 from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
+from django.db.migrations.state import ProjectState
 
 
 @pytest.mark.django_db
@@ -35,10 +36,10 @@ def test_explicit_canonical_mapping_must_match_approved_classification(code, exp
         zahteva_polni_odbitek=restriction, velja_od=date(2020, 1, 1),
     )
     if valid:
-        migration.classify_verified_regimes(apps, SimpleNamespace(connection=connection))
+        migration.classify_verified_regimes(ProjectState.from_apps(apps).apps, SimpleNamespace(connection=connection))
     else:
         with pytest.raises(RuntimeError, match=code):
-            migration.classify_verified_regimes(apps, SimpleNamespace(connection=connection))
+            migration.classify_verified_regimes(ProjectState.from_apps(apps).apps, SimpleNamespace(connection=connection))
     queued.refresh_from_db()
     explicit.refresh_from_db()
     assert queued.zahteva_polni_odbitek is (not expected if valid else None)
@@ -58,7 +59,7 @@ def test_explicit_custom_migration_mapping_remains_configurable(restriction):
         zahteva_polni_odbitek=restriction, velja_od=date(2020, 1, 1),
     )
     migration = import_module("catalogs.migrations.0003_classify_verified_vat_regimes")
-    migration.classify_verified_regimes(apps, SimpleNamespace(connection=connection))
+    migration.classify_verified_regimes(ProjectState.from_apps(apps).apps, SimpleNamespace(connection=connection))
     row.refresh_from_db()
     assert row.zahteva_polni_odbitek is restriction
 
@@ -152,6 +153,6 @@ def test_modified_canonical_or_renamed_regime_requires_explicit_mapping(changes)
     from django.apps import apps
 
     with pytest.raises(RuntimeError, match=row.sifra):
-        migration.classify_verified_regimes(apps, SimpleNamespace(connection=connection))
+        migration.classify_verified_regimes(ProjectState.from_apps(apps).apps, SimpleNamespace(connection=connection))
     row.refresh_from_db()
     assert row.zahteva_polni_odbitek is changes.get("zahteva_polni_odbitek")

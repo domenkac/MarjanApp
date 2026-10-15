@@ -23,6 +23,7 @@ from invoicing.models import Invoice, InvoiceLine
 from tests.contracts.test_adjustment_write_safety import audits
 from tests.contracts.test_indeksacija import postavka  # noqa: F401
 from tests.contracts.test_late_adjustments import detect, event_for, issued_line
+from tests.financial_fixtures import save_financial_fixture
 
 
 def decide(row, action="approve", reason="", token=None, company_id=None):
@@ -145,7 +146,7 @@ def test_stale_evidence_cannot_be_approved(postavka, change):  # noqa: F811
     elif change == "vat":
         regime = postavka.vat_regime
         regime.klavzula = "Spremenjeno"
-        regime.save()
+        save_financial_fixture(regime)
     else:
         issued_line(postavka)
     with pytest.raises(ValidationError):

@@ -25,6 +25,7 @@ from rendering.contexts import (
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.setup_helpers import prepare_initial_setup
 
 VALID_PNG_LOGO = base64.b64decode(
@@ -286,7 +287,7 @@ def test_sprememba_zivega_vira_ne_spremeni_pdf_contexta(izdani_racun, vir):
         company = lease.unit.property.company
         company.naziv = "Novo podjetje"
         company.logotip = "nov-logo.png"
-        company.save(update_fields=["naziv", "logotip"])
+        save_financial_fixture(company, update_fields=["naziv", "logotip"])
     elif vir == "tenant":
         tenant = lease.tenant
         tenant.naziv = "Nov najemnik"
@@ -294,7 +295,7 @@ def test_sprememba_zivega_vira_ne_spremeni_pdf_contexta(izdani_racun, vir):
     elif vir == "vat_regime":
         regime = LeaseItem.objects.get(lease=lease).vat_regime
         regime.stopnja = Decimal("9.50")
-        regime.save(update_fields=["stopnja"])
+        save_financial_fixture(regime, update_fields=["stopnja"])
     else:
         signatory = Signatory.objects.get(company=izdani_racun.company)
         signatory.ime_priimek = "Nova podpisnica"

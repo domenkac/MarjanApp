@@ -5,6 +5,7 @@ from hashlib import sha256
 
 import pytest
 from django.core.files.base import ContentFile
+from django.db import models
 
 from catalogs.models import VatRegime
 from companies import services as company_services
@@ -27,6 +28,7 @@ from companies.services import (
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from contracts.services import odloci_o_fizicnem_izbrisu as odloci_o_izbrisu_pogodbe
 from invoicing.models import Invoice, InvoiceLine
+from tests.financial_fixtures import update_financial_fixture
 from tests.setup_helpers import approve_sample as _approve_sample
 
 PNG_1 = base64.b64decode(
@@ -160,9 +162,9 @@ def test_ddv_semantic_change_is_stale(confirmation_data, target, field, value):
     company = confirmation_data["company"]
     potrdi_ddv_nastavitve(company)
 
-    type(confirmation_data[target]).objects.filter(
+    models.QuerySet.update(type(confirmation_data[target]).objects.filter(
         pk=confirmation_data[target].pk
-    ).update(**{field: value})
+    ), **{field: value})
 
     assert veljavna_potrditev_ddv(company).stanje == "stale"
 
@@ -171,7 +173,7 @@ def test_ddv_allocation_change_is_stale(confirmation_data):
     company = confirmation_data["company"]
     potrdi_ddv_nastavitve(company)
 
-    LeaseItem.objects.filter(pk=confirmation_data["item"].pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=confirmation_data["item"].pk),
         vat_regime=confirmation_data["unused_regime"]
     )
 
@@ -182,7 +184,7 @@ def test_unused_regime_change_does_not_stale_ddv(confirmation_data):
     company = confirmation_data["company"]
     potrdi_ddv_nastavitve(company)
 
-    VatRegime.objects.filter(pk=confirmation_data["unused_regime"].pk).update(
+    update_financial_fixture(VatRegime.objects.filter(pk=confirmation_data["unused_regime"].pk),
         stopnja=Decimal("8.50")
     )
 
@@ -202,7 +204,7 @@ def test_non_vat_item_change_does_not_stale_ddv(confirmation_data, field, value)
     company = confirmation_data["company"]
     potrdi_ddv_nastavitve(company)
 
-    LeaseItem.objects.filter(pk=confirmation_data["item"].pk).update(**{field: value})
+    update_financial_fixture(LeaseItem.objects.filter(pk=confirmation_data["item"].pk), **{field: value})
 
     assert veljavna_potrditev_ddv(company).stanje == "valid"
 
@@ -210,9 +212,9 @@ def test_non_vat_item_change_does_not_stale_ddv(confirmation_data, field, value)
 def test_prior_ddv_state_becomes_valid_after_exact_restoration(confirmation_data):
     company = confirmation_data["company"]
     original = potrdi_ddv_nastavitve(company)
-    Company.objects.filter(pk=company.pk).update(ddv_zavezanec=False)
+    update_financial_fixture(Company.objects.filter(pk=company.pk), ddv_zavezanec=False)
     potrdi_ddv_nastavitve(company)
-    Company.objects.filter(pk=company.pk).update(ddv_zavezanec=True)
+    update_financial_fixture(Company.objects.filter(pk=company.pk), ddv_zavezanec=True)
 
     result = veljavna_potrditev_ddv(company)
 
@@ -265,9 +267,9 @@ def test_sample_semantic_change_is_stale(confirmation_data, target, field, value
     company = confirmation_data["company"]
     approve_sample(company, confirmation_data["lease"])
 
-    type(confirmation_data[target]).objects.filter(
+    models.QuerySet.update(type(confirmation_data[target]).objects.filter(
         pk=confirmation_data[target].pk
-    ).update(**{field: value})
+    ), **{field: value})
 
     assert veljavna_potrditev_vzorca(company).stanje == "stale"
 
@@ -337,7 +339,7 @@ def test_unrelated_lease_amount_does_not_stale_sample(confirmation_data):
     )
     approve_sample(company, selected_lease)
 
-    LeaseItem.objects.filter(pk=other_item.pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=other_item.pk),
         znesek_neto_mesecno=Decimal("60.00")
     )
 
@@ -393,9 +395,9 @@ def test_prior_sample_state_becomes_valid_after_exact_restoration(confirmation_d
     company = confirmation_data["company"]
     item = confirmation_data["item"]
     original = approve_sample(company, confirmation_data["lease"])
-    LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("120.00"))
+    update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), znesek_neto_mesecno=Decimal("120.00"))
     approve_sample(company, confirmation_data["lease"])
-    LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("100.00"))
+    update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), znesek_neto_mesecno=Decimal("100.00"))
 
     result = veljavna_potrditev_vzorca(company)
 

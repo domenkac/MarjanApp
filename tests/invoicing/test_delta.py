@@ -1,5 +1,6 @@
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
+from unittest.mock import patch
 
 from django.contrib.contenttypes.models import ContentType
 
@@ -7,6 +8,7 @@ from companies.services import potrdi_ddv_nastavitve
 from contracts.models import IndexationEvent, LeaseItem
 from contracts.services import rocno_popravi_postavko
 from core.models import AuditLogEntry
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     izracunaj_kandidata,
@@ -14,6 +16,7 @@ from invoicing.services import (
     primerjaj_delta_np,
     pripravi_osnutek_np,
 )
+from tests.financial_fixtures import save_financial_fixture
 from tests.invoicing.test_priprava_np import dodaj_postavko
 from tests.setup_helpers import approve_sample, prepare_initial_setup
 
@@ -53,7 +56,7 @@ def test_znesek_pojasnjen_z_indeksacijo(pogodba):
         nova_vrednost=Decimal("110.00"),
     )
     item.znesek_neto_mesecno = Decimal("110.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.prejsnji_racun_id == prejsnji.pk
     assert (rezultat.obstaja_razlika, rezultat.pojasnjena) == (True, True)
@@ -80,7 +83,7 @@ def test_znesek_pojasnjen_z_rocnim_popravkom(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     rocno_popravi_postavko(
-        item, razlog="Ročni popravek", znesek_neto_mesecno=Decimal("120.00")
+        item, source_fingerprint=record_edit_fingerprint(item), razlog="Ročni popravek", znesek_neto_mesecno=Decimal("120.00")
     )
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
@@ -94,22 +97,20 @@ def test_stara_revizija_ne_pojasni_razlike(pogodba):
     prejsnji = racun(pogodba, 1, potrdi=True)
     assert prejsnji.skupaj_z_ddv == Decimal("100.00")
 
-    revizija = AuditLogEntry.objects.create(
-        content_type=ContentType.objects.get_for_model(LeaseItem),
-        object_id=item.pk,
-        polje="znesek_neto_mesecno",
-        stara_vrednost="100.00",
-        nova_vrednost="120.00",
-        razlog="Stara sprememba",
-    )
-    AuditLogEntry.objects.filter(pk=revizija.pk).update(
-        created_at=datetime(2026, 1, 31, 12, tzinfo=UTC)
-    )
+    with patch("django.utils.timezone.now", return_value=datetime(2026, 1, 31, 12, tzinfo=UTC)):
+        revizija = AuditLogEntry.objects.create(
+            content_type=ContentType.objects.get_for_model(LeaseItem),
+            object_id=item.pk,
+            polje="znesek_neto_mesecno",
+            stara_vrednost="100.00",
+            nova_vrednost="120.00",
+            razlog="Stara sprememba",
+        )
     revizija.refresh_from_db()
     assert revizija.created_at.date() < prejsnji.datum_izdaje
 
     item.znesek_neto_mesecno = Decimal("120.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     osnutek = racun(pogodba, 2)
     assert InvoiceLine.objects.get(invoice=osnutek).skupaj == Decimal("120.00")
 
@@ -124,7 +125,7 @@ def test_znesek_brez_pojasnila(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     item.znesek_neto_mesecno = Decimal("120.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     osnutek = racun(pogodba, 2)
     rezultat = primerjaj_delta_np(osnutek)
     assert (rezultat.obstaja_razlika, rezultat.pojasnjena) == (True, False)
@@ -138,7 +139,7 @@ def test_preskocen_mesec_primerja_z_zadnjim_izdanim(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     item.znesek_neto_mesecno = Decimal("110.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     approve_sample(pogodba.unit.property.company, pogodba)
     prejsnji = racun(pogodba, 2, potrdi=True)
     rezultat = primerjaj_delta_np(racun(pogodba, 4))
@@ -174,7 +175,7 @@ def test_dve_postavki_razlaga_zadene_pravo(pogodba):
         nova_vrednost=Decimal("110.00"),
     )
     druga.znesek_neto_mesecno = Decimal("40.00")
-    druga.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(druga, update_fields=["znesek_neto_mesecno"])
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is False
     assert [(r.koda, r.lease_item_id) for r in rezultat.razlage] == [
@@ -186,10 +187,10 @@ def test_neostevilcen_osnutek_ni_referenca(pogodba):
     item = dodaj_postavko(pogodba)
     prejsnji = racun(pogodba, 1, potrdi=True)
     item.znesek_neto_mesecno = Decimal("120.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     racun(pogodba, 2)
     item.znesek_neto_mesecno = Decimal("100.00")
-    item.save(update_fields=["znesek_neto_mesecno"])
+    save_financial_fixture(item, update_fields=["znesek_neto_mesecno"])
     rezultat = primerjaj_delta_np(racun(pogodba, 3))
     assert rezultat.prejsnji_racun_id == prejsnji.pk
     assert (rezultat.obstaja_razlika, rezultat.pojasnjena) == (False, None)
@@ -201,7 +202,7 @@ def test_prenehanje_postavke_pojasni_razliko(pogodba):
     koncana = dodaj_postavko(pogodba, naziv="Parkirišče", znesek="30.00")
     racun(pogodba, 1, potrdi=True)
     koncana.datum_prenehanja_postavke = date(2026, 1, 31)
-    koncana.save(update_fields=["datum_prenehanja_postavke"])
+    save_financial_fixture(koncana, update_fields=["datum_prenehanja_postavke"])
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
     assert [(r.koda, r.lease_item_id) for r in rezultat.razlage] == [
@@ -213,7 +214,7 @@ def test_sorazmernost_ne_podvoji_delta_razlage(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     item.datum_prenehanja_postavke = date(2026, 2, 15)
-    item.save(update_fields=["datum_prenehanja_postavke"])
+    save_financial_fixture(item, update_fields=["datum_prenehanja_postavke"])
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True
     assert rezultat.razlage == ()
@@ -223,7 +224,7 @@ def test_sprememba_ddv_pojasni_razliko(pogodba):
     item = dodaj_postavko(pogodba)
     racun(pogodba, 1, potrdi=True)
     item.vat_regime.stopnja = Decimal("9.50")
-    item.vat_regime.save(update_fields=["stopnja"])
+    save_financial_fixture(item.vat_regime, update_fields=["stopnja"])
     potrdi_ddv_nastavitve(pogodba.unit.property.company)
     rezultat = primerjaj_delta_np(racun(pogodba, 2))
     assert rezultat.pojasnjena is True

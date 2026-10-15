@@ -20,6 +20,7 @@ from invoicing.models import (
     MonthlyCycle,
 )
 from invoicing.services import CALCULATION_SNAPSHOT_VERSION, _candidate_fingerprint
+from tests.financial_fixtures import update_financial_fixture
 
 
 @pytest.fixture
@@ -578,7 +579,7 @@ def test_non_issued_rows_use_frozen_user_and_system_reasons(company):
     system_lease, _candidate, _batch = _frozen_non_issue(
         company, system_reason="Ni obračunljivih postavk"
     )
-    Lease.objects.filter(pk__in=[user_lease.pk, system_lease.pk]).update(
+    update_financial_fixture(Lease.objects.filter(pk__in=[user_lease.pk, system_lease.pk]),
         oznaka_pogodbe="SPREMENJENO", status=Lease.Status.PRENEHALA
     )
     report = create_accountant_report(company=company, period=date(2026, 9, 1))
@@ -648,7 +649,7 @@ def test_report_snapshot_stays_historical_and_instance_operations_are_append_onl
         "vat_summary_group": "STANDARD",
         "vat_clause": "",
     }]
-    Company.objects.filter(pk=company.pk).update(naziv="Nova Alfa")
+    update_financial_fixture(Company.objects.filter(pk=company.pk), naziv="Nova Alfa")
     Invoice.objects.filter(pk=invoice.pk).update(prejemnik_naziv="Nov najemnik")
     InvoiceLine.objects.filter(invoice=invoice).update(osnova=Decimal("999.00"))
     report.refresh_from_db()
@@ -683,14 +684,21 @@ def test_live_tenant_lease_item_and_vat_changes_do_not_change_report(company):
     historical_regimes = before["issued_rows"][0]["vat_regimes"]
 
     Tenant.objects.filter(pk=lease.tenant_id).update(naziv="Nov živi najemnik")
-    Lease.objects.filter(pk=lease.pk).update(oznaka_pogodbe="NOVA")
-    LeaseItem.objects.filter(pk=item.pk).update(znesek_neto_mesecno=Decimal("999.00"))
-    VatRegime.objects.filter(pk=regime.pk).update(
-        nacin_obracuna="OPROSCENO",
+    update_financial_fixture(Lease.objects.filter(pk=lease.pk), oznaka_pogodbe="NOVA")
+    update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), znesek_neto_mesecno=Decimal("999.00"))
+    update_financial_fixture(VatRegime.objects.filter(pk=regime.pk),
         stopnja=Decimal("9.50"),
         rekapitulacijska_skupina="DRUGA",
         klavzula="Nova živa klavzula",
     )
+
+    replacement = VatRegime.objects.create(
+        zahteva_polni_odbitek=False, sifra="NEW_EXEMPT", naziv="New exemption",
+        nacin_obracuna="OPROSCENO", stopnja=Decimal("9.50"),
+        rekapitulacijska_skupina="DRUGA", klavzula="New clause",
+        velja_od=date(2026, 1, 1),
+    )
+    update_financial_fixture(LeaseItem.objects.filter(pk=item.pk), vat_regime=replacement)
 
     report.refresh_from_db()
     assert report.snapshot == before

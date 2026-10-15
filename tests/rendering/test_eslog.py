@@ -21,6 +21,7 @@ from rendering.eslog import (
     render_eslog,
     validiraj_eslog,
 )
+from tests.financial_fixtures import save_financial_fixture
 
 pytest_plugins = ["tests.rendering.test_contexts"]
 
@@ -166,16 +167,16 @@ def test_context_je_nespremenljiv_in_uporablja_samo_snapshote(izdani_racun):
     tenant.naziv = "Spremenjen kupec"
     tenant.save(update_fields=["naziv"])
     company.naziv = "Spremenjen prodajalec"
-    company.save(update_fields=["naziv"])
+    save_financial_fixture(company, update_fields=["naziv"])
     regime.eslog_koda = "E"
-    regime.save(update_fields=["eslog_koda"])
+    save_financial_fixture(regime, update_fields=["eslog_koda"])
     item.naziv_postavke = "Spremenjena postavka"
-    item.save(update_fields=["naziv_postavke"])
+    save_financial_fixture(item, update_fields=["naziv_postavke"])
     company.eslog_privzeti_neobvezni_segmenti = {
         "elektronski_naslov_kupca_vkljucen": True,
         "kontaktni_podatki_kupca_vkljuceni": False,
     }
-    company.save(update_fields=["eslog_privzeti_neobvezni_segmenti"])
+    save_financial_fixture(company, update_fields=["eslog_privzeti_neobvezni_segmenti"])
     tenant.eslog_neobvezni_segmenti_override = {
         "kontaktni_podatki_kupca_vkljuceni": True
     }
@@ -405,7 +406,7 @@ def test_partnerji_uporabljajo_snapshote_va_ahp_0199_in_drzavo(izdani_racun):
 
     izdani_racun.company.ddv_zavezanec = False
     izdani_racun.company.drzava_koda = "AT"
-    izdani_racun.company.save(update_fields=["ddv_zavezanec", "drzava_koda"])
+    save_financial_fixture(izdani_racun.company, update_fields=["ddv_zavezanec", "drzava_koda"])
     izdani_racun.lease.tenant.identificiran_za_ddv = False
     izdani_racun.lease.tenant.drzava_koda = "HR"
     izdani_racun.lease.tenant.save(

@@ -24,6 +24,7 @@ from tests.accounting_export.test_report_snapshot import (
 from tests.accounting_export.test_report_snapshot import (
     company as company,  # noqa: PLC0414
 )
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 pytestmark = pytest.mark.django_db
 AS_OF = date(2026, 10, 1)
@@ -107,7 +108,7 @@ def test_deadline_boundary(as_of, expected):
 
 def test_membership_is_historical(company):
     _ensure_completed_batch(company)
-    Company.objects.filter(pk=company.pk).update(aktivno=False, naziv="New name")
+    update_financial_fixture(Company.objects.filter(pk=company.pk), aktivno=False, naziv="New name")
     Company.objects.create(naziv="New active company", davcna_stevilka="87654321")
     result = state()
     assert result.ready
@@ -199,10 +200,10 @@ def test_unrelated_month_company_and_live_edits_do_not_stale(reported):
     _invoice(other, number="NP-00002", completed_evidence=False)
     lease = _lease(reported.company)
     lease.oznaka_pogodbe = "Edited contract"
-    lease.save()
+    save_financial_fixture(lease)
     lease.tenant.naziv = "Edited tenant"
     lease.tenant.save()
-    Company.objects.filter(pk=reported.company_id).update(naziv="Edited", ddv_zavezanec=False)
+    update_financial_fixture(Company.objects.filter(pk=reported.company_id), naziv="Edited", ddv_zavezanec=False)
     assert state().state == "ZAKLJUCENO"
 
 

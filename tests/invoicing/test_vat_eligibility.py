@@ -15,6 +15,7 @@ from companies.services import (
 from contracts.models import Lease, Tenant, Unit
 from contracts.services import izracunaj_postavko
 from contracts.vat_eligibility import preveri_upravicenost_prejemnika
+from core.services import record_edit_fingerprint
 from invoicing.models import Invoice, InvoiceLine, MonthlyCandidateReview
 from invoicing.services import (
     _candidate_fingerprint,
@@ -27,6 +28,7 @@ from invoicing.services import (
     spremeni_vrstico,
 )
 from tests.catalogs.test_models import podatki_rezima
+from tests.financial_fixtures import update_financial_fixture
 from tests.invoicing.test_preflight import (
     _calculate,
     _freeze_ready_package,
@@ -99,7 +101,7 @@ def test_canonical_configuration_model_and_form(code, expected, valid):
 def test_calculation_rejects_inconsistent_canonical_configuration(ready_company, code, restriction):
     data = ready_company
     _set_eligibility(data)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk),
         sifra=code, zahteva_polni_odbitek=restriction
     )
     data["item"].refresh_from_db()
@@ -120,7 +122,7 @@ def test_catalog_ui_rejects_inconsistent_canonical_configuration(client, code, r
 
 
 def _set_eligibility(data, *, restricted=True, tip="PRAVNA_OSEBA", registered=True, full=True):
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=restricted)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=restricted)
     Tenant.objects.filter(pk=data["tenant"].pk).update(
         tip=tip, identificiran_za_ddv=registered, ddv_zavezanec_s_polnim_odbitkom=full
     )
@@ -139,7 +141,7 @@ def test_assignment_and_preflight_matrix(ready_company, tip, registered, full):
     _set_eligibility(data, tip=tip, registered=registered, full=full)
     eligible = tip == "PRAVNA_OSEBA" and registered and full
     create = LeaseItemCreateForm(item_data(data["regime"]), lease=data["lease"])
-    edit = LeaseItemDetailsForm(item_data(data["regime"]), instance=data["item"])
+    edit = LeaseItemDetailsForm(item_data(data["regime"], edit_fingerprint=record_edit_fingerprint(data["item"]), razlog="Popravek"), instance=data["item"])
     assert create.is_valid() is eligible
     assert edit.is_valid() is eligible
     if not eligible:
@@ -163,7 +165,7 @@ def test_assignment_and_preflight_matrix(ready_company, tip, registered, full):
 def test_standard_taxable_items_allow_ineligible_recipient(ready_company, unit_type):
     data = ready_company
     _set_eligibility(data, restricted=False, tip="FIZICNA_OSEBA", registered=False, full=False)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(sifra="OBDAVCENO_STANDARD")
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), sifra="OBDAVCENO_STANDARD")
     Unit.objects.filter(pk=data["unit"].pk).update(tip_enote=unit_type)
     data["item"].refresh_from_db()
     data["item"].full_clean()
@@ -215,7 +217,7 @@ def test_custom_regime_explicit_yes_no_is_saved(choice, expected):
 def test_reference_requirement_is_independent(ready_company):
     data = ready_company
     _set_eligibility(data, restricted=False, registered=False, full=False)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_referenco=True)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_referenco=True)
     data["item"].refresh_from_db()
     with pytest.raises(ValidationError) as exc:
         data["item"].full_clean()
@@ -317,15 +319,15 @@ def test_frozen_evidence_is_immutable_and_retry_consumes_no_number(ready_company
     _set_eligibility(data)
     candidate, _review = _freeze_ready_package(data)
     Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=None)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=None)
     blocked = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert not blocked["ok"] and not Invoice.objects.exists()
     assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == 0
     Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=True)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=True)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=True)
     first = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=False)
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=None)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=None)
     second = izdaj_zamrznjeni_mesecni_paket(data["cycle"])[0]
     assert first["ok"] and second["ok"] and second["reused"]
     invoice = Invoice.objects.get()
@@ -341,7 +343,7 @@ def test_frozen_evidence_is_immutable_and_retry_consumes_no_number(ready_company
 def test_eligibility_change_changes_candidate_and_confirmation_fingerprints(ready_company):
     data = ready_company
     before = _calculate(data)[0]["candidate_fingerprint"]
-    VatRegime.objects.filter(pk=data["regime"].pk).update(zahteva_polni_odbitek=True)
+    update_financial_fixture(VatRegime.objects.filter(pk=data["regime"].pk), zahteva_polni_odbitek=True)
     Tenant.objects.filter(pk=data["tenant"].pk).update(ddv_zavezanec_s_polnim_odbitkom=True)
     assert veljavna_potrditev_ddv(data["company"]).stanje == "stale"
     potrdi_ddv_nastavitve(data["company"])

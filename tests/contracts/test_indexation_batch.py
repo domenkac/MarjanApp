@@ -31,6 +31,7 @@ from contracts.services import izracunaj_postavko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 from tests.contracts.test_indeksacija import postavka, racun_s_postavkami  # noqa: F401
+from tests.financial_fixtures import save_financial_fixture, update_financial_fixture
 
 
 def batch_for(item, value="110.000"):
@@ -100,7 +101,7 @@ def test_automatic_skipped_decisions(
     clause,
     text,
 ):
-    Lease.objects.filter(pk=postavka.lease_id).update(
+    update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
         ima_klavzulo_indeksacije=clause,
         tip_pogoja_indeksacije=condition,
         prag_spremembe_odstotek=Decimal(threshold) if threshold else None,
@@ -165,7 +166,7 @@ def test_eligible_deselection_remains_pending_until_justified_exclusion(postavka
 def test_source_changes_invalidate_preview(postavka, change):  # noqa: F811
     batch = batch_for(postavka)
     if change == "rent":
-        LeaseItem.objects.filter(pk=postavka.pk).update(
+        update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk),
             znesek_neto_mesecno=Decimal(120)
         )
     elif change == "tenant":
@@ -173,7 +174,7 @@ def test_source_changes_invalidate_preview(postavka, change):  # noqa: F811
         tenant.naziv = "Spremenjen najemnik"
         tenant.save()
     elif change == "clause":
-        Lease.objects.filter(pk=postavka.lease_id).update(
+        update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
             ima_klavzulo_indeksacije=False
         )
     elif change == "new_item":
@@ -187,7 +188,7 @@ def test_source_changes_invalidate_preview(postavka, change):  # noqa: F811
     elif change == "vat":
         regime = postavka.vat_regime
         regime.stopnja = Decimal("9.50")
-        regime.save()
+        save_financial_fixture(regime)
     elif change == "freeze":
         cycle = MonthlyCycle.objects.create(
             obdobje=date(2026, 2, 1), datum_izdaje=date(2026, 2, 1),
@@ -220,7 +221,7 @@ def test_five_company_isolation(postavka):  # noqa: F811
         company.pk = None
         company.naziv = f"Podjetje {number}"
         company.davcna_stevilka = f"1501255{number}"
-        company.save()
+        save_financial_fixture(company)
         companies.append(company)
         prop = Property.objects.create(
             company=company, naziv="Stavba", naslov="Ulica 1"
@@ -229,11 +230,11 @@ def test_five_company_isolation(postavka):  # noqa: F811
         lease = Lease.objects.get(pk=postavka.lease_id)
         lease.pk = None
         lease.unit = unit
-        lease.save()
+        save_financial_fixture(lease)
         item = LeaseItem.objects.get(pk=postavka.pk)
         item.pk = None
         item.lease = lease
-        item.save()
+        save_financial_fixture(item)
     batches = [create_batch(company.pk, 2025, Decimal(110 + number)) for number, company in enumerate(companies)]
     assert all(batch.decisions.count() == 1 for batch in batches)
     with pytest.raises(IndexationBatch.DoesNotExist):
@@ -304,7 +305,7 @@ def test_audit_failure_rolls_back_entire_batch(postavka, monkeypatch, failure_nu
 
 
 def test_missing_historical_rent_is_visible_and_blocked(postavka):  # noqa: F811
-    LeaseItem.objects.filter(pk=postavka.pk).update(
+    update_financial_fixture(LeaseItem.objects.filter(pk=postavka.pk),
         referencna_najemnina=None, datum_referencne_najemnine=None
     )
     batch = batch_for(postavka)
@@ -459,7 +460,7 @@ def test_excluded_decision_audit_and_rollback(postavka, monkeypatch):  # noqa: F
 
 def test_missing_items_are_visible(postavka):  # noqa: F811
     postavka.arhivirana = True
-    postavka.save()
+    save_financial_fixture(postavka)
     batch = batch_for(postavka)
     row = batch.decisions.get()
     assert row.lease_item_id is None and row.proposal["blocked"]
@@ -489,7 +490,7 @@ def additional_lease(item, clause=True):
     lease.oznaka_pogodbe = "P-2"
     lease.ima_klavzulo_indeksacije = clause
     lease.tip_pogoja_indeksacije = "VEDNO" if clause else ""
-    lease.save()
+    save_financial_fixture(lease)
     return additional_item(item, lease)
 
 
@@ -531,7 +532,7 @@ def test_confirmation_rejects_inconsistent_item_exclusions(postavka):  # noqa: F
     (date(2026, 1, 31), False), (date(2026, 2, 1), True), (date(2026, 2, 14), True),
 ])
 def test_terminating_lease_uses_effective_billing_validity(postavka, end, included):  # noqa: F811
-    Lease.objects.filter(pk=postavka.lease_id).update(
+    update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
         status=Lease.Status.ODPOVEDANA, datum_odpovedi=date(2025, 12, 1), datum_prenehanja=end,
     )
     batch = batch_for(postavka)
@@ -545,14 +546,14 @@ def test_terminating_lease_uses_effective_billing_validity(postavka, end, includ
 
 
 def test_active_fixed_term_ended_before_effective_date_is_excluded(postavka):  # noqa: F811
-    Lease.objects.filter(pk=postavka.lease_id).update(
+    update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
         tip_trajanja=Lease.TipTrajanja.DOLOCEN_CAS, datum_konca=date(2026, 1, 31),
     )
     assert not batch_for(postavka).decisions.exists()
 
 
 def test_terminating_lease_preserves_indexed_proration(postavka):  # noqa: F811
-    Lease.objects.filter(pk=postavka.lease_id).update(
+    update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id),
         status=Lease.Status.ODPOVEDANA, datum_odpovedi=date(2025, 12, 1),
         datum_prenehanja=date(2026, 2, 14),
     )
@@ -584,7 +585,7 @@ def test_published_index_conflict_is_scoped_to_index_year(postavka):  # noqa: F8
 @pytest.mark.parametrize("outcome", ["APPROVED", "EXCLUDED", "SKIPPED"])
 def test_conflicting_index_values_block_without_changing_history(postavka, outcome):  # noqa: F811
     if outcome == "SKIPPED":
-        Lease.objects.filter(pk=postavka.lease_id).update(ima_klavzulo_indeksacije=False, tip_pogoja_indeksacije="")
+        update_financial_fixture(Lease.objects.filter(pk=postavka.lease_id), ima_klavzulo_indeksacije=False, tip_pogoja_indeksacije="")
     racun_s_postavkami(postavka, mesec=1)
     cycle = MonthlyCycle.objects.create(
         obdobje=date(2026, 1, 1), datum_izdaje=date(2026, 1, 1), trenutni_korak=MonthlyCycle.Korak.POTRDITEV_PAKETA,

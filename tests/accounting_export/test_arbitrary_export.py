@@ -25,6 +25,7 @@ from tests.accounting_export.test_report_snapshot import (
     company as company,  # noqa: PLC0414
 )
 from tests.accounting_export.test_task_state import forbid_side_effects
+from tests.financial_fixtures import update_financial_fixture
 
 pytestmark = pytest.mark.django_db
 GENERATED_AT = datetime(2026, 10, 13, 0, 30, tzinfo=UTC)
@@ -129,7 +130,7 @@ def test_inactive_and_historical_identity_isolated_with_shared_local_timestamp(c
     invoice(company, issued=date(2026, 9, 15), izdajatelj_naziv="Živa Alfa d.o.o.")
     invoice(other, number="ST-2", issued=date(2026, 10, 12), izdajatelj_naziv="Stara Beta",
             izdajatelj_davcna_stevilka="87654321", izdajatelj_maticna_stevilka="9999999000")
-    Company.objects.filter(pk=company.pk).update(naziv="Changed", davcna_stevilka="00000000")
+    update_financial_fixture(Company.objects.filter(pk=company.pk), naziv="Changed", davcna_stevilka="00000000")
     with timezone.override("Europe/Ljubljana"):
         result = prepare([company, other, company], generated_at=datetime(2026, 10, 12, 22, 30, tzinfo=UTC))
     assert len(result.companies) == 2

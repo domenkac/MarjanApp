@@ -26,6 +26,7 @@ from delivery.services import (
 from delivery.transport import SmtpConfig, SmtpSecurity
 from invoicing.models import Invoice, MonthlyCycle
 from tests.accounting_export.test_csv_renderer import report
+from tests.financial_fixtures import update_financial_fixture
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -78,7 +79,7 @@ def test_preparation_reload_history_and_frozen_email(archived, tmp_path):
     assert "Živa Alfa d.o.o." in attempt.body and "julij" in attempt.body and "2026" in attempt.body
     assert attempt.attachment_filename == expected_filename
     assert attempt.attachment_checksum == hashlib.sha256(expected_csv).hexdigest()
-    Company.objects.filter(pk=archived.company_id).update(
+    update_financial_fixture(Company.objects.filter(pk=archived.company_id),
         naziv="Edited", email_posiljatelj="new@example.com", email_racunovodja="new-to@example.com",
     )
     attempt.sender = "caller@example.com"
@@ -125,7 +126,7 @@ def test_unsaved_and_duplicate(archived, report, tmp_path, attempt):
 
 @pytest.mark.parametrize("field", ["email_posiljatelj", "email_racunovodja"])
 def test_invalid_operational_address(archived, tmp_path, field):
-    Company.objects.filter(pk=archived.company_id).update(**{field: "not an email"})
+    update_financial_fixture(Company.objects.filter(pk=archived.company_id), **{field: "not an email"})
     with pytest.raises(ValidationError):
         prepare_accountant_report_delivery(archived, local_root=tmp_path)
     assert not Attempt.objects.exists()
