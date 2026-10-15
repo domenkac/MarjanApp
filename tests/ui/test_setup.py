@@ -63,7 +63,7 @@ def test_new_install_has_all_steps_missing_and_create_links(client):
     assert reverse("ui:podjetje_novo") in content
     assert SetupNavigation.objects.count() == 1
     assert not Company.objects.exists()
-    assert URL in client.get("/").content.decode()
+    assert client.get("/").url == URL
 
 
 def test_missing_selection_does_not_advance(client):

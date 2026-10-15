@@ -7,6 +7,12 @@ from companies.models import Company
 from invoicing.models import Invoice, MonthlyCycle
 
 
+@pytest.fixture(autouse=True)
+def completed_setup_for_dashboard_rendering(monkeypatch):
+    # These tests cover dashboard presentation; routing has separate integration tests.
+    monkeypatch.setattr("ui.views.initial_setup_completed", lambda: True)
+
+
 @pytest.mark.django_db
 def test_prazna_nadzorna_plosca(client):
     response = client.get("/")

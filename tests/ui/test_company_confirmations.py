@@ -19,7 +19,7 @@ from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
 from invoicing.models import Invoice, InvoiceLine, MonthlyBatch, MonthlyCycle
 from tests.business_fixtures import update_business_records
 from tests.financial_fixtures import save_financial_fixture
-from tests.setup_helpers import approve_sample
+from tests.setup_helpers import prepare_initial_setup
 
 PNG = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg=="
@@ -257,8 +257,7 @@ def test_sample_post_is_immutable_safe_and_errors_are_controlled(client, confirm
 
 def test_stale_states_and_dashboard_tasks(client, confirmation_ui_data):
     data = confirmation_ui_data
-    potrdi_ddv_nastavitve(data.company)
-    approve_sample(data.company, data.lease)
+    prepare_initial_setup(data.company, data.lease)
     assert "Potrebne potrditve" not in client.get("/").content.decode()
 
     data.regime.stopnja = Decimal("9.50")

@@ -25,6 +25,11 @@ from tests.accounting_export.test_task_state import (
 pytestmark = pytest.mark.django_db
 
 
+@pytest.fixture(autouse=True)
+def completed_setup_for_dashboard_rendering(monkeypatch):
+    monkeypatch.setattr("ui.views.initial_setup_completed", lambda: True)
+
+
 @pytest.mark.parametrize("expected,label", [
     ("ODPRTO", "Odprto"), ("DELNO", "Delno"),
     ("OPOZORILO", "Opozorilo"), ("ZASTARELO", "Zastarelo"),

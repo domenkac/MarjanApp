@@ -261,7 +261,7 @@ def first_run_setup(request):
         except ValidationError as error:
             action_errors = error.messages
         else:
-            return redirect("ui:first_run_setup")
+            return redirect("ui:dashboard")
     if step in {"company", "property", "unit", "tenant", "lease"}:
         form = SetupSelectionForm(
             request.POST

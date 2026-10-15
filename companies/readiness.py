@@ -318,18 +318,23 @@ def complete_initial_setup():
     return completion
 
 
-def require_issuance_readiness(company, issue_date, *, tip=None):
-    """Called inside SQLite IMMEDIATE at actual allocation; issued retries skip it."""
+def initial_setup_completed():
+    """Verify durable completion without rechecking mutable issuer readiness."""
     completion = InitialSetupCompletion.objects.filter(pk=1).first()
-    if (
-        completion is None
-        or not AuditLogEntry.objects.filter(
+    return (
+        completion is not None
+        and AuditLogEntry.objects.filter(
             content_type=ContentType.objects.get_for_model(InitialSetupCompletion),
             object_id=completion.pk,
             polje="initial_setup",
             nova_vrednost=_kanonicni_fingerprint(completion.evidence),
         ).exists()
-    ):
+    )
+
+
+def require_issuance_readiness(company, issue_date, *, tip=None):
+    """Called inside SQLite IMMEDIATE at actual allocation; issued retries skip it."""
+    if not initial_setup_completed():
         raise ValidationError(
             "Začetna nastavitev še ni zaključena. Produkcijska izdaja je blokirana."
         )

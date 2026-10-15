@@ -38,6 +38,7 @@ from catalogs.services import (
     ponovno_aktiviraj_storitev,
 )
 from companies.models import Company, Signatory
+from companies.readiness import initial_setup_completed
 from companies.services import (
     AssetPotrditveSpremenjen,
     arhiviraj_poslovni_zapis,
@@ -1111,6 +1112,8 @@ def podpisnik_detail(request, signatory_id):
 
 @require_GET
 def dashboard(request):
+    if not initial_setup_completed():
+        return redirect("ui:first_run_setup")
     aktivni_cikel = nalozi_aktivni_mesecni_cikel()
     zadnji_zakljuceni_cikel, zadnji_zakljuceni_rezultat = (
         nalozi_zadnji_zakljuceni_mesecni_rezultat()

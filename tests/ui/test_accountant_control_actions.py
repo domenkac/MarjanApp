@@ -22,6 +22,11 @@ from tests.accounting_export.test_workflow import setup as setup  # noqa: PLC041
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
+@pytest.fixture(autouse=True)
+def completed_setup_for_dashboard_rendering(monkeypatch):
+    monkeypatch.setattr("ui.views.initial_setup_completed", lambda: True)
+
+
 @pytest.fixture
 def ui_setup(setup, monkeypatch):
     from datetime import UTC, datetime
