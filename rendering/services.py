@@ -64,7 +64,7 @@ class DdvRekapitulacija:
 
 
 _PREDLOGA = Path(__file__).parent / "templates" / "rendering" / "racun.html"
-_PREDLOGE = {"1": _PREDLOGA}
+_PREDLOGE = {"1": _PREDLOGA, "2-st": _PREDLOGA.with_name("racun_st_v2.html")}
 _ENGINE = Engine(dirs=[str(_PREDLOGA.parent)])
 
 
@@ -135,8 +135,8 @@ def _klavzule(context: PdfContext) -> tuple[str, ...]:
         dict.fromkeys(
             vrstica.ddv_klavzula
             for vrstica in context.vrstice
-            if vrstica.ddv_nacin_obracuna
-            in (VatRegime.NacinObracuna.OPROSCENO, VatRegime.NacinObracuna.OBRNJENA_DAVCNA)
+            if (context.pdf_template_version == "2-st" or vrstica.ddv_nacin_obracuna
+                in (VatRegime.NacinObracuna.OPROSCENO, VatRegime.NacinObracuna.OBRNJENA_DAVCNA))
             and vrstica.ddv_klavzula
         )
     )
@@ -157,7 +157,21 @@ def pripravi_html(context: PdfContext) -> str:
         "datum_izdaje": _datum(context.datum_izdaje),
         "obdobje": f"{_datum(context.obdobje_od)} \u2013 {_datum(context.obdobje_do)}",
         "rok_placila": _datum(context.rok_placila) if context.rok_placila else None,
-        "vrstice": tuple({"opis": v.opis, "osnova": _znesek(v.osnova), "ddv_stopnja": _znesek(v.ddv_stopnja), "ddv_znesek": _znesek(v.ddv_znesek), "skupaj": _znesek(v.skupaj)} for v in context.vrstice),
+        "vrstice": tuple({
+            "opis": v.opis, "osnova": _znesek(v.osnova),
+            "ddv_stopnja": _znesek(v.ddv_stopnja), "ddv_znesek": _znesek(v.ddv_znesek),
+            "obracunana_ddv_stopnja": (
+                _znesek(v.ddv_stopnja)
+                if v.ddv_nacin_obracuna == VatRegime.NacinObracuna.OBDAVCENO else "—"
+            ),
+            "ddv_obravnava": (
+                dict(VatRegime.NacinObracuna.choices).get(v.ddv_nacin_obracuna, "")
+                if v.ddv_nacin_obracuna != VatRegime.NacinObracuna.OBDAVCENO else ""
+            ),
+            "skupaj": _znesek(v.skupaj), "enota_mere": v.enota_mere,
+            "referenca_listine": v.referenca_listine,
+            "datum_reference": _datum(v.datum_reference) if v.datum_reference else None,
+        } for v in context.vrstice),
         "rekapitulacija": tuple({"oznaka": v.oznaka, "osnova": _znesek(v.osnova), "ddv": _znesek(v.ddv)} for v in sestavi_ddv_rekapitulacijo(context)),
         "klavzule": _klavzule(context),
         "osnova_skupaj": _znesek(context.osnova_skupaj),
@@ -354,6 +368,8 @@ def render_pdf(invoice: Invoice) -> PdfRenderRezultat:
     svezi = Invoice.objects.filter(pk=getattr(invoice, "pk", None)).first()
     if svezi is None:
         pripravi_pdf_context(invoice)
+    if svezi.document_type == Invoice.DocumentType.ST and transaction.get_connection().in_atomic_block:
+        raise PdfRenderNapaka("PDF_TRANSAKCIJA", "ST PDF mora nastati zunaj transakcije.")
     obstojeci = _preveri_obstojeci_artifact(svezi)
     if obstojeci is not None:
         return obstojeci

@@ -86,6 +86,8 @@ if "MARJAN_DB_PATH" in os.environ:
     )
 
 PDF_TEMPLATE_VERSION = "1"
+# Standalone ST adds unit/reference details without changing approved NP samples.
+ST_PDF_TEMPLATE_VERSION = "2-st"
 RENDERING_ROOT = _persistent_path("MARJAN_RENDERING_ROOT", BASE_DIR / "rendered")
 FEATURE_ESLOG = False
 STATIC_URL = "static/"

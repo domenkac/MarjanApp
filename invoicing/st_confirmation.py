@@ -1,4 +1,4 @@
-"""Standalone ST domain confirmation; PDF, delivery and archive are not implemented.
+"""Standalone ST domain confirmation; rendering is a separate explicit operation.
 
 No UI calls these services. Review evidence is an immutable audit entry, bound to
 the saved draft and its material sources. Every repeated confirmation is rejected.
@@ -47,6 +47,7 @@ _VAT = {
 }
 _REVIEW_FIELD = "st_individual_review_v1"
 _VAT_SOURCE_FIELD = "st_vat_source_v1"
+_PDF_REFERENCES_FIELD = "st_pdf_references_v1"
 
 
 def _values(record):
@@ -193,8 +194,13 @@ def _state(osnutek):
         "logo": [invoice.company.logotip.name, invoice.company.logotip_checksum],
         "signatory": _values(signatory) | {"podpis_slika": signatory.podpis_slika.name},
         "regimes": regimes, "template": settings.PDF_TEMPLATE_VERSION,
+        "st_template": settings.ST_PDF_TEMPLATE_VERSION,
     })
-    return invoice, fingerprint, signatory, final
+    references = {
+        str(line.pk): {"regime": line.ddv_rezim_sifra, "required": regime["zahteva_referenco"]}
+        for line, regime in zip(lines, regimes, strict=True)
+    }
+    return invoice, fingerprint, signatory, final, references
 
 
 def fingerprint_osnutka_st(osnutek: Invoice) -> str:
@@ -227,7 +233,7 @@ def preglej_osnutek_st(
     _outside_transaction()
     if individual_review is not True:
         raise ValidationError("Obvezen je izrecen posamični pregled ST.")
-    invoice, fingerprint, signatory, _ = _state(osnutek)
+    invoice, fingerprint, signatory, _, _ = _state(osnutek)
     if fingerprint != expected_fingerprint:
         raise ValidationError("Pregled ST je zastarel.")
     assets = _assets(invoice, signatory)
@@ -242,7 +248,7 @@ def preglej_osnutek_st(
 
 
 def _review(osnutek, pregled):
-    invoice, fingerprint, signatory, final = _state(osnutek)
+    invoice, fingerprint, signatory, final, references = _state(osnutek)
     entry = AuditLogEntry.objects.filter(
         pk=getattr(pregled, "pk", None),
         content_type=ContentType.objects.get_for_model(Invoice),
@@ -254,7 +260,32 @@ def _review(osnutek, pregled):
             raise ValueError
     except (ValueError, TypeError, AttributeError) as error:
         raise ValidationError("Posamični pregled ST manjka ali je zastarel.") from error
-    return invoice, signatory, final, evidence["assets"]
+    return invoice, signatory, final, evidence["assets"], references
+
+
+def preveri_st_pdf_referencne_zahteve(invoice: Invoice, lines) -> None:
+    """Read confirmation evidence only; never recover requirements from live VAT data."""
+    try:
+        entry = AuditLogEntry.objects.get(
+            content_type=ContentType.objects.get_for_model(Invoice), object_id=invoice.pk,
+            polje=_PDF_REFERENCES_FIELD,
+        )
+        evidence = json.loads(entry.nova_vrednost)
+        if (evidence["number"] != invoice.stevilka
+                or evidence["template"] != invoice.pdf_template_version
+                or not isinstance(evidence["lines"], dict)
+                or set(evidence["lines"]) != {str(line.pk) for line in lines}):
+            raise ValueError
+        for line in lines:
+            requirement = evidence["lines"][str(line.pk)]
+            if (requirement["regime"] != line.ddv_rezim_sifra
+                    or type(requirement["required"]) is not bool
+                    or (requirement["required"] and (
+                        not line.referenca_listine.strip() or line.datum_reference is None))):
+                raise ValueError
+    except (AuditLogEntry.DoesNotExist, AuditLogEntry.MultipleObjectsReturned,
+            KeyError, TypeError, ValueError, AttributeError) as error:
+        raise ValidationError("Nespremenljivo dokazilo DDV referenc ST manjka ali ni skladno.") from error
 
 
 def potrdi_osnutek_st(osnutek: Invoice, *, pregled: AuditLogEntry | None = None) -> Invoice:
@@ -264,16 +295,16 @@ def potrdi_osnutek_st(osnutek: Invoice, *, pregled: AuditLogEntry | None = None)
     reread revalidates the review, snapshots and every production readiness gate.
     """
     _outside_transaction()
-    invoice, signatory, _, assets = _review(osnutek, pregled)
+    invoice, signatory, _, assets, _ = _review(osnutek, pregled)
     if _assets(invoice, signatory) != assets:
         raise ValidationError("Asseti pregleda ST so zastareli.")
     with transaction.atomic():
-        invoice, signatory, final, reviewed_assets = _review(osnutek, pregled)
+        invoice, signatory, final, reviewed_assets, references = _review(osnutek, pregled)
         if reviewed_assets != assets:
             raise ValidationError("Pregled ST je zastarel.")
         invoice.izdajatelj_logotip_slika_pot = assets[invoice.company.logotip.name]
         invoice.izdajatelj_podpisnik_slika_pot = assets[signatory.podpis_slika.name]
-        invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
+        invoice.pdf_template_version = settings.ST_PDF_TEMPLATE_VERSION
         for field, value in final.items():
             setattr(invoice, field, value)
         invoice.full_clean()
@@ -286,4 +317,15 @@ def potrdi_osnutek_st(osnutek: Invoice, *, pregled: AuditLogEntry | None = None)
             *final, "stevilka", "status", "izdajatelj_logotip_slika_pot",
             "izdajatelj_podpisnik_slika_pot", "pdf_template_version",
         ])
+        # _review verified these flags against the immutable VAT source hash and
+        # individual review in this transaction. Publish evidence with the number;
+        # a failure rolls back both. Issued financial snapshots remain untouched.
+        AuditLogEntry.objects.create(
+            content_type=ContentType.objects.get_for_model(Invoice), object_id=invoice.pk,
+            polje=_PDF_REFERENCES_FIELD, nova_vrednost=json.dumps({
+                "number": invoice.stevilka, "template": invoice.pdf_template_version,
+                "lines": references,
+            }),
+            razlog="Nespremenljive zahteve DDV referenc ob potrditvi ST.",
+        )
         return invoice

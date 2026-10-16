@@ -1,17 +1,26 @@
 import hashlib
+import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
 
 from django.conf import settings
-from django.core.exceptions import SuspiciousFileOperation
+from django.core.exceptions import SuspiciousFileOperation, ValidationError
 from django.core.files.storage import default_storage
 
 from catalogs.models import VatRegime
+from companies.models import Company
 from companies.services import izberi_veljavnega_podpisnika
-from contracts.models import Lease
+from contracts.models import Lease, Tenant
+from contracts.vat_eligibility import preveri_upravicenost_prejemnika
+from core.pravila import izracunaj_iz_bruto
 from invoicing.models import Invoice, InvoiceLine
-from invoicing.services import izracunaj_kandidata
+from invoicing.services import (
+    _company_validation_issues,
+    _tenant_validation_issues,
+    izracunaj_kandidata,
+)
+from invoicing.st_confirmation import preveri_st_pdf_referencne_zahteve
 
 
 class PdfRenderNapaka(ValueError):
@@ -32,6 +41,9 @@ class PdfVrstica:
     ddv_klavzula: str
     ddv_rekap_skupina: str
     je_sorazmerno: bool
+    enota_mere: str = ""
+    referenca_listine: str = ""
+    datum_reference: date | None = None
 
 
 class EslogRenderNapaka(ValueError):
@@ -281,7 +293,76 @@ def _vrstica_context(vrstica: InvoiceLine) -> PdfVrstica:
         ddv_klavzula=vrstica.ddv_klavzula,
         ddv_rekap_skupina=vrstica.ddv_rekap_skupina,
         je_sorazmerno=vrstica.je_sorazmerno,
+        enota_mere=vrstica.enota_mere,
+        referenca_listine=vrstica.referenca_listine,
+        datum_reference=vrstica.datum_reference,
     )
+
+
+def _preveri_st_posnetek(invoice: Invoice, vrstice: tuple[InvoiceLine, ...]) -> None:
+    """Validate confirmed ST values only; never resolve current catalogs or leases."""
+    izdani_statusi = {
+        Invoice.Status.IZBRAN_ZA_POSILJANJE, Invoice.Status.POSLAN,
+        Invoice.Status.NAPAKA, Invoice.Status.REZULTAT_NI_ZNAN,
+        Invoice.Status.STORNIRAN, Invoice.Status.POPRAVLJEN,
+    }
+    stevilka = re.fullmatch(r"ST-([0-9]{4})-([0-9]{4,})", invoice.stevilka)
+    if (invoice.status not in izdani_statusi or stevilka is None
+            or int(stevilka[1]) != invoice.datum_izdaje.year
+            or int(stevilka[2]) < 1
+            or stevilka[2] != f"{int(stevilka[2]):04d}"):
+        raise PdfRenderNapaka("ST_NEPOTRJEN", "ST nima veljavne potrditve ali številke.")
+    if (invoice.obdobje_od > invoice.obdobje_do
+            or invoice.rok_placila < invoice.datum_izdaje):
+        raise PdfRenderNapaka("SNAPSHOT_NEVELJAVEN", "Datumi ST niso veljavni.")
+    _preveri_polja(invoice, ("prejemnik_tip", "prejemnik_drzava_koda", "izdajatelj_drzava_koda"))
+    if (invoice.prejemnik_tip not in {"PRAVNA_OSEBA", "FIZICNA_OSEBA"}
+            or type(invoice.prejemnik_identificiran_za_ddv) is not bool
+            or type(invoice.prejemnik_polni_odbitek) is not bool
+            or type(invoice.izdajatelj_identificiran_za_ddv) is not bool):
+        raise PdfRenderNapaka("SNAPSHOT_NEVELJAVEN", "Davčni posnetek ST ni veljaven.")
+    izdajatelj = Company(**{
+        polje: getattr(invoice, f"izdajatelj_{polje}")
+        for polje in ("naziv", "naslov", "davcna_stevilka", "maticna_stevilka", "trr", "drzava_koda")
+    })
+    prejemnik = Tenant(
+        **{polje: getattr(invoice, f"prejemnik_{polje}") for polje in (
+            "tip", "naziv", "naslov", "drzava_koda", "davcna_stevilka",
+            "maticna_stevilka", "ddv_identifikacijska_stevilka", "identificiran_za_ddv",
+        )},
+        ddv_zavezanec_s_polnim_odbitkom=invoice.prejemnik_polni_odbitek,
+    )
+    if _company_validation_issues(izdajatelj) or _tenant_validation_issues(prejemnik):
+        raise PdfRenderNapaka("SNAPSHOT_NEVELJAVEN", "Posnetek izdajatelja ali prejemnika ST ni veljaven.")
+    if invoice.pdf_template_version == "2-st":
+        try:
+            preveri_st_pdf_referencne_zahteve(invoice, vrstice)
+        except ValidationError as napaka:
+            raise PdfRenderNapaka("ST_REFERENCA_NEVELJAVNA", str(napaka)) from napaka
+    preveri_nespremenljiv_asset(invoice.izdajatelj_logotip_slika_pot)
+    preveri_nespremenljiv_asset(invoice.izdajatelj_podpisnik_slika_pot)
+    for vrstica in vrstice:
+        _preveri_polja(vrstica, ("enota_mere", "ddv_rezim_sifra"))
+        if (vrstica.ddv_nacin_obracuna not in VatRegime.NacinObracuna.values
+                or type(vrstica.ddv_zahteva_polni_odbitek) is not bool
+                or bool(vrstica.referenca_listine.strip()) != (vrstica.datum_reference is not None)):
+            raise PdfRenderNapaka("SNAPSHOT_NEVELJAVEN", "Posnetek ST vrstice ni veljaven.")
+        try:
+            preveri_upravicenost_prejemnika(
+                sifra=vrstica.ddv_rezim_sifra, zahteva_polni_odbitek=vrstica.ddv_zahteva_polni_odbitek,
+                tip=invoice.prejemnik_tip, identificiran_za_ddv=invoice.prejemnik_identificiran_za_ddv,
+                polni_odbitek=invoice.prejemnik_polni_odbitek,
+                najemnik=invoice.prejemnik_naziv, postavka=vrstica.opis,
+            )
+        except ValidationError as napaka:
+            raise PdfRenderNapaka("SNAPSHOT_NEVELJAVEN", str(napaka)) from napaka
+        stopnja = (vrstica.ddv_stopnja
+                   if vrstica.ddv_nacin_obracuna == VatRegime.NacinObracuna.OBDAVCENO
+                   else Decimal("0.00"))
+        # Verification uses the persisted gross/rate; output retains stored amounts.
+        if (vrstica.skupaj <= 0 or vrstica.ddv_stopnja < 0
+                or (vrstica.osnova, vrstica.ddv_znesek) != izracunaj_iz_bruto(vrstica.skupaj, stopnja)):
+            raise PdfRenderNapaka("VSOTE_NESKLADNE", "Denarni posnetek ST ni skladen.")
 
 
 def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine, ...]]:
@@ -349,6 +430,8 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
         raise PdfRenderNapaka(
             "VSOTE_NESKLADNE", "Vsote računa se ne ujemajo z vrsticami."
         )
+    if svezi.document_type == Invoice.DocumentType.ST:
+        _preveri_st_posnetek(svezi, vrstice)
     return svezi, vrstice
 
 
