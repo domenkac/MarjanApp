@@ -323,6 +323,8 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `lease` | FK → Lease | `null=True` — **samo sledljivost**, ni vir vrednosti |
 | `lease_item` | FK → LeaseItem | `null=True`, `on_delete=PROTECT` — **samo sledljivost**, ni vir vrednosti |
 | `opis` | TextField | required, sestavljen niz (PRD §6.11), shranjen dobesedno |
+| `referenca_listine` | CharField, `blank=True`, default `""` | **posnetek** reference samostojne ST postavke; obvezna, kadar izbrani DDV režim zahteva referenco |
+| `datum_reference` | DateField, `null=True`, `blank=True` | **posnetek** datuma reference samostojne ST postavke; obvezen skupaj z zahtevano referenco |
 | `osnova` | DecimalField(10,2) | **posnetek** |
 | `ddv_stopnja` | DecimalField(5,2) | **posnetek** |
 | `ddv_znesek` | DecimalField(10,2) | |
@@ -337,6 +339,10 @@ Ista številka je lahko pri drugem podjetju, več osnutkov z `stevilka=NULL` pa 
 | `izvirno_izracunana_vrednost` | DecimalField(10,2) | `null=True` |
 
 `lease_item` ne nadomešča posnetnih polj: zgodovinske vrednosti vrstice se vedno berejo iz `opis`, `osnova`, `ddv_*` in drugih posnetkov na `InvoiceLine`. Vsaka vrstica, ki izvira iz `LeaseItem`, mora referenco nastaviti; to vključuje NP in poračun indeksacije. Ročna ST vrstica brez izvora v `LeaseItem` sme imeti `lease_item=NULL`.
+
+**Samostojne ST postavke (T8-A).** Kadar izbrani DDV režim zahteva referenco listine, priprava osnutka preveri neprazno referenco in njen datum po enakem pravilu kot `LeaseItem` ter oba shrani na `InvoiceLine`. Poznejše spremembe šifranta teh posnetkov ne spremenijo; zgodovinsko neznane vrednosti ostanejo prazne oziroma `NULL`.
+
+Do namenskega urejanja in potrjevanja v T8-B splošne storitve `spremeni_podatke_racuna`, `spremeni_vrstico`, `dodaj_vrstico` in `izbrisi_vrstico` zavrnejo spremembe osnutkov tipa `ST`. Splošna sprememba tipa dokumenta v `ST` je prav tako zavrnjena. Preverjanje uporablja svež zapis iz baze in poteka pred spremembami v isti atomski transakciji.
 
 **Dokazi pred izdajo T1.** Izračun različice 4 hrani `tenant.full_deduction`, vrstica pa `vat_regime_code` in `requires_full_deduction`. Vsi so del prstnega odtisa. Zamrznitev izbranega kandidata in njegova materializacija preverita izrecne boolean vrednosti ter upravičenost pred dodelitvijo številke; manjkajoči ali napačno tipizirani dokazi se zavrnejo. Neposredna pot potrditve NP preveri tako trenutni izvor kot shranjene dokaze osnutka. Novi dokazi se kopirajo v račun in vrstice; domenske storitve jih ne dovolijo ročno spreminjati. Storno kopira dokaze izvirnika, vključno z zgodovinskim neznanim stanjem.
 
@@ -518,6 +524,8 @@ Za pogodbo: `entiteta_zacetek/konec` = `datum_zacetka`/(`datum_prenehanja` če n
 **Obvezni testni primeri:** vse dolžine meseca (28/29/30/31), začetek/konec na robu meseca, kratkotrajna pogodba znotraj enega meseca, `NEDOLOCEN_CAS` brez konca, postavka dodana ali prekinjena sredi pogodbe.
 
 ### 2.3 Izračun nazaj iz bruto zneska
+
+**Vhod običajne ST fakture.** Bruto znesek mora biti končen `Decimal`, večji od nič, z največ dvema decimalnima mestoma in v obsegu denarnega polja računa. Ničelni in negativni bruto zneski se zavrnejo; vhod se ne zaokroži tiho.
 
 **Zakaj DDV ni izračunan neodvisno.** Neodvisno zaokroževanje osnove in DDV lahko odstopa za cent od vnesenega bruto zneska — nesprejemljivo na davčnem dokumentu. DDV je definiran kot preostanek, ne kot ločen izračun, s čimer je vsota zajamčeno natančna.
 

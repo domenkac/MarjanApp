@@ -133,6 +133,10 @@ class Invoice(models.Model):
 
     company = models.ForeignKey("companies.Company", on_delete=models.PROTECT)
     document_type = models.CharField(max_length=8, choices=DocumentType)
+    prejemnik = models.ForeignKey(
+        "contracts.Tenant", on_delete=models.PROTECT, null=True, blank=True,
+        editable=False,
+    )
     lease = models.ForeignKey(
         "contracts.Lease", on_delete=models.PROTECT, null=True, blank=True
     )
@@ -241,6 +245,9 @@ class InvoiceLine(models.Model):
         "contracts.LeaseItem", on_delete=models.PROTECT, null=True, blank=True
     )
     opis = models.TextField()
+    enota_mere = models.CharField(blank=True, default="")
+    referenca_listine = models.CharField(blank=True, default="")
+    datum_reference = models.DateField(null=True, blank=True)
     osnova = models.DecimalField(max_digits=10, decimal_places=2)
     ddv_stopnja = models.DecimalField(max_digits=5, decimal_places=2)
     ddv_znesek = models.DecimalField(max_digits=10, decimal_places=2)

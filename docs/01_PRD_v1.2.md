@@ -522,13 +522,15 @@ Izdaja kadarkoli med mesecem, izven mesečnega ciklusa.
 |---|---|
 | Naziv storitve | Izbor iz šifranta ali prost vnos |
 | Vrednost | **Vnos z DDV (bruto)**; aplikacija izračuna osnovo in DDV nazaj |
-| DDV režim | Iz šifranta storitve ali ročni izbor |
+| DDV režim | Iz šifranta storitve ali ročni izbor; če režim zahteva referenco listine, sta referenca in njen datum obvezna |
 | Prejemnik | Iz obstoječih najemnikov ali nov vnos |
 | Izdajatelj | Izbor med 5 podjetji |
 | Številčenje | Zaporedje `ST` |
 | Pregled | Vedno obvezen posamični pregled |
 
 **Izračun nazaj iz bruto zneska.** Osnova in DDV se izračunata tako, da je njuna vsota **natanko enaka** vnesenemu bruto znesku. Naivna implementacija (zaokroži osnovo, zaokroži DDV, seštej) da pri nekaterih zneskih razliko enega centa.
+
+**Pozitiven bruto znesek.** Običajne storitvene fakture `ST` zahtevajo bruto znesek, večji od nič. Ničelni in negativni bruto zneski se zavrnejo.
 
 ---
 

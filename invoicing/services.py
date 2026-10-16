@@ -17,7 +17,7 @@ from django.db.models import Q
 from django.utils import timezone
 
 from archive.models import BackupSnapshot
-from catalogs.models import ESLOG_KODE_DDV, VatRegime
+from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from companies.models import Company, NumberSequence
 from companies.services import (
     dodeli_naslednjo_stevilko,
@@ -27,7 +27,7 @@ from companies.services import (
     veljavna_potrditev_vzorca,
     veljavni_podpisniki_na_dan,
 )
-from contracts.models import IndexationEvent, Lease, LeaseItem, RecipientContact
+from contracts.models import IndexationEvent, Lease, LeaseItem, RecipientContact, Tenant
 from contracts.renewals import (
     confirm_renewal,
     renewal_due,
@@ -47,7 +47,7 @@ from contracts.vat_eligibility import (
 )
 from core.eslog_konfiguracija import razresi_eslog_konfiguracijo
 from core.models import AuditLogEntry
-from core.pravila import zaokrozi
+from core.pravila import izracunaj_iz_bruto, zaokrozi
 from core.validators import (
     normaliziraj_iban,
     preveri_davcno_stevilko,
@@ -1023,9 +1023,16 @@ def preveri_uredljiv_osnutek(invoice: Invoice) -> Invoice:
     return svezi
 
 
+def _zavrni_splosno_urejanje_st(invoice: Invoice, novi_tip=None) -> None:
+    """Keep ST snapshots intact until dedicated editing can revalidate them."""
+    if invoice.document_type == Invoice.DocumentType.ST or novi_tip == Invoice.DocumentType.ST:
+        raise ValueError("Splošno urejanje ST osnutka ni podprto.")
+
+
 @transaction.atomic
 def spremeni_podatke_racuna(invoice: Invoice, **spremembe) -> Invoice:
     svezi = preveri_uredljiv_osnutek(invoice)
+    _zavrni_splosno_urejanje_st(svezi, spremembe.get("document_type"))
     if not spremembe or not spremembe.keys() <= POSLOVNA_POLJA_RACUNA:
         raise ValueError("Dovoljena so samo poslovna in posnetna polja računa.")
     if svezi.document_type in (
@@ -1048,6 +1055,7 @@ def spremeni_podatke_racuna(invoice: Invoice, **spremembe) -> Invoice:
 @transaction.atomic
 def dodaj_vrstico(invoice: Invoice, **podatki) -> InvoiceLine:
     svezi = preveri_uredljiv_osnutek(invoice)
+    _zavrni_splosno_urejanje_st(svezi)
     if "invoice" in podatki or "invoice_id" in podatki:
         raise ValueError("Račun vrstice določa argument invoice.")
     if svezi.document_type == Invoice.DocumentType.STORNO:
@@ -1066,6 +1074,7 @@ def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
     if sveza.adjustment_id:
         raise ValidationError("Potrjene vrstice poračuna ni dovoljeno ročno spreminjati.")
     invoice = preveri_uredljiv_osnutek(sveza.invoice)
+    _zavrni_splosno_urejanje_st(invoice)
     if invoice.document_type == Invoice.DocumentType.STORNO:
         raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
     if not spremembe or not spremembe.keys() <= POSLOVNA_POLJA_VRSTICE:
@@ -1085,6 +1094,7 @@ def izbrisi_vrstico(vrstica: InvoiceLine) -> None:
     if sveza.adjustment_id:
         raise ValidationError("Rezervirane vrstice poračuna ni dovoljeno izbrisati.")
     invoice = preveri_uredljiv_osnutek(sveza.invoice)
+    _zavrni_splosno_urejanje_st(invoice)
     if invoice.document_type == Invoice.DocumentType.STORNO:
         raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
     sveza.delete()
@@ -1106,6 +1116,134 @@ def izbrisi_racun(invoice: Invoice, *, razlog: str = "") -> None:
 
 def preklici_osnutek_np(invoice: Invoice, *, razlog: str) -> bool:
     return adjustment_services.cancel_direct_draft(invoice, reason=razlog)
+
+
+@transaction.atomic
+def pripravi_osnutek_st(
+    *, company: Company, datum_izdaje: date, obdobje_od: date, obdobje_do: date,
+    bruto: Decimal, prejemnik: Tenant | None = None,
+    prejemnik_podatki: dict | None = None, storitev: ServiceCatalogItem | None = None,
+    vat_regime: VatRegime | None = None, opis: str = "", enota_mere: str | None = None,
+    referenca_listine: str = "", datum_reference: date | None = None,
+) -> Invoice:
+    """Prepare one standalone, unnumbered ST draft; new recipients are snapshots only.
+
+    The caller supplies the service period and a gross line total, not a unit price.
+    Totals and the payment deadline remain unset until a future confirmation service.
+    """
+    if not isinstance(bruto, Decimal) or not bruto.is_finite() or bruto <= 0:
+        raise ValidationError("Bruto znesek mora biti pozitiven Decimal.")
+    InvoiceLine._meta.get_field("skupaj").clean(bruto, None)
+    if any(type(value) is not date for value in (datum_izdaje, obdobje_od, obdobje_do)):
+        raise ValidationError("Datum izdaje in obdobje morajo biti datumi.")
+    if obdobje_od > obdobje_do:
+        raise ValidationError("Začetek obdobja mora biti pred koncem.")
+    company = Company.objects.get(pk=company.pk)
+    issues = _company_validation_issues(company)
+    if issues:
+        raise ValidationError([issue["message"] for issue in issues])
+    if not company.aktivno:
+        raise ValidationError("Izdajatelj ni aktiven.")
+    if (prejemnik is None) == (prejemnik_podatki is None):
+        raise ValidationError("Izberite prejemnika ali vnesite nove podatke, ne obojega.")
+    if prejemnik is not None:
+        prejemnik = Tenant.objects.get(pk=prejemnik.pk)
+    else:
+        allowed = {
+            "tip", "naziv", "naslov", "drzava_koda", "davcna_stevilka",
+            "maticna_stevilka", "ddv_identifikacijska_stevilka",
+            "identificiran_za_ddv", "ddv_zavezanec_s_polnim_odbitkom",
+        }
+        if not isinstance(prejemnik_podatki, dict) or not prejemnik_podatki.keys() <= allowed:
+            raise ValidationError("Nedovoljena polja novega prejemnika.")
+        prejemnik = Tenant(**prejemnik_podatki)
+    if not prejemnik.aktiven:
+        raise ValidationError("Prejemnik ni aktiven.")
+    if any(type(value) is not bool for value in (
+        prejemnik.identificiran_za_ddv, prejemnik.ddv_zavezanec_s_polnim_odbitkom,
+    )):
+        raise ValidationError("Status DDV prejemnika mora biti izrecna logična vrednost.")
+    issues = _tenant_validation_issues(prejemnik)
+    if issues:
+        raise ValidationError([issue["message"] for issue in issues])
+    if storitev is not None:
+        storitev = ServiceCatalogItem.objects.get(pk=storitev.pk)
+        if not storitev.aktivna:
+            raise ValidationError("Storitev ni aktivna.")
+        opis = opis or storitev.naziv
+        enota_mere = storitev.enota_mere if enota_mere is None else enota_mere
+        vat_regime = vat_regime if vat_regime is not None else storitev.privzeti_ddv_rezim
+    if not isinstance(opis, str) or not opis.strip():
+        raise ValidationError("Opis storitve je obvezen.")
+    if not isinstance(enota_mere, str) or not enota_mere.strip():
+        raise ValidationError("Enota mere je obvezna.")
+    if vat_regime is None:
+        raise ValidationError("DDV režim je obvezen.")
+    vat_regime = VatRegime.objects.get(pk=vat_regime.pk)
+    vat_regime.full_clean()
+    if not vat_regime.aktiven or not (
+        vat_regime.velja_od <= datum_izdaje
+        and (vat_regime.velja_do is None or datum_izdaje <= vat_regime.velja_do)
+    ):
+        raise ValidationError("DDV režim ni aktiven ali veljaven na datum izdaje.")
+    if vat_regime.stopnja < 0 or not vat_regime.rekapitulacijska_skupina.strip():
+        raise ValidationError("Neveljavna stopnja ali rekapitulacijska skupina DDV.")
+    preveri_upravicenost_prejemnika(
+        sifra=vat_regime.sifra, zahteva_polni_odbitek=vat_regime.zahteva_polni_odbitek,
+        tip=prejemnik.tip, identificiran_za_ddv=prejemnik.identificiran_za_ddv,
+        polni_odbitek=prejemnik.ddv_zavezanec_s_polnim_odbitkom,
+        najemnik=prejemnik.naziv, postavka=opis,
+    )
+    if vat_regime.zahteva_referenco and (
+        not isinstance(referenca_listine, str) or not referenca_listine.strip()
+        or type(datum_reference) is not date
+    ):
+        raise ValidationError("Referenca listine in datum reference sta obvezna za ta DDV režim.")
+    _preveri_eslog_kodo(vat_regime.nacin_obracuna, vat_regime.eslog_koda, "DDV režim")
+    stopnja = (
+        vat_regime.stopnja
+        if vat_regime.nacin_obracuna == VatRegime.NacinObracuna.OBDAVCENO
+        else Decimal("0.00")
+    )
+    osnova, ddv = izracunaj_iz_bruto(bruto, stopnja)
+    podpisnik = izberi_veljavnega_podpisnika(company, datum_izdaje)
+    invoice = Invoice(
+        company=company, prejemnik=prejemnik if prejemnik.pk else None,
+        document_type=Invoice.DocumentType.ST, datum_izdaje=datum_izdaje,
+        obdobje_od=obdobje_od, obdobje_do=obdobje_do,
+        prejemnik_naziv=prejemnik.naziv, prejemnik_tip=prejemnik.tip,
+        prejemnik_naslov=prejemnik.naslov, prejemnik_drzava_koda=prejemnik.drzava_koda,
+        prejemnik_identificiran_za_ddv=prejemnik.identificiran_za_ddv,
+        prejemnik_polni_odbitek=prejemnik.ddv_zavezanec_s_polnim_odbitkom,
+        prejemnik_davcna_stevilka=prejemnik.davcna_stevilka,
+        prejemnik_maticna_stevilka=prejemnik.maticna_stevilka,
+        prejemnik_ddv_identifikacijska_stevilka=prejemnik.ddv_identifikacijska_stevilka,
+        izdajatelj_naziv=company.naziv, izdajatelj_naslov=company.naslov,
+        izdajatelj_drzava_koda=company.drzava_koda,
+        izdajatelj_identificiran_za_ddv=company.ddv_zavezanec,
+        izdajatelj_davcna_stevilka=company.davcna_stevilka,
+        izdajatelj_maticna_stevilka=company.maticna_stevilka, izdajatelj_trr=company.trr,
+        izdajatelj_podpisnik_ime=podpisnik.ime_priimek,
+        izdajatelj_podpisnik_funkcija=podpisnik.funkcija,
+        izdajatelj_podpisnik_slika_pot=podpisnik.podpis_slika.name,
+    )
+    invoice.full_clean()
+    invoice.save()
+    vrstica = InvoiceLine(
+        invoice=invoice, opis=opis, enota_mere=enota_mere,
+        referenca_listine=referenca_listine, datum_reference=datum_reference,
+        osnova=osnova, ddv_znesek=ddv, skupaj=bruto,
+        ddv_stopnja=vat_regime.stopnja, ddv_nacin_obracuna=vat_regime.nacin_obracuna,
+        ddv_rezim_sifra=vat_regime.sifra,
+        ddv_zahteva_polni_odbitek=vat_regime.zahteva_polni_odbitek,
+        ddv_klavzula=vat_regime.klavzula,
+        ddv_rekap_skupina=vat_regime.rekapitulacijska_skupina,
+        ddv_eslog_koda=vat_regime.eslog_koda,
+    )
+    vrstica.full_clean()
+    _preveri_ddv_klavzule([vrstica])
+    vrstica.save()
+    return invoice
 
 
 @transaction.atomic

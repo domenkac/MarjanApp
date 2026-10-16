@@ -738,7 +738,10 @@ def odloci_o_fizicnem_izbrisu(zapis, *, izrecna_potrditev=False) -> IzbrisOdloci
     reference = {
         Property: ((Unit, "property_id", "PODREJENI_ZAPISI"),),
         Unit: ((Lease, "unit_id", "PODREJENI_ZAPISI"),),
-        Tenant: ((Lease, "tenant_id", "PODREJENI_ZAPISI"),),
+        Tenant: (
+            (Lease, "tenant_id", "PODREJENI_ZAPISI"),
+            (Invoice, "prejemnik_id", "POVEZAN_RACUN"),
+        ),
         Lease: (
             (LeaseItem, "lease_id", "PODREJENI_ZAPISI"),
             (RecipientContact, "lease_id", "PODREJENI_ZAPISI"),
