@@ -60,6 +60,8 @@ def test_new_install_has_all_steps_missing_and_create_links(client):
     assert all(label in content for _, label in STEPS)
     assert "Podjetja še niso vnesena" in content
     assert "Začetna nastavitev še ni zaključena" in content
+    assert "Shrani mesto in zapri" not in content
+    assert "Vaš napredek je shranjen. Brskalnik lahko zaprete" in content
     assert reverse("ui:podjetje_novo") in content
     assert SetupNavigation.objects.count() == 1
     assert not Company.objects.exists()

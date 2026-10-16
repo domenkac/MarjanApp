@@ -72,7 +72,11 @@ Ukaz zavrne nevarne ZIP poti, povezave in podvojene vnose. Preveri CRC, odtis ba
 
 Ustavite postopek ob napaki ukaza, neujemajočem odtisu, manjkajoči datoteki, nepričakovanem računu ali nejasni izbiri posnetka. Ne popravljajte ZIP-a ali baze, da bi preverjanje prestalo. Z izvajalcem preverite drug ohranjen posnetek. Za nov poskus izberite novo ciljno mapo; obstoječe ne prepisujte.
 
-**Preklop preverjene kopije v produkcijo zahteva nadzorovano preverjanje.** Trenutna izvedba ne vsebuje ukaza za varen produkcijski preklop. Obnovljena baza še vedno vsebuje stare absolutne poti. Nastavitve uporabljajo `db.sqlite3` v korenu projekta; ni izvedene okoljske spremenljivke za izbiro obnovljene baze.
+**Preklop preverjene kopije v produkcijo zahteva nadzorovano preverjanje.** `MARJAN_DB_PATH` izrecno izbere obstoječo bazo SQLite na določeni absolutni poti. Izbira baze sama po sebi ne aktivira obnovljene namestitve in ne zagotovi njene varne uskladitve.
+
+Obnovljena baza lahko vsebuje stare absolutne poti. Pred produkcijskim preklopom ločeno preverite poti obnovljenega arhiva, reference medijskih datotek, številčenje računov in stanja dostav.
+
+`app.provision_database` je namenjen izključno povsem novim namestitvam; nikoli ga ne uporabite za obnovo ali nadgradnjo. Avtomatiziran postopek za produkcijsko aktivacijo obnovljene namestitve še ni izveden.
 
 Izvajalec mora pred preklopom ustaviti vse procese MarjanApp, ohraniti celotno prejšnje stanje, določiti nove poti in preveriti reference. Baze, arhiva ali medijskih datotek **nikoli ne prepisujte ročno med delovanjem aplikacije**. Ne zaženite dveh produkcijskih kopij. Pred odobritvijo uskladite vse račune in pošiljanja po datumu posnetka, da se številke ne uporabijo ponovno in računi ne pošljejo dvakrat.
 
@@ -180,19 +184,21 @@ cd "<MAPA_NOVE_NAMESTITVE>"
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -r requirements.txt
-python manage.py migrate
-python manage.py runserver 127.0.0.1:8000
 ```
+
+Nato sledite [varnemu postopku prve namestitve](persistent-paths.md#first-installation-a-brand-new-database-only): izrecno določite `MARJAN_DB_PATH`, `MARJAN_MEDIA_ROOT` in `MARJAN_RENDERING_ROOT` zunaj repozitorija, preverite izpis ukaza `python -m app.provision_database --check-paths` in šele nato izvedite `python -m app.provision_database --confirm-new-install`. Nadrejena mapa baze mora že obstajati; ciljna baza in njene stranske datoteke ne smejo obstajati. Ukaz obstoječe baze nikoli ne prepiše, izbriše, ponastavi ali migrira. Uspeh zahteva izhodno kodo nič in sporočilo `New installation database provisioned and verified:` s preverjeno potjo.
+
+Po uspehu obdržite iste okoljske spremenljivke, izvedite `python manage.py check --database default` in `python manage.py showmigrations --plan` (vse migracije morajo biti označene `[X]`), nato `python manage.py runserver 127.0.0.1:8000`. Ob napaki ne zaganjajte aplikacije; ohranite morebitno ciljno datoteko za diagnostiko in uporabite drugo, še neuporabljeno pot. Običajen zagon ne pripravi manjkajoče izrecno nastavljene baze.
 
 `python3` mora biti nameščeni Python ustrezne različice. Brskalnik odprite na `http://127.0.0.1:8000/`. Strežnik ustavite s `Ctrl+C`. Zagon je lokalni razvojni strežnik, podprt v repozitoriju; ni priloženega produkcijskega zaganjalnika ali samodejnega zagona ob prijavi. Ne uporabite omrežnega naslova `0.0.0.0`.
 
-`migrate` pripravi shemo nove baze `db.sqlite3` v korenu te namestitve. **Ta korak ni postopek obnove.** Na izvirnem ZIP-u ali preverjeni obnovitveni bazi ne izvajajte migracij. Ob selitvi obstoječih podatkov združljivost različice in morebitne migracije preveri izvajalec pred produkcijskim preklopom.
+**Ta korak ni postopek obnove.** Na izvirnem ZIP-u ali preverjeni obnovitveni bazi ne izvajajte migracij. Ob selitvi obstoječih podatkov združljivost različice in morebitne migracije preveri izvajalec pred produkcijskim preklopom.
 
 Pred testom SMTP izvajalec nastavi neskrivne okoljske spremenljivke `MARJAN_SMTP_HOST`, `MARJAN_SMTP_PORT`, `MARJAN_SMTP_SECURITY`, `MARJAN_SMTP_TIMEOUT_SECONDS`, `MARJAN_KEYRING_SERVICE`. Varnost ima izvedene vrednosti `STARTTLS`, `SSL`, `NONE`; uporabite potrjene podatke ponudnika. Geslo vpišite v Keychain, ne med spremenljivke projekta. Repozitorij ne vsebuje samodejnega nalaganja datoteke `.env`.
 
 ### Podatki in preverjanje pripravljenosti
 
-PRD v1.2 §16.4 »Prvi zagon in začetna nastavitev« določa celotno začetno verigo. Na tej podlagi so izvedeni posamezni obrazci in potrditve; ločen čarovnik za celotno verigo ni izveden. Nastavitev opravite po naslednjem vrstnem redu:
+PRD v1.2 §16.4 »Prvi zagon in začetna nastavitev« določa celotno začetno verigo. Nova namestitev odpre čarovnik; priprava baze ga ne zaključi in ne dovoli izdaje računov. Napredek se shrani, zato lahko brskalnik zaprete in pozneje nadaljujete. Nastavitev opravite po naslednjem vrstnem redu:
 
 1. **Nastavitve:** vnesite vseh pet podjetij. Preverite naziv, davčne podatke, naslov, IBAN, pošiljatelja, računovodjo in logotip. Dodajte veljavnega podpisnika s podpisom.
 2. **Nepremičnine:** dodajte nepremičnine in njihove enote; nato vnesite **Najemnike**.
