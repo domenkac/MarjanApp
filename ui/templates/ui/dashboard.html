@@ -13,6 +13,7 @@
   </div>
   <a class="button-primary dashboard-primary-action" href="{% url 'ui:mesecni_obracun' %}"><span class="material-symbols-outlined" aria-hidden="true">calculate</span>{% if aktivni_cikel %}Nadaljuj{% else %}Začni{% endif %} mesečni obračun</a>
 </header>
+<p><a class="button-secondary" href="{% url 'ui:st_new' %}">Nov storitveni osnutek</a> <a href="{% url 'ui:st_list' %}">Ročni storitveni računi</a></p>
 
 <section class="metrics" aria-label="Povzetek podatkov">
   <article class="metric-card"><span>Aktivna podjetja</span><strong>{{ counts.podjetja }}</strong><small>Podjetja v uporabi</small></article>

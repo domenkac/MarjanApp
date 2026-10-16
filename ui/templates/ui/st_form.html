@@ -1,0 +1,17 @@
+{% extends "ui/base.html" %}
+{% block title %}Nov storitveni osnutek · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div><p class="eyebrow">Ročni storitveni računi</p><h1>Nov storitveni osnutek</h1></div>
+  <a class="button-secondary" href="{% url 'ui:st_list' %}">Nazaj na seznam</a>
+</header>
+<p class="form-note">Shrani se neoštevilčen osnutek za posamični pregled. Novi prejemnik se shrani samo v posnetek računa. Podatki novega prejemnika se uporabijo samo pri izbiri »Nov prejemnik«.</p>
+<section class="settings-card">
+  <form method="post" novalidate>
+    {% csrf_token %}
+    {% include "ui/partials/form_fields.html" %}
+    <div class="form-actions"><button class="button-primary" type="submit">Shrani osnutek</button></div>
+  </form>
+</section>
+<p>Izdaja bo na voljo v naslednji fazi.</p>
+{% endblock %}

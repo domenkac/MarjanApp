@@ -1,0 +1,26 @@
+{% extends "ui/base.html" %}
+{% block title %}Ročni storitveni računi · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div><p class="eyebrow">Nadzorna plošča</p><h1>Ročni storitveni računi</h1></div>
+  <a class="button-primary" href="{% url 'ui:st_new' %}">Nov storitveni osnutek</a>
+</header>
+<section class="settings-card"><form method="get">
+  {% include "ui/partials/form_fields.html" %}
+  <div class="form-actions"><button class="button-secondary" type="submit">Prikaži</button></div>
+</form></section>
+<div class="settings-table-wrap"><table class="settings-table">
+  <thead><tr><th>Izdajatelj</th><th>Prejemnik</th><th>Datum izdaje</th><th>Dokument</th><th>Pregled</th></tr></thead>
+  <tbody>{% for invoice in invoices %}
+    <tr>
+      <td>{{ invoice.izdajatelj_naziv }}</td><td>{{ invoice.prejemnik_naziv }}</td>
+      <td>{{ invoice.datum_izdaje|date:"d. m. Y" }}</td>
+      <td>{% if invoice.stevilka %}<strong>Oštevilčen ST · {{ invoice.stevilka }}</strong><p>{{ invoice.get_status_display }}</p>
+        {% elif invoice.status == 'OSNUTEK' %}<strong>Osnutek — še ni izdan</strong><p>Številka ni dodeljena</p>
+        {% else %}{{ invoice.get_status_display }}<p>Številka ni dodeljena</p>{% endif %}</td>
+      <td>{% if not invoice.stevilka and invoice.status == 'OSNUTEK' and not invoice.lease_id %}<a href="{% url 'ui:st_review' invoice.company_id invoice.pk %}">Preglej osnutek #{{ invoice.pk }}</a>{% else %}—{% endif %}</td>
+    </tr>
+  {% empty %}<tr><td colspan="5">Ni storitvenih računov za prikaz.</td></tr>{% endfor %}</tbody>
+</table></div>
+<p>Izdaja bo na voljo v naslednji fazi.</p>
+{% endblock %}

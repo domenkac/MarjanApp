@@ -7,6 +7,7 @@ from .indexation import (
     indexation_list,
 )
 from .setup import first_run_setup
+from .st_invoices import st_list, st_new, st_review
 from .views import (
     accountant_arbitrary_csv,
     accountant_arbitrary_export,
@@ -79,6 +80,9 @@ urlpatterns = [
     path("pogodbe/poracuni/<int:company_id>/<int:adjustment_id>/", adjustment_detail, name="adjustment_detail"),
     path("indeksacija/<int:company_id>/<int:batch_id>/", indexation_detail, name="indexation_detail"),
     path("", dashboard, name="dashboard"),
+    path("storitveni-racuni/", st_list, name="st_list"),
+    path("storitveni-racuni/nov/", st_new, name="st_new"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/", st_review, name="st_review"),
     path("racunovodstvo/izpis/", accountant_arbitrary_export, name="accountant_arbitrary_export"),
     path("racunovodstvo/izpis/csv/", accountant_arbitrary_csv, name="accountant_arbitrary_csv"),
     path("racunovodstvo/poslji/", accountant_control_send, name="accountant_control_send"),

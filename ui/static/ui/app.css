@@ -26,6 +26,7 @@ body { margin: 0; min-width: 1024px; background: var(--background); }
 .nav-item { display: flex; align-items: center; gap: 12px; min-height: 38px; padding: 8px 12px; color: #434655; font-size: 13px; text-decoration: none; border-left: 2px solid transparent; }
 .nav-item.is-active { color: #003ea8; background: var(--primary-soft); border-left-color: var(--primary); font-weight: 600; }
 .nav-item.is-disabled { color: #737686; cursor: not-allowed; }
+.nav-subsection { margin-left: 18px; }
 .app-shell { margin-left: 240px; min-height: 100vh; }
 .topbar { height: 64px; display: flex; align-items: center; justify-content: space-between; padding: 0 32px; background: rgba(255, 255, 255, .96); border-bottom: 1px solid var(--outline); }
 .issuer { display: flex; align-items: center; gap: 8px; font-size: 12px; }
