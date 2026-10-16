@@ -68,6 +68,12 @@ from .models import (
     MonthlyCandidateReview,
     MonthlyCycle,
 )
+from .st_confirmation import (
+    _record_st_vat_source,
+    fingerprint_osnutka_st,  # noqa: F401
+    potrdi_osnutek_st,  # noqa: F401
+    preglej_osnutek_st,  # noqa: F401
+)
 
 
 class MesecniCikelNapaka(Exception):
@@ -1129,7 +1135,7 @@ def pripravi_osnutek_st(
     """Prepare one standalone, unnumbered ST draft; new recipients are snapshots only.
 
     The caller supplies the service period and a gross line total, not a unit price.
-    Totals and the payment deadline remain unset until a future confirmation service.
+    Totals and the payment deadline remain unset until dedicated ST confirmation.
     """
     if not isinstance(bruto, Decimal) or not bruto.is_finite() or bruto <= 0:
         raise ValidationError("Bruto znesek mora biti pozitiven Decimal.")
@@ -1243,6 +1249,7 @@ def pripravi_osnutek_st(
     vrstica.full_clean()
     _preveri_ddv_klavzule([vrstica])
     vrstica.save()
+    _record_st_vat_source(invoice, vat_regime)
     return invoice
 
 
@@ -1316,7 +1323,8 @@ def _potrdi_osnutek_np(
     podpis_pot: str,
 ) -> Invoice:
     existing = Invoice.objects.get(pk=osnutek.pk)
-    if existing.stevilka and existing.invoiceline_set.filter(adjustment__isnull=False).exists():
+    if (existing.document_type == Invoice.DocumentType.NP and existing.stevilka
+            and existing.invoiceline_set.filter(adjustment__isnull=False).exists()):
         adjustment_services.validate_consumed(existing, list(existing.invoiceline_set.all()))
         return existing
     invoice = preveri_uredljiv_osnutek(osnutek)
@@ -1409,6 +1417,8 @@ def _potrdi_osnutek_np(
 
 def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     existing = Invoice.objects.get(pk=osnutek.pk)
+    if existing.document_type != Invoice.DocumentType.NP:
+        raise ValueError("Potrditi je mogoče samo NP osnutek.")
     if (existing.stevilka and existing.document_type == Invoice.DocumentType.NP
             and existing.invoiceline_set.filter(adjustment__isnull=False).exists()):
         with transaction.atomic():
@@ -1681,6 +1691,8 @@ def _potrdi_korekcijski_osnutek(
 
 def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
+    if invoice.document_type not in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
+        raise ValueError("Račun ni korekcijski osnutek.")
     podpisnik = izberi_veljavnega_podpisnika(
         invoice.company, invoice.datum_izdaje
     )

@@ -560,6 +560,44 @@ with transaction.atomic():
 
 `STORNO`/`DOBROPIS` gresta skozi isto funkcijo in isti `tip` kot izvirnik — ni ločenega števca. Enolična in kontrolna DB omejitev preprečita več zapisov NP za isto podjetje ter neveljavne kombinacije tipa in leta.
 
+#### T8-C: domenska potrditev samostojnega ST osnutka
+
+`invoicing.services` izpostavlja `fingerprint_osnutka_st`, `preglej_osnutek_st` in
+`potrdi_osnutek_st`; implementacija je v `invoicing/st_confirmation.py`.
+Posamični pregled zahteva izrecen `individual_review=True` in pričakovani fingerprint
+pregledanega shranjenega osnutka. Dokazilo je nespremenljiv `AuditLogEntry`, vezan na
+konkretni račun, vse shranjene postavke, materialne vire, podpisnika, preverjene assete,
+verzijo predloge in privzeti plačilni rok podjetja. Sam ogled strani T8-B dokazila ne ustvari.
+
+Priprava ST osnutka v isti transakciji shrani tudi nespremenljivo revizijsko dokazilo
+DDV vira (`st_vat_source_v1`). S tem zazna spremembe pogojev, ki niso samostojna polja
+postavke, zlasti zahteve reference in veljavnosti režima. Starejši osnutek brez tega
+dokazila se ne potrdi; potreben je nov osnutek. Dokazila se ne dopolnjuje iz trenutnega
+šifranta za nazaj.
+
+Potrditev sprejme samo shranjen `ST/OSNUTEK`, brez številke, pogodbe in korekcijske
+povezave. Ponovno preveri posnetke izdajatelja, prejemnika, DDV in postavk, obvezno
+referenco z datumom, upravičenost, obdobje ter točen izračun iz pozitivnega bruto zneska.
+Ob neskladju z materialnimi viri zavrne potrditev; zgodovinskih posnetkov ne osvežuje.
+Vsote določi iz preverjenih postavk, rok plačila pa iz datuma izdaje in
+`Company.rok_placila_dni_privzeto`; neskladne že shranjene vsote ali rok zavrne.
+
+Logotip in podpis preveri ter zamrzne pred transakcijo. Storitvi pregleda in potrditve
+morata začeti zunaj obstoječe transakcije. V kratki transakciji `IMMEDIATE` ponovno
+prebere stanje, preveri dokazilo pregleda in vse produkcijske predpogoje, pokliče
+obstoječe ST številčenje ter shrani številko, nespremenljive reference in status
+`IZBRAN_ZA_POSILJANJE`. Preverjanje dostopnosti assetov pri tem uporablja predhodno
+preverjene reference; v transakciji ni datotečnih ali zunanjih operacij.
+Napaka pred potrditvijo transakcije povrne račun in števec. Vsak ponovljen ali sočasen
+drugi poskus je izrecno zavrnjen; ne vrne nove številke in ne prepiše potrjenega računa.
+
+**Omejitev integracije:** to je samo domenska potrditev. Operativna izdaja ST še ni
+dokončana: uradni ST PDF, dostava in arhiv sledijo v poznejših nalogah. UI T8-B ostaja
+samo pregled osnutka, brez potrditve, izdaje, pošiljanja ali arhiviranja. `FEATURE_ESLOG`
+ostaja izključen; ST ne razrešuje konfiguracije eSLOG, vezane na pogodbo.
+Ob neuspešni potrditvi lahko ostanejo neuporabljene vsebinsko naslovljene kopije
+assetov, pripravljene pred transakcijo; račun in števec ostaneta nespremenjena.
+
 ### 2.5 Δ zaznava — dispečer in predpogoji podjetja
 
 **Zakaj sta dva ločena mehanizma, ne eden.** Manjkajoč podpisnik in nepotrjena razporeditev DDV režimov nista lastnost ene pogodbe — sta lastnost podjetja. Preverjati ju za vsako od 15 pogodb posebej bi bilo počasno in zavajajoče (15× ista napaka). Zato: en predpogojni pregled na podjetje (korak 2, PRD §7.4), en dispečer na pogodbo (korak 3).

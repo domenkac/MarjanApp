@@ -9,7 +9,7 @@ from .services import izberi_veljavnega_podpisnika
 
 
 @override("sl")
-def issuer_setup_issues(company, today):
+def issuer_setup_issues(company, today, *, asset_evidence=None):
     issues = []
     try:
         company.full_clean(exclude=["logotip"])
@@ -27,7 +27,12 @@ def issuer_setup_issues(company, today):
             issues.append(
                 (field.name, f"Manjka obvezen podatek: {field.verbose_name}.")
             )
-    if not _asset_exists(company.logotip.name):
+
+    def asset_exists(name):
+        # ST supplies assets verified before acquiring the numbering lock.
+        return name in asset_evidence if asset_evidence is not None else _asset_exists(name)
+
+    if not asset_exists(company.logotip.name):
         issues.append(("logotip", "Logotip manjka ali ni dostopen."))
     try:
         signatory = izberi_veljavnega_podpisnika(company, today)
@@ -38,7 +43,7 @@ def issuer_setup_issues(company, today):
             signatory.full_clean(exclude=["podpis_slika"])
         except ValidationError as error:
             issues.extend(("signatory", message) for message in error.messages)
-        if not _asset_exists(signatory.podpis_slika.name):
+        if not asset_exists(signatory.podpis_slika.name):
             issues.append(("signatory", "Slika podpisa manjka ali ni dostopna."))
     for tip, year in ((NumberSequence.Tip.NP, 0), (NumberSequence.Tip.ST, today.year)):
         if not NumberSequence.objects.filter(

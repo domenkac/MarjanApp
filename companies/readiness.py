@@ -136,7 +136,7 @@ def _numbering_issues(company, today):
 
 
 @override("sl")
-def setup_readiness(*, today=None, company=None):
+def setup_readiness(*, today=None, company=None, asset_evidence=None):
     today = today or timezone.localdate()
     blockers = []
     archive_evidence = {}
@@ -158,7 +158,7 @@ def setup_readiness(*, today=None, company=None):
     for issuer in issuers:
         issues = [
             issue
-            for issue in issuer_setup_issues(issuer, today)
+            for issue in issuer_setup_issues(issuer, today, asset_evidence=asset_evidence)
             if issue[0] != "numbering"
         ]
         numbering_issues, numbering = _numbering_issues(issuer, today)
@@ -332,14 +332,14 @@ def initial_setup_completed():
     )
 
 
-def require_issuance_readiness(company, issue_date, *, tip=None):
+def require_issuance_readiness(company, issue_date, *, tip=None, asset_evidence=None):
     """Called inside SQLite IMMEDIATE at actual allocation; issued retries skip it."""
     if not initial_setup_completed():
         raise ValidationError(
             "Začetna nastavitev še ni zaključena. Produkcijska izdaja je blokirana."
         )
     # Initial setup is global; later changes invalidate the affected issuer.
-    state = setup_readiness(today=issue_date, company=company)
+    state = setup_readiness(today=issue_date, company=company, asset_evidence=asset_evidence)
     if not state.ready:
         raise ValidationError(state.messages)
     if tip == NumberSequence.Tip.ST:
