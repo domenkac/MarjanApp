@@ -7,6 +7,20 @@ from contracts.models import Tenant
 from .forms import CompanyChoiceField, TenantChoiceField, VatRegimeChoiceField
 
 
+class STReviewForm(forms.Form):
+    fingerprint = forms.CharField(min_length=64, max_length=64, widget=forms.HiddenInput)
+    individual_review = forms.BooleanField(
+        label="Preveril sem vse prikazane shranjene podatke računa in postavk.",
+    )
+
+
+class STConfirmForm(forms.Form):
+    review_id = forms.IntegerField(min_value=1, widget=forms.HiddenInput)
+    confirm_issue = forms.BooleanField(
+        label="Razumem posledice in izrecno potrjujem dokončno izdajo računa ST.",
+    )
+
+
 class STListFilterForm(forms.Form):
     company = CompanyChoiceField(
         label="Izdajatelj", required=False, empty_label="Vsa podjetja",

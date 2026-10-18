@@ -5,50 +5,21 @@
   <div><p class="eyebrow">Ročni storitveni računi</p><h1>Pregled storitvenega osnutka</h1></div>
   <a class="button-secondary" href="{% url 'ui:st_list' %}?company={{ invoice.company_id }}">Nazaj na račune izdajatelja</a>
 </header>
-<p class="status-badge">Osnutek — še ni izdan</p>
+<p class="status-badge">{% if review %}Posamično pregledan — še ni izdan{% else %}Osnutek — še ni izdan{% endif %}</p>
 <p><strong>Številka ni dodeljena.</strong> Interni zapis #{{ invoice.pk }}.</p>
-<div class="dashboard-grid">
-  <section class="panel"><h2>Izdajatelj — posnetek</h2><dl>
-    <dt>Naziv</dt><dd>{{ invoice.izdajatelj_naziv }}</dd>
-    <dt>Naslov</dt><dd>{{ invoice.izdajatelj_naslov }}</dd>
-    <dt>Država</dt><dd>{{ invoice.izdajatelj_drzava_koda }}</dd>
-    <dt>Davčna številka</dt><dd>{{ invoice.izdajatelj_davcna_stevilka }}</dd>
-    <dt>Matična številka</dt><dd>{{ invoice.izdajatelj_maticna_stevilka }}</dd>
-    <dt>Identificiran za DDV</dt><dd>{{ invoice.izdajatelj_identificiran_za_ddv|yesno:"Da,Ne,Ni podatka" }}</dd>
-    <dt>TRR</dt><dd>{{ invoice.izdajatelj_trr }}</dd>
-    <dt>Podpisnik</dt><dd>{{ invoice.izdajatelj_podpisnik_ime }} · {{ invoice.izdajatelj_podpisnik_funkcija }}</dd>
-  </dl></section>
-  <section class="panel"><h2>Prejemnik — posnetek</h2><dl>
-    <dt>Naziv</dt><dd>{{ invoice.prejemnik_naziv }}</dd>
-    <dt>Tip</dt><dd>{{ invoice.get_prejemnik_tip_display }}</dd>
-    <dt>Naslov</dt><dd>{{ invoice.prejemnik_naslov }}</dd>
-    <dt>Država</dt><dd>{{ invoice.prejemnik_drzava_koda }}</dd>
-    <dt>Davčna številka</dt><dd>{{ invoice.prejemnik_davcna_stevilka|default:"—" }}</dd>
-    <dt>DDV identifikacijska številka</dt><dd>{{ invoice.prejemnik_ddv_identifikacijska_stevilka|default:"—" }}</dd>
-    <dt>Matična številka</dt><dd>{{ invoice.prejemnik_maticna_stevilka|default:"—" }}</dd>
-    <dt>Identificiran za DDV</dt><dd>{{ invoice.prejemnik_identificiran_za_ddv|yesno:"Da,Ne,Ni podatka" }}</dd>
-    <dt>Polni odbitek DDV</dt><dd>{{ invoice.prejemnik_polni_odbitek|yesno:"Da,Ne,Ni podatka" }}</dd>
-  </dl></section>
-</div>
-<section class="panel"><h2>Datumi</h2><dl>
-  <dt>Datum izdaje</dt><dd>{{ invoice.datum_izdaje|date:"d. m. Y" }}</dd>
-  <dt>Obdobje storitve</dt><dd>{{ invoice.obdobje_od|date:"d. m. Y" }} – {{ invoice.obdobje_do|date:"d. m. Y" }}</dd>
-</dl></section>
-{% for line in lines %}
-<section class="panel"><h2>Storitev</h2><dl>
-  <dt>Opis</dt><dd>{{ line.opis|linebreaksbr }}</dd>
-  <dt>Enota mere</dt><dd>{{ line.enota_mere }}</dd>
-  <dt>DDV režim</dt><dd>{{ line.ddv_rezim_sifra }} · {{ line.vat_method_label }}</dd>
-  <dt>Stopnja režima</dt><dd>{{ line.ddv_stopnja|floatformat:2 }} %</dd>
-  <dt>Klavzula</dt><dd>{{ line.ddv_klavzula|default:"—"|linebreaksbr }}</dd>
-  {% if line.referenca_listine or line.datum_reference %}
-  <dt>Referenca listine</dt><dd>{{ line.referenca_listine|default:"—" }}</dd>
-  <dt>Datum reference</dt><dd>{{ line.datum_reference|date:"d. m. Y" }}</dd>
-  {% endif %}
-  <dt>Osnova (EUR)</dt><dd>{{ line.osnova|floatformat:2 }}</dd>
-  <dt>DDV (EUR)</dt><dd>{{ line.ddv_znesek|floatformat:2 }}</dd>
-  <dt>Bruto (EUR)</dt><dd>{{ line.skupaj|floatformat:2 }}</dd>
-</dl></section>
-{% endfor %}
-<p class="form-note">Pregled shranjenega osnutka. Urejanje osnutka še ni na voljo. Izdaja bo na voljo v naslednji fazi.</p>
+{% if review %}
+<a class="button-primary" href="{% url 'ui:st_confirm' invoice.company_id invoice.pk %}?review_id={{ review.pk }}">Nadaljuj na dokončno potrditev</a>
+{% endif %}
+{% include "ui/partials/st_snapshots.html" %}
+{% if action_error %}<p class="form-errors" role="alert">{{ action_error }}</p>
+<a href="{% url 'ui:podjetje_detail' invoice.company_id %}">Preveri nastavitve tega izdajatelja</a>{% endif %}
+{% if fingerprint %}
+<section class="panel"><h2>Izrecen posamični pregled</h2>
+<p>Potrditev pregleda še ne izda računa in ne dodeli številke.</p>
+<form method="post" action="{% url 'ui:st_record_review' invoice.company_id invoice.pk %}">
+  {% csrf_token %}{% include "ui/partials/form_fields.html" %}
+  <button class="button-primary" type="submit">Potrdi posamični pregled</button>
+</form></section>
+{% endif %}
+<p class="form-note">Urejanje osnutka ni na voljo. Dostava sledi v T8-E2, arhiviranje v T8-F.</p>
 {% endblock %}

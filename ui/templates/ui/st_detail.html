@@ -1,0 +1,31 @@
+{% extends "ui/base.html" %}
+{% block title %}{{ invoice.stevilka }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div><p class="eyebrow">Izdani storitveni račun</p><h1>{{ invoice.stevilka }}</h1></div>
+  <a href="{% url 'ui:st_list' %}?company={{ invoice.company_id }}">Nazaj na račune izdajatelja</a>
+</header>
+<p class="status-badge">Oštevilčen in izdan — finančna vsebina je nespremenljiva</p>
+{% include "ui/partials/st_snapshots.html" %}
+<section class="panel"><h2>Uradni PDF</h2>
+{% if pdf_error %}<p role="alert">Priprava PDF ni uspela. Račun ostaja izdan z isto trajno številko.</p>{% endif %}
+{% if pdf_state.state == 'READY' %}
+  <p>Uradni PDF je pripravljen. Celovitost je preverjena s shranjeno kontrolno vsoto.</p>
+  <a href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}" target="_blank" rel="noopener">Odpri PDF</a>
+  <a href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}?download=1">Prenesi PDF</a>
+{% elif pdf_state.state == 'ERROR' %}
+  <p role="alert">Celovitost uradnega PDF ni potrjena. Prenos je blokiran. Registriranega manjkajočega ali poškodovanega PDF ni dovoljeno samodejno zamenjati. Potreben je pregled shranjenega dokumenta.</p>
+{% else %}
+  <p>PDF še ni pripravljen ali priprava ni uspela. Račun ostaja izdan z isto trajno številko.</p>
+{% endif %}
+{% if pdf_state.state != 'READY' %}
+<form method="post" action="{% url 'ui:st_retry_pdf' invoice.company_id invoice.pk %}">
+  {% csrf_token %}<button class="button-secondary" type="submit">Ponovi samo pripravo PDF</button>
+</form>
+{% endif %}
+</section>
+<section class="panel"><h2>Dostava in arhiv</h2>
+{% if invoice.status == 'IZBRAN_ZA_POSILJANJE' %}<p>Še ni poslan.</p>{% else %}<p>Stanje dostave: {{ invoice.get_status_display }}</p>{% endif %}
+<p>Izdaja in priprava PDF ne pomenita pošiljanja ali arhiviranja. Dostava sledi v T8-E2, arhiviranje v T8-F.</p>
+</section>
+{% endblock %}

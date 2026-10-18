@@ -1,6 +1,6 @@
 """Standalone ST domain confirmation; rendering is a separate explicit operation.
 
-No UI calls these services. Review evidence is an immutable audit entry, bound to
+The UI supplies explicit review evidence: an immutable audit entry, bound to
 the saved draft and its material sources. Every repeated confirmation is rejected.
 """
 

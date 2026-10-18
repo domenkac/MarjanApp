@@ -18,9 +18,9 @@
       <td>{% if invoice.stevilka %}<strong>Oštevilčen ST · {{ invoice.stevilka }}</strong><p>{{ invoice.get_status_display }}</p>
         {% elif invoice.status == 'OSNUTEK' %}<strong>Osnutek — še ni izdan</strong><p>Številka ni dodeljena</p>
         {% else %}{{ invoice.get_status_display }}<p>Številka ni dodeljena</p>{% endif %}</td>
-      <td>{% if not invoice.stevilka and invoice.status == 'OSNUTEK' and not invoice.lease_id %}<a href="{% url 'ui:st_review' invoice.company_id invoice.pk %}">Preglej osnutek #{{ invoice.pk }}</a>{% else %}—{% endif %}</td>
+      <td>{% if invoice.stevilka and not invoice.lease_id and not invoice.povezan_racun_id %}<a href="{% url 'ui:st_detail' invoice.company_id invoice.pk %}">Odpri izdani račun</a>{% elif not invoice.stevilka and invoice.status == 'OSNUTEK' and not invoice.lease_id and not invoice.povezan_racun_id %}<a href="{% url 'ui:st_review' invoice.company_id invoice.pk %}">Preglej osnutek #{{ invoice.pk }}</a>{% else %}—{% endif %}</td>
     </tr>
   {% empty %}<tr><td colspan="5">Ni storitvenih računov za prikaz.</td></tr>{% endfor %}</tbody>
 </table></div>
-<p>Izdaja bo na voljo v naslednji fazi.</p>
+<p>Dostava sledi v T8-E2, arhiviranje v T8-F.</p>
 {% endblock %}

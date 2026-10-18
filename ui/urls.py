@@ -7,7 +7,16 @@ from .indexation import (
     indexation_list,
 )
 from .setup import first_run_setup
-from .st_invoices import st_list, st_new, st_review
+from .st_invoices import (
+    st_confirm,
+    st_detail,
+    st_list,
+    st_new,
+    st_pdf,
+    st_record_review,
+    st_retry_pdf,
+    st_review,
+)
 from .views import (
     accountant_arbitrary_csv,
     accountant_arbitrary_export,
@@ -83,6 +92,11 @@ urlpatterns = [
     path("storitveni-racuni/", st_list, name="st_list"),
     path("storitveni-racuni/nov/", st_new, name="st_new"),
     path("storitveni-racuni/<int:company_id>/<int:invoice_id>/", st_review, name="st_review"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/pregled/", st_record_review, name="st_record_review"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/potrditev/", st_confirm, name="st_confirm"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/izdan/", st_detail, name="st_detail"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/pdf/", st_pdf, name="st_pdf"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/pdf/ponovi/", st_retry_pdf, name="st_retry_pdf"),
     path("racunovodstvo/izpis/", accountant_arbitrary_export, name="accountant_arbitrary_export"),
     path("racunovodstvo/izpis/csv/", accountant_arbitrary_csv, name="accountant_arbitrary_csv"),
     path("racunovodstvo/poslji/", accountant_control_send, name="accountant_control_send"),

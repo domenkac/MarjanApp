@@ -1,0 +1,24 @@
+{% extends "ui/base.html" %}
+{% block title %}Dokončna izdaja ST · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading">
+  <div><p class="eyebrow">Ročni storitveni računi</p><h1>Dokončna izdaja računa ST</h1></div>
+  <a href="{% url 'ui:st_review' invoice.company_id invoice.pk %}">Nazaj na pregled osnutka</a>
+</header>
+<p class="status-badge">{% if review %}Posamično pregledan — še ni izdan{% else %}Osnutek — pregled manjka ali je zastarel{% endif %}</p>
+{% include "ui/partials/st_snapshots.html" %}
+<section class="panel"><h2>Posledice dokončne potrditve</h2>
+<ul>
+  <li>Račun bo uradno izdan in bo dobil trajno številko ST.</li>
+  <li>Finančna vsebina in shranjeni posnetki postanejo nespremenljivi.</li>
+  <li>Izdaje ni mogoče razveljaviti s preprostim izbrisom računa. Popravki zahtevajo predpisan korekcijski postopek.</li>
+  <li>PDF se pripravi po izdaji. Napaka pri pripravi PDF ne razveljavi izdaje ali trajne številke.</li>
+</ul>
+{% if action_error %}<p class="form-errors" role="alert">{{ action_error }}</p>
+<a href="{% url 'ui:podjetje_detail' invoice.company_id %}">Preveri nastavitve tega izdajatelja</a>{% endif %}
+<form method="post">
+  {% csrf_token %}{% include "ui/partials/form_fields.html" %}
+  {% if review %}<button class="button-primary" type="submit">Potrdi izdajo</button>{% endif %}
+</form></section>
+<p>Račun še ni poslan. Dostava sledi v T8-E2, arhiviranje v T8-F.</p>
+{% endblock %}

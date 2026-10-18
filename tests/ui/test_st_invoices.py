@@ -270,7 +270,8 @@ def test_list_distinguishes_drafts_numbers_and_company_scopes(client, podatki):
     for value in ("Osnutek — še ni izdan", "Številka ni dodeljena", "ST-2026-0001", "Oštevilčen ST", other.naziv):
         assert value in content
     assert review_url(first) in content and review_url(second) in content
-    assert review_url(numbered) not in content
+    assert f'href="{review_url(numbered)}"' not in content
+    assert reverse("ui:st_detail", args=[numbered.company_id, numbered.pk]) in content
     assert "NP-HIDDEN" not in content
     response = client.get(LIST, {"company": other.pk})
     assert list(response.context["invoices"]) == [second]
