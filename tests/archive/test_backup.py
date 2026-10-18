@@ -18,9 +18,19 @@ from archive.configuration import (
     resolve_archive_locations,
     verify_and_save_archive_roots,
 )
-from archive.models import ArchiveConfiguration, BackupSnapshot
+from archive.models import ArchiveConfiguration, ArchivedFile, BackupSnapshot
+from companies.models import InitialSetupCompletion, NumberSequence
+from companies.readiness import complete_initial_setup, initial_setup_completed
+from companies.services import dodeli_naslednjo_stevilko
+from delivery.models import DeliveryAttempt, MonthlySummaryAttempt
 from invoicing import services
-from invoicing.models import MonthlyCycle
+from invoicing.models import Invoice, InvoiceLine, MonthlyCycle
+from tests.companies.test_setup_readiness import (
+    five_issuers as five_issuers,  # noqa: PLC0414 -- Imported pytest fixture.
+)
+from tests.ui.test_company_confirmations import (
+    confirmation_ui_data as setup_data,  # noqa: F401 -- Dependency of five_issuers.
+)
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -487,38 +497,132 @@ def test_post_monthly_once_after_successful_finalization(locations, monkeypatch)
 
 
 def test_monthly_backup_failures_preserve_start_and_completed_state(
-    locations, monkeypatch, client
+    five_issuers, monkeypatch, client, settings
 ):
-    from tests.invoicing.test_monthly_cycle import ustvari_podjetje
+    from archive.services import ArchiveRoots, archive_pdf
+    from rendering.services import render_pdf
+    from tests.companies.test_setup_readiness import issue_np
+    from tests.invoicing.test_monthly_archive import _mark_sent
     from tests.invoicing.test_monthly_cycle_finalization import _successful, _summary
 
-    ustvari_podjetje("Backup company", "12345679")
-    monkeypatch.setattr(
-        backup, "_copy_database", lambda *_: (_ for _ in ()).throw(OSError("secret"))
-    )
+    data, _ = five_issuers
+    complete_initial_setup()
+    assert initial_setup_completed()
+    invoice = issue_np(data)
+    render_pdf(invoice)
+    invoice.refresh_from_db()
+    _mark_sent(invoice)
+    roots = resolve_archive_locations()
+    assert archive_pdf(invoice, ArchiveRoots(roots.local_root, roots.icloud_root)).success
+    assert create().success
+
+    def protected_state():
+        rows = [list(model.objects.order_by("pk").values()) for model in (
+            Invoice, InvoiceLine, NumberSequence, DeliveryAttempt, ArchivedFile,
+            BackupSnapshot, MonthlySummaryAttempt, InitialSetupCompletion,
+        )]
+        files = {
+            str(path): path.read_bytes()
+            for root in (
+                roots.local_root, roots.icloud_root, roots.dropbox_root,
+                Path(settings.MEDIA_ROOT), Path(settings.RENDERING_ROOT),
+            )
+            for path in root.rglob("*") if path.is_file()
+        }
+        return rows, files
+
+    attempts = []
+
+    def fail_copy(*_):
+        attempts.append(MonthlyCycle.objects.filter(status=MonthlyCycle.Status.ZAKLJUCEN).exists())
+        raise OSError("secret /filesystem/password")
+
+    monkeypatch.setattr(backup, "_copy_database", fail_copy)
+    before = protected_state()
     response = client.post(
         "/mesecni-obracun/", {"leto": 2026, "mesec": 10, "datum_izdaje": "2026-10-08"}
     )
     assert response.status_code == 302
     assert "backup_error=1" in response.url
-    assert (
-        "Varnostne kopije ni bilo mogoče" in client.get(response.url).content.decode()
-    )
+    assert protected_state() == before
     cycle = MonthlyCycle.objects.get()
+    cycle_before_get = MonthlyCycle.objects.values().get(pk=cycle.pk)
+    page = client.get(response.url)
+    assert page.status_code == 200
+    assert (
+        "Varnostne kopije ni bilo mogoče" in page.content.decode()
+    )
+    assert "secret" not in page.content.decode()
+    assert MonthlyCycle.objects.values().get(pk=cycle.pk) == cycle_before_get
+    assert protected_state() == before
     assert cycle.status == MonthlyCycle.Status.V_TEKU
     cycle.trenutni_korak = MonthlyCycle.Korak.ZAKLJUCEK
     cycle.save()
     _summary(cycle)
     _successful(monkeypatch, cycle)
+    before = protected_state()
     response = client.post("/mesecni-obracun/", {"action": "finalize_monthly_cycle"})
     assert response.status_code == 302
     assert "backup_error=1" in response.url
+    assert protected_state() == before
+    cycle_before_get = MonthlyCycle.objects.values().get(pk=cycle.pk)
+    page = client.get(response.url)
+    assert page.status_code == 200
+    assert "ui/dashboard.html" in [template.name for template in page.templates]
     assert (
-        "Varnostne kopije ni bilo mogoče" in client.get(response.url).content.decode()
+        "Varnostne kopije ni bilo mogoče" in page.content.decode()
     )
+    assert 'role="alert"' in page.content.decode()
+    assert "secret" not in page.content.decode()
+    assert MonthlyCycle.objects.values().get(pk=cycle.pk) == cycle_before_get
+    assert protected_state() == before
     cycle.refresh_from_db()
     assert cycle.status == MonthlyCycle.Status.ZAKLJUCEN
     assert cycle.completed_at and cycle.completion_snapshot
+    assert attempts == [False, True]
+    assert BackupSnapshot.objects.count() == 1
+
+
+def test_backup_warning_does_not_bypass_incomplete_initial_setup(
+    locations, monkeypatch, client
+):
+    from tests.invoicing.test_monthly_cycle import ustvari_podjetje
+    from tests.invoicing.test_monthly_cycle_finalization import (
+        _cycle,
+        _successful,
+        _summary,
+    )
+
+    company = ustvari_podjetje("Backup company", "12345679")
+    cycle = _cycle()
+    _summary(cycle)
+    _successful(monkeypatch, cycle)
+
+    def fail_copy(*_):
+        raise OSError("secret")
+
+    monkeypatch.setattr(backup, "_copy_database", fail_copy)
+    completed = services.zakljuci_mesecni_cikel(cycle)
+    assert not completed.backup_result.success
+    assert not initial_setup_completed()
+    before = MonthlyCycle.objects.values().get(pk=cycle.pk)
+    monkeypatch.setattr(
+        backup, "create_backup_snapshot", lambda **_: pytest.fail("GET must not back up")
+    )
+    monkeypatch.setattr(
+        "invoicing.backup_hooks.create_backup_snapshot",
+        lambda **_: pytest.fail("GET must not back up"),
+    )
+    response = client.get("/?backup_error=1")
+    assert response.status_code == 302
+    assert response.url == "/zacetna-nastavitev/"
+    for tip in ("NP", "ST"):
+        with pytest.raises(ValidationError, match="Začetna nastavitev"):
+            dodeli_naslednjo_stevilko(company, tip, date(2026, 10, 8))
+    assert MonthlyCycle.objects.values().get(pk=cycle.pk) == before
+    assert not InitialSetupCompletion.objects.exists()
+    assert not NumberSequence.objects.exists()
+    assert not Invoice.objects.exists()
     assert not BackupSnapshot.objects.exists()
 
 
