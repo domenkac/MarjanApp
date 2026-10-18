@@ -19,6 +19,11 @@
 {% if invoice.status == 'IZBRAN_ZA_POSILJANJE' and attempt.result == 'PREPARED' %}
 <form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
 {% csrf_token %}<button type="submit" name="action" value="send">Pošlji PDF</button></form>
+<h3>Preklic pripravljene dostave</h3>
+<p role="alert">Sporočilo še ni bilo poslano. Preklic trajno onemogoči pošiljanje tega poskusa in ohrani revizijsko sled. Po začetku oddaje preklic ni dovoljen.</p>
+<form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
+{% csrf_token %}{{ cancel_form.as_p }}
+<button type="submit" name="action" value="cancel">Prekliči pripravljeno dostavo</button></form>
 {% elif invoice.status == 'NAPAKA' and attempt.result == 'CONFIRMED_FAILURE' %}
 <form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
 {% csrf_token %}<button type="submit" name="action" value="retry">Pripravi varen ponovni poskus</button></form>
@@ -36,9 +41,9 @@
 <p>Aktivno pošiljanje ostane zaščiteno z zaklepom. Prekinjena oddaja brez končnega rezultata zahteva ročno preverjanje.</p>
 {% endif %}
 {% if invoice.status == 'POSLAN' and attempt.result == 'UNKNOWN' %}<p>Uporabnik je izrecno potrdil preverjeno pošiljanje. Izvirni rezultat UNKNOWN ostaja v revizijski sledi.</p>{% endif %}
-<p>Če je zamrznjeni prejemnik napačen, ne pošiljajte. Postopek popravka ali preklica poskusa še ni določen.</p>
 </section>
-{% elif invoice.status == 'IZBRAN_ZA_POSILJANJE' %}
+{% endif %}
+{% if can_prepare %}
 <section class="panel"><h2>Prejemniki dostave</h2>
 {% if suggestion %}<p>Kontaktni naslov povezanega prejemnika je samo predlog. Preverite ga in izrecno potrdite na naslednjem zaslonu.</p>{% endif %}
 <p>Vnesite naslove, ločene z vejico ali podpičjem. Vsak naslov naj nastopa samo v eni vlogi.</p>
@@ -58,6 +63,19 @@
 {% csrf_token %}{{ confirm_form.as_p }}<button type="submit">Potrdi prejemnike in pripravi dostavo</button></form>
 </section>
 {% endif %}
+{% endif %}
+{% if history %}
+<section class="panel"><h2>Zgodovina dostave</h2>
+{% for entry in history %}
+<article><h3>Poskus {{ entry.attempt.sequence }} · {{ entry.attempt.result }}</h3>
+<p>{{ entry.label }}</p>
+<p>Pripravljeno: {{ entry.attempt.prepared_at }}{% if entry.attempt.completed_at %} · Končano: {{ entry.attempt.completed_at }}{% endif %}</p>
+<dl><dt>Pošiljatelj</dt><dd>{{ entry.attempt.sender }}</dd>
+<dt>TO</dt><dd>{{ entry.attempt.recipients_to|join:", " }}</dd>
+<dt>CC — vidna kopija</dt><dd>{{ entry.attempt.recipients_cc|join:", "|default:"Brez" }}</dd>
+<dt>BCC — skrita kopija računovodji</dt><dd>{{ entry.attempt.recipients_bcc|join:", " }}</dd></dl></article>
+{% endfor %}
+</section>
 {% endif %}
 <p>Sprejem sporočila pri SMTP ne potrjuje prejema v nabiralnik ali arhiviranja. Arhiviranje ST sledi v T8-F.</p>
 {% endblock %}

@@ -482,6 +482,21 @@ Varen ponovni poskus pri potrjeni napaki uporabi **isti potrjeni PDF, isti eSLOG
 
 Če je rezultat neznan, aplikacija računa ne pošlje samodejno znova. Najprej preveri mapo Poslano, kadar povezani ponudnik in dovoljenja to omogočajo. Če samodejno preverjanje ni mogoče, uporabniku pokaže navodilo za ročno preverjanje in zahteva izrecno odločitev. Če je sporočilo najdeno, se račun označi kot `Poslan`; če uporabnik potrdi, da ni bilo poslano, se omogoči varen ponovni poskus. Preverjanje in uporabnikova odločitev se zabeležita v revizijski sledi.
 
+**T8-E3 — preklic pripravljene dostave samostojnega ST (potrjena odločitev).**
+Uporabnik sme z izrecno potrditvijo in obveznim razlogom preklicati samo zadnji
+poskus `PREPARED`, dokler se oddaja SMTP še ni začela in oštevilčen samostojni ST
+ostaja `Izbran za pošiljanje` pri izbranem izdajatelju. Poskus dobi trajni rezultat
+`CANCELLED`; izvirni prejemniki in druga zamrznjena dokazila ostanejo v zgodovini.
+Preklic in revizijsko dokazilo se shranita skupaj ter ne spremenita izdanega računa,
+številčenja ali uradnega PDF. Preklicanega poskusa ni dovoljeno poslati ali ponovno uporabiti.
+
+Po preklicu je dovoljen ločen nov pregled in izrecna potrditev popravljenih TO/CC,
+z obstoječim pravilom za skriti BCC računovodji. Nastane nov poskus z naslednjim
+zaporedjem; priprava in pošiljanje ostaneta ločena. Stari pregledi ne veljajo za
+zamenjavo. Po začetku oddaje preklic ni dovoljen, tudi pri `UNKNOWN` ne. Obstoječi
+ponovni poskusi potrjenih napak ohranijo zamrznjene prejemnike. Pravilo ne velja za NP;
+arhiviranje in varnostne kopije ST ostajajo naloga T8-F.
+
 ### 7.6 Zaključna kontrola pošiljanja in obvestilo uporabniku
 
 Ko so izvedeni vsi poskusi pošiljanja v mesečnem paketu, aplikacija preveri rezultat za vsak račun posebej. **Uspešno poslano** pomeni, da je odhodni e-poštni strežnik sporočilo sprejel. To ne pomeni potrditve, da je sporočilo prispelo v prejemnikov nabiralnik ali da ga je prejemnik odprl.

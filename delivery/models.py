@@ -5,6 +5,7 @@ from django.db import models
 class DeliveryAttempt(models.Model):
     class Result(models.TextChoices):
         PREPARED = "PREPARED", "Prepared"
+        CANCELLED = "CANCELLED", "Preklicano"
         SUBMISSION_STARTED = "SUBMISSION_STARTED", "Submission started"
         ACCEPTED = "ACCEPTED", "Accepted"
         CONFIRMED_FAILURE = "CONFIRMED_FAILURE", "Confirmed failure"

@@ -600,7 +600,8 @@ assetov, pripravljene pred transakcijo; račun in števec ostaneta nespremenjena
 #### T8-E2: operativna dostava samostojnega ST
 
 Priprava sprejme samo shranjen, oštevilčen samostojni `ST`, brez pogodbe in korekcijske
-reference, v stanju `IZBRAN_ZA_POSILJANJE`, ki še nima poskusa dostave. Zahteva že
+reference, v stanju `IZBRAN_ZA_POSILJANJE`, ki še nima poskusa dostave oziroma ima
+zadnji poskus preklican po spodnjem pravilu T8-E3. Zahteva že
 registriran uradni PDF s preverjeno kontrolno vsoto SHA-256. Pregled, priprava in
 pošiljanje ne generirajo ali popravljajo PDF ter ne spreminjajo številke ali finančnih
 posnetkov. Ob manjkajočem ali poškodovanem PDF je dostava blokirana.
@@ -636,9 +637,37 @@ dokazilo; druga možnost samo pripravi varen ponovni poskus. Pri prekinjeni odda
 izrecni POST sproži obstoječo obnovo: aktivni zaklep ostane zaščiten, prekinjen poskus
 brez končnega rezultata postane `UNKNOWN`. Čas sam ne dovoljuje ponovitve.
 
-**Odprta poslovna odločitev:** postopek za napačnega zamrznjenega prejemnika na že
-pripravljenem poskusu ni določen. UI opozori, naj uporabnik ne pošilja. Spreminjanje,
-brisanje in preklic poskusa niso dodani. Odločitev potrebuje izrecno potrditev.
+#### T8-E3: varen preklic in zamenjava pripravljenega poskusa ST
+
+Potrjena poslovna odločitev dovoljuje preklic samo zadnjega poskusa `PREPARED`,
+brez `submission_started_at` in identitete izvajanja. Račun mora pripadati zahtevanemu
+podjetju ter ostati oštevilčen samostojni ST v stanju `IZBRAN_ZA_POSILJANJE`.
+Ločeni POST zahteva obvezen neprazen razlog in izrecno potrditev preklica.
+
+Storitev pred branjem in spreminjanjem stanja pridobi isti `delivery_execution_lock`
+kot pošiljanje. Kratka transakcija SQLite `IMMEDIATE` ponovno preveri račun in zadnji
+poskus ter s pogojnim prehodom `PREPARED` v `CANCELLED` spremeni samo rezultat in
+čas zaključka. `DeliveryAttempt.save()` se za spremembo ne uporablja. V isti transakciji
+nastane nespremenljiv `AuditLogEntry` s prejšnjim in novim rezultatom, razlogom,
+časom, identiteto podjetja, računa in poskusa ter zamrznjenimi prejemniki, pošiljateljem
+in metapodatki PDF. Napaka revizijskega zapisa razveljavi tudi preklic. Sočasni operaciji
+pošiljanja in preklica imata samo enega zmagovalca. Zaklep se pridobi zunaj transakcije;
+operativni pogled izključi `ATOMIC_REQUESTS`.
+
+`CANCELLED` je trajen in ni potrjena napaka. Nobena storitev ali UI ga ne sme poslati,
+izbrisati, ponovno uporabiti ali spremeniti njegovih zamrznjenih podatkov. UI prikaže
+opozorilo, obvezni razlog, potrditev in ločeno zgodovino vseh poskusov. Preklic nikoli
+samodejno ne pripravi zamenjave. Nov izrecen pregled TO/CC ohrani pravilo BCC računovodji
+in preverjanje uradnega PDF. Podpisano dokazilo pregleda vsebuje tudi ID, zaporedje in
+rezultat zadnjega poskusa oziroma odsotnost poskusa. Priprava v kratki transakciji ponovno
+preveri celoten pregled, zato stari tokeni in ponovljeni POST ne ustvarijo zamenjave.
+Nov poskus ima drug ID in zaporedje prejšnjega + 1; prvi poskus ostaja 1.
+
+Preklic po začetku oddaje ali pri spremenjenem stanju računa ni dovoljen. `ACCEPTED`,
+`CONFIRMED_FAILURE`, `UNKNOWN` in že preklicani poskusi niso upravičeni. Obnova po
+prekinitvi SMTP, razrešitev `UNKNOWN` in obstoječe ponovitve z zamrznjenimi prejemniki
+ostanejo nespremenjene. Preklic ne spreminja računa, vrstic, številčenja, datuma izdaje,
+uradnega PDF ali njegove kontrolne vsote. Pravilo ne velja za mesečni NP.
 
 **T8-F:** sprejem SMTP ni dokaz arhiviranja. Dostava ST ne izvaja arhiviranja ali
 varnostnih kopij in ni vključena v mesečni NP cikel. Preostane ločena integracija

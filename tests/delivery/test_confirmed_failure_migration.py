@@ -5,15 +5,32 @@ from django.db import connection
 from django.db.migrations.executor import MigrationExecutor
 
 
+@pytest.fixture
+def isolated_migration_db(transactional_db, tmp_path):
+    """Test historical upgrades without downgrading the current application DB."""
+    original_name = connection.settings_dict["NAME"]
+    connection.close()
+    connection.settings_dict["NAME"] = tmp_path / "migration.sqlite3"
+    try:
+        yield connection
+    finally:
+        connection.close()
+        connection.settings_dict["NAME"] = original_name
+
+
 @pytest.mark.django_db(transaction=True)
-def test_confirmed_failure_migration_preserves_audit_data_and_reverses():
+def test_confirmed_failure_migration_preserves_audit_data_and_reverses(isolated_migration_db):
     executor = MigrationExecutor(connection)
     latest_targets = executor.loader.graph.leaf_nodes()
     old_targets = [
         (app, "0001_initial") if app == "delivery" else (app, migration)
         for app, migration in latest_targets
     ]
-    new_targets = latest_targets
+    # Exercise the older reversible migration before applying forward-only 0007.
+    new_targets = [
+        (app, "0006_deliveryattempt_execution_id") if app == "delivery" else (app, migration)
+        for app, migration in latest_targets
+    ]
 
     try:
         executor.migrate(old_targets)

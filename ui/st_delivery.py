@@ -22,6 +22,7 @@ from delivery.services import (
     send_pdf_email,
 )
 from delivery.st_delivery import (
+    cancel_st_attempt,
     normalize_addresses,
     prepare_st_attempt,
     review_st_delivery,
@@ -40,8 +41,13 @@ _SEND_ERROR = (
     "celovitost uradnega PDF in ujemanje pošiljatelja z nastavitvami SMTP. "
     "Pri začetem pošiljanju uporabite preverjanje prekinjene oddaje."
 )
+_CANCEL_ERROR = (
+    "Preklic ni dovoljen ali je zahteva zastarela. Prekličete lahko samo zadnji "
+    "pripravljeni poskus pred začetkom oddaje. Vnesite razlog in izrecno potrdite preklic."
+)
 _RESULTS = {
     "PREPARED": "Pripravljeno — še ni poslano.",
+    "CANCELLED": "Preklicano — sporočilo ni bilo poslano. Za nov poskus ponovno preglejte prejemnike.",
     "SUBMISSION_STARTED": "Oddaja se je začela. Ponovno pošiljanje je blokirano.",
     "ACCEPTED": "Odhodni strežnik je sporočilo sprejel. Račun je poslan.",
     "CONFIRMED_FAILURE": "Neuspeh je potrjen. Dovoljena je priprava varnega ponovnega poskusa.",
@@ -83,13 +89,24 @@ class STDeliveryConfirmForm(forms.Form):
     confirm_recipients = forms.BooleanField(label="Potrjujem prikazane prejemnike in pripravo nespremenljivega poskusa.")
 
 
+class STDeliveryCancelForm(forms.Form):
+    reason = forms.CharField(label="Razlog za preklic (obvezno)", widget=forms.Textarea)
+    confirm_cancellation = forms.BooleanField(label="Izrecno potrjujem preklic pripravljenega poskusa dostave.")
+
+
 def _context(invoice):
-    attempt = invoice.delivery_attempts.order_by("-sequence").first()
+    history = list(invoice.delivery_attempts.order_by("-sequence"))
+    attempt = history[0] if history else None
     result_label = _RESULTS.get(attempt.result, "") if attempt else "Dostava še ni pripravljena."
     if attempt and attempt.result == DeliveryAttempt.Result.UNKNOWN and has_sent_delivery_evidence(invoice, attempt):
         result_label = "Pošiljanje je uporabnik izrecno potrdil s preverjanjem. Izvirni rezultat SMTP ostaja neznan."
     return {
         "invoice": invoice, "attempt": attempt,
+        "history": [{"attempt": item, "label": _RESULTS.get(item.result, "")} for item in history],
+        "can_prepare": invoice.status == "IZBRAN_ZA_POSILJANJE" and (
+            attempt is None or attempt.result == DeliveryAttempt.Result.CANCELLED
+        ),
+        "cancel_form": STDeliveryCancelForm(),
         "result_label": result_label,
         "failure_label": _FAILURES.get(attempt.result_code, "Strežnik je potrdil neuspeh oddaje.") if attempt else "",
         "active_section": "dashboard", "active_page": "st",
@@ -150,6 +167,8 @@ def st_delivery_action(request, company_id, invoice_id, attempt_id):
         "Dejanje ni dovoljeno. Preverite zadnji poskus in stanje računa. "
         "Za odločitev o neznanem rezultatu vnesite razlog preverjanja."
     )
+    if action == "cancel":
+        error = _CANCEL_ERROR
     try:
         latest = invoice.delivery_attempts.order_by("-sequence").first()
         if latest.pk != attempt.pk:
@@ -160,6 +179,15 @@ def st_delivery_action(request, company_id, invoice_id, attempt_id):
                 body=f"V prilogi je račun {invoice.stevilka}.\n",
                 smtp_config=resolve_smtp_config(invoice.company),
                 credential_ref=resolve_keyring_credential_ref(invoice.company),
+            )
+        elif action == "cancel":
+            form = STDeliveryCancelForm(request.POST)
+            if not form.is_valid():
+                raise ValidationError("Razlog in potrditev preklica sta obvezna.")
+            cancel_st_attempt(
+                invoice, attempt_id=attempt.pk, company_id=company_id,
+                reason=form.cleaned_data["reason"],
+                confirmed=form.cleaned_data["confirm_cancellation"],
             )
         elif action == "retry":
             prepare_retry_attempt(attempt)

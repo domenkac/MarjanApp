@@ -28,7 +28,11 @@ from delivery.services import (
     resolve_unknown_user_confirmed_not_sent_and_prepare_retry,
     send_pdf_email,
 )
-from delivery.st_delivery import prepare_st_attempt, review_st_delivery
+from delivery.st_delivery import (
+    cancel_st_attempt,
+    prepare_st_attempt,
+    review_st_delivery,
+)
 from tests.delivery.test_delivery_services import FakeSmtp, issued_invoice, smtp_config
 from tests.rendering.test_st_pdf import confirmed, ready, setup_data
 
@@ -386,6 +390,9 @@ def test_cross_process_lock_and_crash_recovery(st_invoice, smtp_config, settings
     try:
         if mode == "active":
             _wait_active(child)
+            with pytest.raises(ValidationError):
+                cancel_st_attempt(st_invoice, attempt_id=attempt.pk,
+                                  company_id=st_invoice.company_id, confirmed=True, reason="Ni dovoljeno")
             assert recover_interrupted_submissions(invoice_ids=[st_invoice.pk]) == 0
             fake = FakeSmtp()
             with pytest.raises(ValidationError, match="already being sent"):
@@ -395,6 +402,9 @@ def test_cross_process_lock_and_crash_recovery(st_invoice, smtp_config, settings
             child.stdin.flush()
         _, error = child.communicate(timeout=20)
         assert child.returncode == (23 if mode == "crash" else 0), error
+        with pytest.raises(ValidationError):
+            cancel_st_attempt(st_invoice, attempt_id=attempt.pk,
+                              company_id=st_invoice.company_id, confirmed=True, reason="Ni dovoljeno")
         assert recover_interrupted_submissions(invoice_ids=[st_invoice.pk]) == (mode == "crash")
         attempt.refresh_from_db()
         assert attempt.result == ("UNKNOWN" if mode == "crash" else "ACCEPTED")

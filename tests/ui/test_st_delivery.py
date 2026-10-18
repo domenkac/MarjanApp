@@ -177,3 +177,64 @@ def test_raw_errors_and_paths_never_reach_ui(client, st_invoice):
     html = response.content.decode()
     assert response.status_code == 409 and secret not in html
     assert attempt.pdf_path not in html and st_invoice.company.keychain_kljuc_posiljatelja not in html
+
+
+def test_cancellation_requires_confirmation_and_reason_then_fresh_review(client, st_invoice):
+    original_review = review(client, st_invoice)
+    assert confirm(client, st_invoice, original_review).status_code == 302
+    attempt = DeliveryAttempt.objects.get()
+    assert "Prekliči pripravljeno dostavo" in client.get(url("delivery", st_invoice)).content.decode()
+    assert client.get(url("delivery_action", st_invoice, attempt), {"action": "cancel"}).status_code == 405
+    for fields in ({}, {"reason": "Popravek"}, {"confirm_cancellation": "on"}, {"reason": "  ", "confirm_cancellation": "on"}):
+        assert action(client, st_invoice, attempt, "cancel", **fields).status_code == 409
+    with patch.dict(connection.settings_dict, ATOMIC_REQUESTS=True):
+        assert action(client, st_invoice, attempt, "cancel", reason="Napačen naslov", confirm_cancellation="on").status_code == 302
+    assert DeliveryAttempt.objects.count() == 1
+    page = client.get(url("delivery", st_invoice)).content.decode()
+    assert "CANCELLED" in page and "Zgodovina dostave" in page
+    assert "Preglej prejemnike pred pripravo" in page
+    assert "Pošlji PDF" not in page and "Prekliči pripravljeno dostavo" not in page
+    assert action(client, st_invoice, attempt, "cancel", reason="Ponovno", confirm_cancellation="on").status_code == 409
+    with patch("ui.st_delivery.resolve_smtp_config", return_value=object()), patch(
+        "ui.st_delivery.resolve_keyring_credential_ref", return_value=object(),
+    ), patch("delivery.credentials.load_password", side_effect=AssertionError("No credential access")):
+        assert action(client, st_invoice, attempt, "send").status_code == 409
+    assert confirm(client, st_invoice, original_review).status_code == 409
+    fresh = review(client, st_invoice, recipients_to="correct@example.com", recipients_cc="new-copy@example.com")
+    assert "correct@example.com" in fresh.content.decode()
+    assert confirm(client, st_invoice, fresh).status_code == 302
+    replacement = DeliveryAttempt.objects.latest("sequence")
+    assert replacement.pk != attempt.pk and replacement.sequence == 2
+    assert replacement.recipients_to == ["correct@example.com"]
+    assert replacement.recipients_cc == ["new-copy@example.com"]
+    assert replacement.recipients_bcc == ["accountant@example.com"]
+    assert replacement.result == "PREPARED" and replacement.submission_started_at is None
+    assert confirm(client, st_invoice, fresh).status_code == 409
+    page = client.get(url("delivery", st_invoice)).content.decode()
+    assert "Poskus 1 · CANCELLED" in page and "Poskus 2 · PREPARED" in page
+    assert "buyer@example.com" in page and "correct@example.com" in page
+
+
+@pytest.mark.parametrize("result", ["SUBMISSION_STARTED", "ACCEPTED", "CONFIRMED_FAILURE", "UNKNOWN", "CANCELLED"])
+def test_ui_rejects_cancellation_of_other_states(client, st_invoice, result):
+    attempt = prepare(st_invoice)
+    DeliveryAttempt.objects.filter(pk=attempt.pk).update(result=result)
+    assert "Prekliči pripravljeno dostavo" not in client.get(url("delivery", st_invoice)).content.decode()
+    assert action(client, st_invoice, attempt, "cancel", reason="Popravek", confirm_cancellation="on").status_code == 409
+    attempt.refresh_from_db()
+    assert attempt.result == result
+
+
+def test_cancel_endpoint_keeps_csrf_ownership_and_safe_errors(st_invoice):
+    attempt = prepare(st_invoice)
+    fields = {"action": "cancel", "reason": "Popravek", "confirm_cancellation": "on"}
+    assert Client(enforce_csrf_checks=True).post(url("delivery_action", st_invoice, attempt), fields).status_code == 403
+    client = Client()
+    for changes in ({"company_id": -1}, {"invoice_id": -1}, {"attempt_id": -1}):
+        # Positive unknown IDs still match the URL converter.
+        changes = {key: 999999 for key in changes}
+        assert client.post(url("delivery_action", st_invoice, attempt, **changes), fields).status_code == 404
+    secret = "/private/db.sqlite3 password=secret keychain-account"
+    with patch("ui.st_delivery.cancel_st_attempt", side_effect=RuntimeError(secret)):
+        response = client.post(url("delivery_action", st_invoice, attempt), fields)
+    assert response.status_code == 409 and secret not in response.content.decode()
