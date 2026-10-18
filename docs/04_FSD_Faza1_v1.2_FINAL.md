@@ -591,12 +591,59 @@ preverjene reference; v transakciji ni datotečnih ali zunanjih operacij.
 Napaka pred potrditvijo transakcije povrne račun in števec. Vsak ponovljen ali sočasen
 drugi poskus je izrecno zavrnjen; ne vrne nove številke in ne prepiše potrjenega računa.
 
-**Omejitev integracije:** to je samo domenska potrditev. Operativna izdaja ST še ni
-dokončana: uradni ST PDF, dostava in arhiv sledijo v poznejših nalogah. UI T8-B ostaja
-samo pregled osnutka, brez potrditve, izdaje, pošiljanja ali arhiviranja. `FEATURE_ESLOG`
-ostaja izključen; ST ne razrešuje konfiguracije eSLOG, vezane na pogodbo.
+**Meja domenske potrditve:** ta storitev ne pripravlja PDF, ne pošilja in ne arhivira.
+Uradni PDF in operativna izdaja sta dodana v T8-D/E1; ločena dostava je opisana spodaj.
+`FEATURE_ESLOG` ostaja izključen; ST ne razrešuje konfiguracije eSLOG, vezane na pogodbo.
 Ob neuspešni potrditvi lahko ostanejo neuporabljene vsebinsko naslovljene kopije
 assetov, pripravljene pred transakcijo; račun in števec ostaneta nespremenjena.
+
+#### T8-E2: operativna dostava samostojnega ST
+
+Priprava sprejme samo shranjen, oštevilčen samostojni `ST`, brez pogodbe in korekcijske
+reference, v stanju `IZBRAN_ZA_POSILJANJE`, ki še nima poskusa dostave. Zahteva že
+registriran uradni PDF s preverjeno kontrolno vsoto SHA-256. Pregled, priprava in
+pošiljanje ne generirajo ali popravljajo PDF ter ne spreminjajo številke ali finančnih
+posnetkov. Ob manjkajočem ali poškodovanem PDF je dostava blokirana.
+
+Uporabnik izrecno vnese TO in neobvezni CC. `Tenant.email` povezanega prejemnika je
+samo predlog v obrazcu; pri ročnem prejemniku brez `Tenant` je TO prazen. Kontakti
+`RecipientContact` se pri samostojnem ST ne uporabljajo. Vnos ne ustvarja ali spreminja
+najemnikov. Naslovi se preverijo in obrežejo, domena se normalizira, ponovitve v isti
+vlogi se odstranijo. Ponavljanje naslova med TO, CC in BCC se zavrne za izrecen popravek,
+da skriti prejemnik ne postane vidni prejemnik. BCC vsebuje nastavljeni naslov
+računovodje izdajatelja; naslov BCC je samo v ovojnici SMTP, nikoli v glavi sporočila.
+
+Pred nastankom `DeliveryAttempt` zaslon prikaže končni pregled pošiljatelja, TO, CC in
+BCC. Podpisan pregled je vezan na račun, podjetje, številko, prejemnike in PDF.
+Ločeni POST z obvezno potrditvijo pripravi nespremenljivi poskus. Spremenjene
+nastavitve ali metapodatki zahtevajo nov pregled. GET ne pripravlja, pošilja ali obnavlja
+poskusov. Priprava ni pošiljanje; sledi ločen POST »Pošlji PDF«.
+
+Pošiljanje uporablja obstoječi `send_pdf_email`, konfiguracijo izdajatelja, Keychain,
+zaklep izvajanja in prehode `PREPARED`, `SUBMISSION_STARTED` ter končni rezultat.
+Pred zunanjimi operacijami se preverita zadnji poskus in ujemanje uporabnika SMTP
+ter trenutnega pošiljatelja izdajatelja z zamrznjenim pošiljateljem. PDF se ponovno
+preveri proti zamrznjenim metapodatkom. SMTP in Keychain potekata zunaj transakcije;
+operativni pogledi izključijo tudi `ATOMIC_REQUESTS`.
+
+Potrjen sprejem SMTP uporabi obstoječi prehod v `POSLAN`; potrjena napaka v `NAPAKA`.
+Samo zadnja potrjena napaka omogoča obstoječo varno pripravo ponovitve z istimi
+prejemniki, pošiljateljem in PDF. Ponovitev zahteva ločeno dejanje pošiljanja.
+`UNKNOWN` blokira samodejno ponovno oddajo. Uporabnik preveri mapo Poslano ali drugo
+zanesljivo dokazilo in z obveznim razlogom izrecno potrdi »poslano« oziroma »ni poslano«.
+Obstoječi storitvi ohranita izvirni poskus in zapišeta nespremenljivo revizijsko
+dokazilo; druga možnost samo pripravi varen ponovni poskus. Pri prekinjeni oddaji
+izrecni POST sproži obstoječo obnovo: aktivni zaklep ostane zaščiten, prekinjen poskus
+brez končnega rezultata postane `UNKNOWN`. Čas sam ne dovoljuje ponovitve.
+
+**Odprta poslovna odločitev:** postopek za napačnega zamrznjenega prejemnika na že
+pripravljenem poskusu ni določen. UI opozori, naj uporabnik ne pošilja. Spreminjanje,
+brisanje in preklic poskusa niso dodani. Odločitev potrebuje izrecno potrditev.
+
+**T8-F:** sprejem SMTP ni dokaz arhiviranja. Dostava ST ne izvaja arhiviranja ali
+varnostnih kopij in ni vključena v mesečni NP cikel. Preostane ločena integracija
+preverjenega lokalnega in iCloud arhiva ter varnostnih kopij po obstoječih pravilih,
+z dokazi o celovitosti in varnim nadaljevanjem ob delnem neuspehu.
 
 ### 2.5 Δ zaznava — dispečer in predpogoji podjetja
 

@@ -118,6 +118,10 @@ def build_pdf_email(attempt: DeliveryAttempt, *, subject, body) -> PreparedEmail
         raise ValidationError("Delivery attempt must be persisted before composition.")
     current = DeliveryAttempt.objects.select_related("invoice").get(pk=attempt.pk)
     invoice = current.invoice
+    if invoice.document_type == Invoice.DocumentType.ST:
+        from .st_delivery import require_st_invoice
+
+        require_st_invoice(invoice)
     if current.result != DeliveryAttempt.Result.PREPARED:
         raise ValidationError("Only a prepared delivery attempt can be composed.")
     if invoice.rendered_eslog_path or invoice.rendered_eslog_checksum:
@@ -244,6 +248,10 @@ def prepare_retry_attempt(failed_attempt: DeliveryAttempt) -> DeliveryAttempt:
     if failed_attempt.pk is None:
         raise ValidationError("Delivery attempt must be persisted before retry.")
 
+    from .st_delivery import verify_st_retry_pdf
+
+    verify_st_retry_pdf(failed_attempt)
+
     with transaction.atomic():
         source = (
             DeliveryAttempt.objects.select_related("invoice")
@@ -320,6 +328,9 @@ def resolve_unknown_user_confirmed_not_sent_and_prepare_retry(
     attempt: DeliveryAttempt, *, reason: str
 ) -> DeliveryAttempt:
     reason = _required_text(reason, "Reason")
+    from .st_delivery import verify_st_retry_pdf
+
+    verify_st_retry_pdf(attempt)
     with transaction.atomic():
         source, invoice, content_type = _unresolved_unknown(attempt)
         if not invoice.stevilka:
@@ -555,6 +566,10 @@ def _send_pdf_email(
     current = DeliveryAttempt.objects.get(pk=attempt.pk)
     if current.result != DeliveryAttempt.Result.PREPARED:
         raise ValidationError("Only a prepared delivery attempt can be sent.")
+    if current.invoice.document_type == Invoice.DocumentType.ST:
+        from .st_delivery import validate_st_send
+
+        validate_st_send(current, smtp_config)
     prepared = build_pdf_email(current, subject=subject, body=body)
 
     started = current

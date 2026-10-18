@@ -26,6 +26,7 @@
 </section>
 <section class="panel"><h2>Dostava in arhiv</h2>
 {% if invoice.status == 'IZBRAN_ZA_POSILJANJE' %}<p>Še ni poslan.</p>{% else %}<p>Stanje dostave: {{ invoice.get_status_display }}</p>{% endif %}
-<p>Izdaja in priprava PDF ne pomenita pošiljanja ali arhiviranja. Dostava sledi v T8-E2, arhiviranje v T8-F.</p>
+<a href="{% url 'ui:st_delivery' invoice.company_id invoice.pk %}">Odpri dostavo in pregled prejemnikov</a>
+<p>Izdaja in priprava PDF ne pomenita pošiljanja ali arhiviranja. Arhiviranje sledi v T8-F.</p>
 </section>
 {% endblock %}

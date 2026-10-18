@@ -1,0 +1,63 @@
+{% extends "ui/base.html" %}
+{% block title %}Dostava {{ invoice.stevilka }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><div><p class="eyebrow">Dostava storitvenega računa</p><h1>{{ invoice.stevilka }}</h1></div>
+<a href="{% url 'ui:st_detail' invoice.company_id invoice.pk %}">Nazaj na izdani račun</a></header>
+<p>Stanje računa: {{ invoice.get_status_display }}</p>
+<p role="status">{{ result_label }}</p>
+{% if action_error %}<p role="alert">{{ action_error }}</p>{% endif %}
+{% if attempt %}
+<section class="panel"><h2>Poskus {{ attempt.sequence }}</h2>
+<p>Pripravljeno: {{ attempt.prepared_at }}{% if attempt.completed_at %} · Končano: {{ attempt.completed_at }}{% endif %}</p>
+<dl><dt>Pošiljatelj</dt><dd>{{ attempt.sender }}</dd>
+<dt>TO</dt><dd>{{ attempt.recipients_to|join:", " }}</dd>
+<dt>CC — vidna kopija</dt><dd>{{ attempt.recipients_cc|join:", "|default:"Brez" }}</dd>
+<dt>BCC — skrita kopija računovodji</dt><dd>{{ attempt.recipients_bcc|join:", " }}</dd>
+<dt>SHA-256 uradnega PDF</dt><dd>{{ attempt.pdf_checksum }}</dd></dl>
+<p>Prejemniki, pošiljatelj in PDF so zamrznjeni. Sprememba kontaktov ali nastavitev jih ne spremeni.</p>
+{% if attempt.result == 'CONFIRMED_FAILURE' %}<p role="alert">{{ failure_label }}</p>{% endif %}
+{% if invoice.status == 'IZBRAN_ZA_POSILJANJE' and attempt.result == 'PREPARED' %}
+<form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
+{% csrf_token %}<button type="submit" name="action" value="send">Pošlji PDF</button></form>
+{% elif invoice.status == 'NAPAKA' and attempt.result == 'CONFIRMED_FAILURE' %}
+<form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
+{% csrf_token %}<button type="submit" name="action" value="retry">Pripravi varen ponovni poskus</button></form>
+<p>Ponovni poskus ohrani iste prejemnike in PDF. Priprava še ne pošlje sporočila.</p>
+{% elif invoice.status == 'REZULTAT_NI_ZNAN' and attempt.result == 'UNKNOWN' %}
+<p>Samodejno ponovno pošiljanje je blokirano. Preverite mapo Poslano oziroma drugo zanesljivo dokazilo.</p>
+<form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
+{% csrf_token %}<label for="reason">Razlog in ugotovitev preverjanja (obvezno)</label>
+<textarea id="reason" name="reason" required></textarea>
+<button type="submit" name="action" value="unknown_sent">Preverjeno: sporočilo je poslano</button>
+<button type="submit" name="action" value="unknown_not_sent">Preverjeno: ni poslano — pripravi ponovni poskus</button></form>
+{% elif attempt.result == 'SUBMISSION_STARTED' %}
+<form method="post" action="{% url 'ui:st_delivery_action' invoice.company_id invoice.pk attempt.pk %}">
+{% csrf_token %}<button type="submit" name="action" value="recover">Preveri prekinjeno oddajo</button></form>
+<p>Aktivno pošiljanje ostane zaščiteno z zaklepom. Prekinjena oddaja brez končnega rezultata zahteva ročno preverjanje.</p>
+{% endif %}
+{% if invoice.status == 'POSLAN' and attempt.result == 'UNKNOWN' %}<p>Uporabnik je izrecno potrdil preverjeno pošiljanje. Izvirni rezultat UNKNOWN ostaja v revizijski sledi.</p>{% endif %}
+<p>Če je zamrznjeni prejemnik napačen, ne pošiljajte. Postopek popravka ali preklica poskusa še ni določen.</p>
+</section>
+{% elif invoice.status == 'IZBRAN_ZA_POSILJANJE' %}
+<section class="panel"><h2>Prejemniki dostave</h2>
+{% if suggestion %}<p>Kontaktni naslov povezanega prejemnika je samo predlog. Preverite ga in izrecno potrdite na naslednjem zaslonu.</p>{% endif %}
+<p>Vnesite naslove, ločene z vejico ali podpičjem. Vsak naslov naj nastopa samo v eni vlogi.</p>
+<form method="post" action="{% url 'ui:st_delivery' invoice.company_id invoice.pk %}">
+{% csrf_token %}{{ form.as_p }}
+<p>BCC — skrita kopija računovodji: {{ invoice.company.email_racunovodja }}</p>
+<button type="submit">Preglej prejemnike pred pripravo</button></form>
+</section>
+{% if review %}
+<section class="panel"><h2>Končni pregled prejemnikov</h2>
+<dl><dt>Pošiljatelj</dt><dd>{{ review.sender }}</dd>
+<dt>TO</dt><dd>{{ review.recipients_to|join:", " }}</dd>
+<dt>CC — vidna kopija</dt><dd>{{ review.recipients_cc|join:", "|default:"Brez" }}</dd>
+<dt>BCC — skrita kopija računovodji</dt><dd>{{ review.recipients_bcc|join:", " }}</dd></dl>
+<p>Potrditev ustvari nespremenljiv poskus dostave. Za pošiljanje je nato potreben ločen klik »Pošlji PDF«.</p>
+<form method="post" action="{% url 'ui:st_prepare_delivery' invoice.company_id invoice.pk %}">
+{% csrf_token %}{{ confirm_form.as_p }}<button type="submit">Potrdi prejemnike in pripravi dostavo</button></form>
+</section>
+{% endif %}
+{% endif %}
+<p>Sprejem sporočila pri SMTP ne potrjuje prejema v nabiralnik ali arhiviranja. Arhiviranje ST sledi v T8-F.</p>
+{% endblock %}

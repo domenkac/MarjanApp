@@ -7,6 +7,7 @@ from .indexation import (
     indexation_list,
 )
 from .setup import first_run_setup
+from .st_delivery import st_delivery, st_delivery_action, st_prepare_delivery
 from .st_invoices import (
     st_confirm,
     st_detail,
@@ -97,6 +98,9 @@ urlpatterns = [
     path("storitveni-racuni/<int:company_id>/<int:invoice_id>/izdan/", st_detail, name="st_detail"),
     path("storitveni-racuni/<int:company_id>/<int:invoice_id>/pdf/", st_pdf, name="st_pdf"),
     path("storitveni-racuni/<int:company_id>/<int:invoice_id>/pdf/ponovi/", st_retry_pdf, name="st_retry_pdf"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/dostava/", st_delivery, name="st_delivery"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/dostava/pripravi/", st_prepare_delivery, name="st_prepare_delivery"),
+    path("storitveni-racuni/<int:company_id>/<int:invoice_id>/dostava/<int:attempt_id>/", st_delivery_action, name="st_delivery_action"),
     path("racunovodstvo/izpis/", accountant_arbitrary_export, name="accountant_arbitrary_export"),
     path("racunovodstvo/izpis/csv/", accountant_arbitrary_csv, name="accountant_arbitrary_csv"),
     path("racunovodstvo/poslji/", accountant_control_send, name="accountant_control_send"),
