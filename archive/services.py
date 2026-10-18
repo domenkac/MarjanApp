@@ -104,6 +104,11 @@ def _target(root: Path, relative: Path) -> Path:
     return target
 
 
+def archive_paths(invoice: Invoice, roots: ArchiveRoots) -> tuple[Path, Path]:
+    relative = pdf_relative_path(invoice)
+    return _target(roots.local_root, relative), _target(roots.icloud_root, relative)
+
+
 def _result(state, message, archived=None, *, paths=("", ""), checksum=""):
     return ArchiveResult(
         state == ArchiveState.VERIFIED,
@@ -189,7 +194,9 @@ def _verified_source(invoice: Invoice) -> tuple[Invoice, bytes, DeliveryAttempt]
     return invoice, result.pdf_bytes, attempt
 
 
-def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
+def archive_pdf(
+    invoice: Invoice, roots: ArchiveRoots, *, require_existing_roots: bool = False
+) -> ArchiveResult:
     archived = None
     paths = ("", "")
     checksum = ""
@@ -200,11 +207,7 @@ def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
             )
         invoice, source, attempt = _verified_source(invoice)
         checksum = invoice.checksum
-        relative = pdf_relative_path(invoice)
-        paths = (
-            _target(roots.local_root, relative),
-            _target(roots.icloud_root, relative),
-        )
+        paths = archive_paths(invoice, roots)
         identity = {
             "local_path": str(paths[0]),
             "icloud_path": str(paths[1]),
@@ -228,8 +231,14 @@ def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
                 )
 
         errors = []
-        for label, path in (("local", paths[0]), ("iCloud", paths[1])):
+        for label, path, root in (
+            ("local", paths[0], roots.local_root),
+            ("iCloud", paths[1], roots.icloud_root),
+        ):
             try:
+                # ST must not recreate a missing mount or configured root.
+                if require_existing_roots and not root.is_dir():
+                    raise OSError("Configured archive root is unavailable.")
                 _publish(path, source, checksum)
             except (OSError, ArchiveConflict) as error:
                 errors.append(f"{label}: {error}")
@@ -245,9 +254,13 @@ def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
         if attempt.pdf_checksum != checksum:
             raise ArchiveConflict("Delivery checksum changed during archival.")
         with transaction.atomic():
-            ArchivedFile.objects.filter(pk=archived.pk).update(
+            updated = ArchivedFile.objects.filter(
+                pk=archived.pk, status__in=ArchivedFile.Status.values, **identity
+            ).update(
                 status=ArchivedFile.Status.VERIFIED
             )
+            if updated != 1:
+                raise ArchiveConflict("Archive metadata changed during archival.")
         archived.status = ArchivedFile.Status.VERIFIED
         return _result(
             ArchiveState.VERIFIED,
@@ -268,7 +281,9 @@ def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
         )
 
 
-def verify_archived_file(archived_file: ArchivedFile) -> ArchiveVerification:
+def verify_archived_file(
+    archived_file: ArchivedFile, *, roots: ArchiveRoots | None = None
+) -> ArchiveVerification:
     paths = (Path(archived_file.local_path), Path(archived_file.icloud_path))
     checksum = archived_file.checksum
     if (
@@ -287,6 +302,8 @@ def verify_archived_file(archived_file: ArchivedFile) -> ArchiveVerification:
             checksum=checksum,
         )
     try:
+        if roots is not None and paths != archive_paths(archived_file.invoice, roots):
+            raise ArchiveConflict("Archive paths differ from the configured identity.")
         exists = tuple(path.exists() for path in paths)
         hashes = tuple(
             _hash_file(path) if present else None
@@ -332,6 +349,14 @@ def verify_archived_file(archived_file: ArchivedFile) -> ArchiveVerification:
                 paths=paths,
                 checksum=checksum,
             )
+    except ArchiveConflict:
+        return _result(
+            ArchiveState.METADATA_CONFLICT,
+            "Archive paths differ from the configured identity.",
+            archived_file,
+            paths=paths,
+            checksum=checksum,
+        )
     except OSError:
         return _result(
             ArchiveState.FAILED,

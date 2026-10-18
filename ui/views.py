@@ -5,7 +5,7 @@ from pathlib import Path
 from urllib.parse import urlencode
 
 from django.core.exceptions import ValidationError
-from django.db import DatabaseError
+from django.db import DatabaseError, transaction
 from django.db.models import Count
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, redirect, render
@@ -687,6 +687,7 @@ def test_monthly_summary_smtp_connection(request):
     )
 
 
+@transaction.non_atomic_requests
 @require_http_methods(["GET", "POST"])
 def nastavitve_arhiv(request):
     if request.method == "POST" and request.POST.get("action") == "create_backup":

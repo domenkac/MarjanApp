@@ -669,10 +669,71 @@ prekinitvi SMTP, razrešitev `UNKNOWN` in obstoječe ponovitve z zamrznjenimi pr
 ostanejo nespremenjene. Preklic ne spreminja računa, vrstic, številčenja, datuma izdaje,
 uradnega PDF ali njegove kontrolne vsote. Pravilo ne velja za mesečni NP.
 
-**T8-F:** sprejem SMTP ni dokaz arhiviranja. Dostava ST ne izvaja arhiviranja ali
-varnostnih kopij in ni vključena v mesečni NP cikel. Preostane ločena integracija
-preverjenega lokalnega in iCloud arhiva ter varnostnih kopij po obstoječih pravilih,
-z dokazi o celovitosti in varnim nadaljevanjem ob delnem neuspehu.
+#### T8-F: operativni arhiv in ločena ročna varnostna kopija ST
+
+`archive.st_invoices.archive_st_invoice` sprejme samo shranjen, oštevilčen samostojni
+ST zahtevanega podjetja, brez pogodbe ali korekcijske povezave, v stanju `POSLAN`.
+Zadnji shranjeni `DeliveryAttempt` mora po obstoječem `has_sent_delivery_evidence`
+dokazovati sprejem SMTP ali izrecno preverjeni `UNKNOWN` kot poslan. Izvirni rezultat
+`UNKNOWN` in revizijsko dokazilo ostaneta nespremenjena. Osnutek, neposlan račun,
+`PREPARED`, `CANCELLED`, `SUBMISSION_STARTED`, potrjen neuspeh in nerazrešen
+`UNKNOWN` ne dovoljujejo arhiviranja. Metapodatki dostave se morajo ujemati z računom.
+
+Storitev zahteva registrirani uradni PDF v živem stanju `READY`. Obstoječe preverjanje
+renderinga potrdi pot, vezano na podjetje in številko računa, ter SHA-256 dejanskih
+bajtov. `archive_pdf` ponovno preveri PDF in dokazilo dostave ter objavi točno te bajte.
+Arhiviranje nikoli ne generira, regenerira ali popravlja PDF, ne dodeljuje številke,
+ne pošilja pošte in ne ustvarja poskusov dostave. Finančni posnetki računa in postavk,
+registracija PDF ter obstoječa revizijska dokazila se ne spreminjajo. ST ostaja PDF-only;
+`FEATURE_ESLOG=False`.
+
+Uporabljata se obstoječa konfigurirana korena in isti `ArchivedFile` vrste `PDF`.
+Pot ostaja `Arhiv/{slug-naziva-izdajatelja}-{davčna-številka}/{leto}/{mesec}/{številka}.pdf`.
+Naziv, davčna številka, datum izdaje in številka izvirajo iz izdanega posnetka računa,
+ne iz trenutnih nastavitev podjetja. Manjkajoča konfiguracija, relativne ali
+prekrivajoče se poti, prekrivanje z media/rendering/Dropbox lokacijo, arhivski koren,
+ki vsebuje delovno bazo, in cilj zunaj korena so blokirani. Manjkajočega konfiguriranega
+korena se ne ustvari samodejno; to prepreči nadomestni zapis ob nedosegljivi lokaciji.
+
+Publikacija, SHA-256 in preverjanje obeh kopij ostajajo v `archive.services`.
+Vse datotečne operacije potekajo zunaj transakcij; kratki atomski operaciji shranita
+identiteto arhiva in nato status `VERIFIED`. Enoličnost `(invoice, artifact_type)` in
+atomska objava brez prepisovanja varujeta sočasne poskuse. Identiteta obstoječega zapisa
+se ne prepisuje; pogojna končna posodobitev zavrne vmesni konflikt metapodatkov.
+
+Ob uspehu samo ene lokacije se ohranita veljavna kopija in isti zapis
+`IN_PROGRESS`. Drugo lokacijo se vseeno poskusi zapisati tudi ob neuspehu prve.
+Izrecni ponovni POST uporabi isti zapis in pot; identične datoteke se ne prepisujejo.
+Datoteke z drugačno kontrolno vsoto se nikoli ne nadomestijo. Konflikt metapodatkov,
+poškodovani uradni PDF ali konfliktna arhivska kopija zahtevajo pregled brez samodejnega
+popravljanja. Ponovitev arhiva ne pomeni ponovne izdaje ali ponovnega pošiljanja.
+
+ST podrobnosti ob vsakem GET samo berejo shranjena dokazila, PDF in živi kopiji.
+Zgodovinski status `VERIFIED` ne zadošča za prikaz uspeha. UI loči neupravičen račun,
+pripravljenost, nepopoln arhiv, manjkajočo lokalno ali iCloud kopijo, neujemanje SHA-256,
+konflikt metapodatkov in obe preverjeni kopiji. Prekinitev po zapisu obeh datotek pred
+potrditvijo metapodatkov ostane nepopolna; izrecna ponovitev dokonča kratek zapis stanja.
+GET ne ustvarja map, arhivskih zapisov ali backupov. Ločeni POST »Arhiviraj ST račun«
+oziroma »Ponovi nepopolno arhiviranje« preveri podjetje in račun ter uporablja CSRF.
+Operativni pogled in živi prikaz izključita `ATOMIC_REQUESTS`; sporočila so slovenska
+in ne razkrivajo absolutnih poti ali izjem datotečnega sistema.
+
+Po preverjenem arhivu povezava odpre obstoječe **Nastavitve – Arhiv – Varnostne kopije**.
+Šele tamkajšnji ločeni POST pokliče `create_backup_snapshot(trigger=MANUAL)` zunaj
+transakcije. Ohranjeni so ZIP manifest, kontrolni odtis baze in ZIP, vključitev lokalnega
+arhiva in celotnega media drevesa, nespremenljivi `BackupSnapshot` ter obstoječi postopek
+preverjene obnove. Neuspeh backupa ne spremeni ST arhiva ali dostave. Uspešen arhiv
+ni dokaz backupa; čas zadnje kopije v nastavitvah ne trdi vključitve določenega ST.
+Arhiviranje ne sproži celotnega backupa, urnika ali brisanja starih generacij in ne
+potrebuje `MonthlyCycle` ali `MonthlyBatch`. Mesečni NP tok ostaja nespremenjen.
+
+**Operativne omejitve:** preverjanje potrdi trenutno berljivost lokalnih iCloud in
+Dropbox datotek, ne končane sinhronizacije v oblak. Prikaz je dokaz stanja ob času
+branja; poznejši zunanji izbris ali spremembo zazna naslednje preverjanje. Na macOS
+je treba ročno preveriti dejanske pravice map, iCloud placeholderje/offline stanje,
+podporo atomski objavi datotek in Dropbox sinhronizacijo ter obnovo posnetka v novo
+mapo po obstoječih navodilih. Avtomatizirani testi uporabljajo samo začasne podatke,
+brez dostopa do pravih SMTP, Keychain, iCloud ali Dropbox računov.
 
 ### 2.5 Δ zaznava — dispečer in predpogoji podjetja
 

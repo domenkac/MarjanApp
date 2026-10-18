@@ -10,8 +10,9 @@
   </form>
   {% if configuration %}<p>Preverjeno: {{ configuration.verified_at|date:"d. m. Y H:i:s" }}</p>{% endif %}
 </section>
-<section class="settings-card">
+<section class="settings-card" id="varnostne-kopije">
   <h2>Varnostne kopije</h2>
+  <p>Ročna varnostna kopija je ločeno dejanje. Uspešno arhiviranje ST samo po sebi ne pomeni uspešne kopije v Dropbox. Spodnji čas zadnje kopije ne dokazuje vključitve posameznega računa.</p>
   {% if backup_success %}<p role="status">Varnostna kopija je ustvarjena in preverjena.</p>{% endif %}
   {% if backup_failed %}<p role="alert">Varnostne kopije ni bilo mogoče ustvariti in preveriti. Preverite lokacije in dostopnost datotek.</p>{% endif %}
   {% if latest_backup %}<p>Zadnja uspešna kopija: {{ latest_backup.created_at|date:"d. m. Y H:i:s" }} · {{ latest_backup_filename }}</p>{% else %}<p>Uspešne varnostne kopije še ni.</p>{% endif %}

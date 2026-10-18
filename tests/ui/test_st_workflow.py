@@ -182,7 +182,7 @@ def test_confirmation_commits_once_then_renders_and_displays_snapshots(client, r
     content = client.get(response.url).content.decode()
     for value in (invoice.stevilka, invoice.prejemnik_naziv, invoice.izdajatelj_naziv,
                   "Svetovanje", "100,00", "22,00", "122,00", "16. 10. 2026", "Še ni poslan",
-                  "Celovitost je preverjena", "Odpri dostavo in pregled prejemnikov", "T8-F"):
+                  "Celovitost je preverjena", "Odpri dostavo in pregled prejemnikov", "Arhiviranje ST"):
         assert value in content
     assert url("detail", invoice) in client.get(reverse("ui:st_list")).content.decode()
     numbers = counters()

@@ -9,6 +9,7 @@ from django.shortcuts import get_object_or_404, redirect, render
 from django.utils.translation import override
 from django.views.decorators.http import require_GET, require_http_methods, require_POST
 
+from archive.st_invoices import archive_st_invoice, st_archive_status
 from catalogs.models import VatRegime
 from core.models import AuditLogEntry
 from invoicing.models import Invoice
@@ -231,13 +232,33 @@ def _pdf_state(invoice):
         return {"state": "ERROR"}
 
 
+def _detail_context(request, invoice):
+    context = _snapshot_context(invoice)
+    context.update(
+        pdf_state=_pdf_state(invoice), pdf_error=request.GET.get("pdf_error") == "1",
+        archive_state=st_archive_status(invoice, company_id=invoice.company_id),
+    )
+    return context
+
+
+@transaction.non_atomic_requests
 @require_GET
 @override("sl")
 def st_detail(request, company_id, invoice_id):
+    return render(request, "ui/st_detail.html", _detail_context(request, _issued(company_id, invoice_id)))
+
+
+@transaction.non_atomic_requests
+@require_POST
+@override("sl")
+def st_archive(request, company_id, invoice_id):
     invoice = _issued(company_id, invoice_id)
-    context = _snapshot_context(invoice)
-    context.update(pdf_state=_pdf_state(invoice), pdf_error=request.GET.get("pdf_error") == "1")
-    return render(request, "ui/st_detail.html", context)
+    result = archive_st_invoice(invoice, company_id=company_id)
+    if result.verified:
+        return redirect("ui:st_detail", company_id=company_id, invoice_id=invoice_id)
+    context = _detail_context(request, invoice)
+    context["archive_error"] = result.message
+    return render(request, "ui/st_detail.html", context, status=409)
 
 
 @transaction.non_atomic_requests
