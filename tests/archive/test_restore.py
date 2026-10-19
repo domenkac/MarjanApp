@@ -29,6 +29,7 @@ def sha(data):
 
 @pytest.fixture
 def snapshot(tmp_path, settings):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
     roots = [tmp_path / name for name in ("local", "icloud", "dropbox", "media")]
     for root in roots:
         root.mkdir()
@@ -130,7 +131,9 @@ def test_end_to_end_offline_immutable_restore(snapshot, tmp_path):
         result = recover(snapshot, target)
     assert result.success, result.message
     assert result.target_directory == target
-    assert {path.name for path in target.iterdir()} == {"database", "archive", "media"}
+    assert {path.name for path in target.iterdir()} == {
+        "database", "archive", "media", "rendering",
+    }
     with ZipFile(snapshot[0]) as original:
         assert (target / "database/db.sqlite3").read_bytes() == original.read(
             "database/db.sqlite3"

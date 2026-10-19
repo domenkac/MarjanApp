@@ -11,7 +11,7 @@ from contextlib import closing
 from dataclasses import dataclass
 from datetime import timedelta
 from pathlib import Path
-from tempfile import NamedTemporaryFile, TemporaryDirectory
+from tempfile import NamedTemporaryFile, TemporaryDirectory, gettempdir
 from zipfile import ZIP_DEFLATED, ZipFile
 
 from django.conf import settings
@@ -66,15 +66,72 @@ def _validate_sources(roots):
     if not media.is_absolute():
         raise BackupError("MEDIA_ROOT must be absolute.")
     media = media.resolve(strict=True)
-    # Shared configuration validation checks all overlaps, including iCloud.
-    # The snapshot reads only the local archive and media; iCloud may be offline.
+    rendering = Path(settings.RENDERING_ROOT)
+    if not rendering.is_absolute():
+        raise BackupError("RENDERING_ROOT must be absolute.")
+    rendering = rendering.resolve()
+    if rendering.exists() and not rendering.is_dir():
+        raise BackupError("RENDERING_ROOT must be a directory.")
+    paths = [roots.local_root, roots.icloud_root, roots.dropbox_root, media, rendering]
+    for index, path in enumerate(paths):
+        for other in paths[index + 1 :]:
+            if path.is_relative_to(other) or other.is_relative_to(path):
+                raise BackupError("Backup sources and destination must not overlap.")
+    # Never let scratch databases become files in a copied source tree.
+    if any(Path(gettempdir()).resolve().is_relative_to(root) for root in paths):
+        raise BackupError("Temporary backup storage overlaps a protected root.")
+    # iCloud is checked lexically for overlap, never read during backup.
     for path in (roots.local_root, roots.dropbox_root, media):
         if not path.is_dir():
             raise BackupError("Missing directory.")
     database = Path(connection.settings_dict["NAME"]).resolve()
-    if any(database.is_relative_to(root) for root in (roots.local_root, media)):
+    if any(database.is_relative_to(root) for root in paths):
         raise BackupError("Live database must not be included as an archive file.")
-    return media
+    return media, rendering
+
+
+def _add_pdf(output, root, artifact):
+    """Copy only a canonical registered PDF, rejecting links and changing files."""
+    path = root
+    for part in ("", *Path(artifact["path"]).parts):
+        path = path / part
+        metadata = path.lstat()
+        if path.is_symlink() or getattr(metadata, "st_file_attributes", 0) & getattr(
+            stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400
+        ):
+            raise BackupError("Linked official PDF input is forbidden.")
+        if not path.resolve(strict=True).is_relative_to(root):
+            raise BackupError("Official PDF escaped its root.")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise BackupError("Official PDF is not a regular file.")
+    descriptor = os.open(
+        path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0),
+    )
+    with os.fdopen(descriptor, "rb") as source:
+        before = os.fstat(source.fileno())
+        if not os.path.samestat(metadata, before):
+            raise BackupError("Official PDF changed before copying.")
+        _reject_live_database(before)
+        with output.open(f"rendering/{artifact['path']}", "w") as destination:
+            shutil.copyfileobj(source, destination, length=1024 * 1024)
+        after = os.fstat(source.fileno())
+        if (
+            (before.st_size, before.st_mtime_ns) != (after.st_size, after.st_mtime_ns)
+            or not os.path.samestat(before, path.lstat())
+            or not path.resolve(strict=True).is_relative_to(root)
+        ):
+            raise BackupError("Official PDF changed during copying.")
+
+
+def _reject_live_database(metadata):
+    database = str(connection.settings_dict["NAME"])
+    for suffix in ("", "-wal", "-shm", "-journal"):
+        try:
+            current = Path(database + suffix).stat()
+        except FileNotFoundError:
+            continue
+        if os.path.samestat(metadata, current):
+            raise BackupError("Live SQLite files must not be copied as artifacts.")
 
 
 def _add_tree(output, root, prefix):
@@ -120,6 +177,7 @@ def _add_tree(output, root, prefix):
                     raise BackupError("Input changed during traversal.")
                 if not path.resolve(strict=True).is_relative_to(root):
                     raise BackupError("Input escaped its root.")
+                _reject_live_database(before)
                 with output.open(entry, "w") as destination:
                     shutil.copyfileobj(source, destination, length=1024 * 1024)
                 after = os.fstat(source.fileno())
@@ -131,13 +189,14 @@ def _add_tree(output, root, prefix):
 
 
 def _verify_zip(path, database_checksum):
-    from .restore import _entries, read_manifest
+    from .restore import _entries, read_manifest, verify_official_pdfs
 
     with ZipFile(path) as archive:
         _entries(archive)
         if archive.testzip() is not None:
             raise BackupError("ZIP verification failed.")
-        if read_manifest(archive)["database_checksum"] != database_checksum:
+        manifest = read_manifest(archive)
+        if manifest["database_checksum"] != database_checksum:
             raise BackupError("Manifest database checksum differs.")
         digest = hashlib.sha256()
         with archive.open("database/db.sqlite3") as source:
@@ -145,6 +204,15 @@ def _verify_zip(path, database_checksum):
                 digest.update(chunk)
         if digest.hexdigest() != database_checksum:
             raise BackupError("Database checksum differs.")
+        if manifest["format_version"] != 2:
+            raise BackupError("New snapshots require official PDF verification.")
+        with TemporaryDirectory(prefix="marjanapp-backup-check-") as work:
+            database = Path(work) / "db.sqlite3"
+            with archive.open("database/db.sqlite3") as source, database.open("xb") as destination:
+                shutil.copyfileobj(source, destination, length=1024 * 1024)
+            if _hash_file(database) != database_checksum:
+                raise BackupError("Verification database checksum differs.")
+            verify_official_pdfs(archive, manifest, database)
 
 
 def _fsync_directory(path):
@@ -184,15 +252,21 @@ def create_backup_snapshot(*, trigger):
     persisted = False
     try:
         roots = resolve_archive_locations()
-        media = _validate_sources(roots)
+        media, rendering = _validate_sources(roots)
         created_at = timezone.now()
         with TemporaryDirectory(prefix="marjanapp-backup-") as work:
             database = Path(work) / "db.sqlite3"
             _copy_database(database)
             database_checksum = _hash_file(database)
-            from .restore import snapshot_source_roots
+            from .restore import snapshot_official_pdfs, snapshot_source_roots
 
             source_roots = snapshot_source_roots(database)
+            if source_roots != {
+                name: str(getattr(roots, name))
+                for name in ("local_root", "icloud_root", "dropbox_root")
+            }:
+                raise BackupError("Snapshot configuration changed during capture.")
+            official_pdfs = snapshot_official_pdfs(database)
             with NamedTemporaryFile(
                 dir=roots.dropbox_root, prefix=".marjanapp-backup-", delete=False
             ) as stream:
@@ -204,7 +278,9 @@ def create_backup_snapshot(*, trigger):
                         "manifest.json",
                         json.dumps(
                             {
-                                "format_version": 1,
+                                "format_version": 2,
+                                "rendering_root": str(rendering),
+                                "official_pdfs": official_pdfs,
                                 "database_checksum": database_checksum,
                                 "created_at": created_at.isoformat(),
                                 "trigger": trigger,
@@ -216,6 +292,9 @@ def create_backup_snapshot(*, trigger):
                     output.write(database, "database/db.sqlite3")
                     _add_tree(output, roots.local_root, "archive")
                     _add_tree(output, media, "media")
+                    output.writestr("rendering/", b"")
+                    for artifact in official_pdfs:
+                        _add_pdf(output, rendering, artifact)
                 stream.flush()
                 os.fsync(stream.fileno())
             _verify_zip(temporary, database_checksum)

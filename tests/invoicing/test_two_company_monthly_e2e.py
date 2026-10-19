@@ -400,7 +400,7 @@ def _assert_backups(flow):
             assert archive.testzip() is None
             manifest = json.loads(archive.read("manifest.json"))
             assert (
-                manifest["format_version"] == 1
+                manifest["format_version"] == 2
                 and manifest["trigger"] == snapshot.trigger
             )
             assert manifest["created_at"] == snapshot.created_at.isoformat()
@@ -424,6 +424,15 @@ def _assert_backups(flow):
                         == asset.read_bytes()
                     )
             if snapshot.trigger == "POST_MONTHLY":
+                assert manifest["official_pdfs"] == [
+                    {"invoice_id": invoice.pk, "path": invoice.rendered_pdf_path,
+                     "checksum": invoice.checksum}
+                    for invoice in sorted(flow["invoices"], key=lambda item: item.pk)
+                ]
+                for invoice in flow["invoices"]:
+                    data = archive.read(f"rendering/{invoice.rendered_pdf_path}")
+                    assert data == _rendered(flow, invoice).read_bytes()
+                    assert _hash(data) == invoice.checksum
                 for artifact in ArchivedFile.objects.all():
                     local = Path(artifact.local_path)
                     assert (

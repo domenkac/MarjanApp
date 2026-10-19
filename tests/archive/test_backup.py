@@ -29,14 +29,26 @@ from tests.companies.test_setup_readiness import (
     five_issuers as five_issuers,  # noqa: PLC0414 -- Imported pytest fixture.
 )
 from tests.ui.test_company_confirmations import (
-    confirmation_ui_data as setup_data,  # noqa: F401 -- Dependency of five_issuers.
+    confirmation_ui_data as confirmation_ui_data,  # noqa: PLC0414 -- Imported fixture.
 )
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
+def setup_data(confirmation_ui_data, settings, tmp_path):
+    # Backup sources are disjoint; shared UI fixtures nest rendering under media.
+    media = tmp_path / "media"
+    media.mkdir()
+    for name in ("logo.png", "podpis.png"):
+        (media / name).write_bytes((tmp_path / name).read_bytes())
+    settings.MEDIA_ROOT = media
+    return confirmation_ui_data
+
+
+@pytest.fixture
 def locations(tmp_path, settings):
+    settings.RENDERING_ROOT = tmp_path / "rendered"
     roots = [tmp_path / name for name in ("local", "icloud", "dropbox", "media")]
     for root in roots:
         root.mkdir()
@@ -72,6 +84,7 @@ def test_snapshot_content_checksums_and_sqlite_integrity(locations, tmp_path):
         names = set(archive.namelist())
         assert names == {
             "manifest.json",
+            "rendering/",
             "database/db.sqlite3",
             "archive/",
             "archive/2026/",
@@ -86,7 +99,9 @@ def test_snapshot_content_checksums_and_sqlite_integrity(locations, tmp_path):
         data = archive.read("database/db.sqlite3")
         manifest = json.loads(archive.read("manifest.json"))
         assert manifest == {
-            "format_version": 1,
+            "format_version": 2,
+            "rendering_root": str(tmp_path / "rendered"),
+            "official_pdfs": [],
             "database_checksum": snapshot.database_checksum,
             "created_at": snapshot.created_at.isoformat(),
             "trigger": snapshot.trigger,
@@ -762,3 +777,48 @@ def test_snapshot_rejects_media_overlap_in_both_directions(
         settings.MEDIA_ROOT.mkdir()
     assert not create().success
     assert not BackupSnapshot.objects.exists()
+
+
+def test_issued_np_and_st_original_pdfs_survive_offline_restore(
+    five_issuers, settings, tmp_path, monkeypatch,
+):
+    from archive.restore import restore_backup
+    from invoicing.services import potrdi_osnutek_st
+    from rendering.services import render_pdf
+    from tests.companies.test_setup_readiness import issue_np
+    from tests.invoicing.test_potrditev_st import draft, review
+
+    data, _ = five_issuers
+    complete_initial_setup()
+    np = issue_np(data)
+    st_draft = draft(data)
+    st = potrdi_osnutek_st(st_draft, pregled=review(st_draft))
+    originals = [render_pdf(invoice) for invoice in (np, st)]
+    assert not DeliveryAttempt.objects.exists()
+    assert not ArchivedFile.objects.exists()
+    before = [list(model.objects.order_by("pk").values()) for model in (
+        Invoice, InvoiceLine, NumberSequence, DeliveryAttempt, ArchivedFile,
+    )]
+    monkeypatch.setattr("rendering.services._generiraj_pdf_bytes",
+        lambda *a: pytest.fail("Never regenerate registered official PDFs"))
+    result = create()
+    assert result.success, result.message
+    roots = resolve_archive_locations()
+    target = tmp_path / "offline-recovery"
+    restored = restore_backup(result.snapshot.path, target,
+        local_root=roots.local_root, icloud_root=roots.icloud_root,
+        dropbox_root=roots.dropbox_root)
+    assert restored.success, restored.message
+    with sqlite3.connect(target / "database/db.sqlite3") as captured:
+        for invoice, artifact in zip((np, st), originals, strict=True):
+            path, checksum, number = captured.execute(
+                "SELECT rendered_pdf_path, checksum, stevilka FROM invoicing_invoice WHERE id=?",
+                (invoice.pk,),
+            ).fetchone()
+            assert (path, checksum, number) == (artifact.pot, artifact.checksum, invoice.stevilka)
+            recovered = (target / "rendering" / path).read_bytes()
+            assert recovered == artifact.pdf_bytes
+            assert hashlib.sha256(recovered).hexdigest() == checksum
+    assert [list(model.objects.order_by("pk").values()) for model in (
+        Invoice, InvoiceLine, NumberSequence, DeliveryAttempt, ArchivedFile,
+    )] == before

@@ -13,6 +13,10 @@ Razvojno preverjanje na Windows ni dokaz produkcijskega delovanja na macOS. Obno
 
 ZIP posnetek vsebuje skladno kopijo baze SQLite (`database/db.sqlite3`), celotni lokalni arhiv (`archive/`), celotno mapo medijskih datotek (`media/`) in opis posnetka (`manifest.json`). Medijske datoteke vključujejo logotipe, podpise in njihove nespremenljive kopije. Datoteke prilog so vključene, **če so shranjene znotraj `MEDIA_ROOT`**. Datoteke zunaj zajetih map niso vključene.
 
+Novi posnetki uporabljajo **format 2**. V `rendering/` vključijo tudi izvirne bajte vseh uradnih PDF, registriranih v zajeti bazi, vključno z neposlanimi NP in samostojnimi ST ter dokumenti z neuspešno ali neznano dostavo in nedokončanim arhiviranjem. Inventar `official_pdfs` v `manifest.json` vsebuje ID računa, relativno pot `company-<ID>/<številka>.pdf` in shranjeni SHA-256. Inventar se pridobi iz kopije SQLite, ne iz poznejšega živega stanja. Pred objavo in po njej se preverijo inventar, datoteke v ZIP-u in njihovi odtisi. Manjkajoč, poškodovan ali napačno registriran PDF povzroči neuspeh nove kopije; prejšnje generacije ostanejo. Registriranega PDF se nikoli ne regenerira.
+
+Zajamejo se samo registrirani uradni PDF, ne celotna mapa `RENDERING_ROOT`: začasne datoteke, zaklepi in vzorci iz te mape niso vključeni. `RENDERING_ROOT`, `MEDIA_ROOT` in vse tri arhivske lokacije morajo biti ločene, brez prekrivanja. Živa baza ne sme ležati znotraj teh map. Povezave in posebne datoteke pri zajemu uradnih PDF niso dovoljene. Opis posnetka ima varnostno omejitev 16 MiB; ob prekoračitvi kopija odpove brez objave uspešnega posnetka.
+
 - **Lokalni arhiv:** delovna kopija dokumentov.
 - **iCloud arhiv:** druga arhivska lokacija. Replikacija lahko razširi izbris ali okvaro; ni nadomestilo za posnetek.
 - **Dropbox:** mapa datiranih ZIP posnetkov. Izbris iz živega arhiva ne spremeni že izdelanega ZIP-a.
@@ -51,11 +55,11 @@ python manage.py create_backup_snapshot --trigger MANUAL
 python manage.py restore_backup_snapshot "<POT_DO_POSNETKA.zip>" "<NOVA_OBNOVITVENA_MAPA>" --local-root "<TRENUTNI_LOKALNI_ARHIV>" --icloud-root "<TRENUTNI_ICLOUD_ARHIV>" --dropbox-root "<TRENUTNA_DROPBOX_MAPA>"
 ```
 
-Prva argumenta sta ZIP in nova ciljna mapa. Vsi trije argumenti `--local-root`, `--icloud-root`, `--dropbox-root` so obvezni: označujejo **zaščitene trenutne lokacije**, ne novih ciljev. Zaščitena sta tudi nastavljena baza in `MEDIA_ROOT`. Če uporabljate `MARJAN_MEDIA_ROOT`, mora kazati na trenutno produkcijsko lokacijo. Ne navajajte izmišljenih poti za obhod zaščite.
+Prva argumenta sta ZIP in nova ciljna mapa. Vsi trije argumenti `--local-root`, `--icloud-root`, `--dropbox-root` so obvezni: označujejo **zaščitene trenutne lokacije**, ne novih ciljev. Zaščiteni so tudi nastavljena baza, `MEDIA_ROOT` in `RENDERING_ROOT`. Če uporabljate `MARJAN_MEDIA_ROOT` ali `MARJAN_RENDERING_ROOT`, morata kazati na trenutni produkcijski lokaciji. Format 2 zaščiti tudi zgodovinski `rendering_root` iz opisa posnetka. Ne navajajte izmišljenih poti za obhod zaščite.
 
 Cilj ne sme biti znotraj zaščitenih lokacij ali njihov nadrejeni imenik. Ukaz zaščiti tudi zgodovinske arhivske poti iz posnetka, kadar jih sedanji operacijski sistem prepozna. Pravilni trenutni argumenti so zato nujni.
 
-6. Uspeh zahteva izhod brez napake in sporočilo `Backup restored and verified in a new recovery directory.` s ciljno potjo. Rezultat vsebuje `database/db.sqlite3`, `archive/` in `media/`; `manifest.json` ostane v ZIP-u.
+6. Uspeh zahteva izhod brez napake in sporočilo `Backup restored and verified in a new recovery directory.` s ciljno potjo. Rezultat vsebuje `database/db.sqlite3`, `archive/`, `media/` in pri formatu 2 še `rendering/`; `manifest.json` ostane v ZIP-u.
 7. Ohranite ZIP, izhod ukaza in obnovitveno mapo za pregled. Ne zaganjajte produkcijskih postopkov iz te mape.
 
 ### Kaj je preverjeno in kaj morate pregledati dodatno
@@ -64,9 +68,12 @@ Ukaz zavrne nevarne ZIP poti, povezave in podvojene vnose. Preveri CRC, odtis ba
 
 - Za arhivske zapise `VERIFIED` preveri prisotnost lokalne datoteke in njen SHA-256. To ne potrdi trenutnega stanja iCloud kopije ali vseh še nedokončanih arhivskih zapisov.
 - Za referencirane logotipe in podpise preveri prisotnost. Če je odtis shranjen, preveri tudi odtis.
+- Pri formatu 2 preveri, da se inventar uradnih PDF točno ujema z zajeto bazo, da ZIP vsebuje vse in samo navedene datoteke v `rendering/` ter da imajo datoteke v ZIP-u in obnovitveni mapi pravilne SHA-256. Izvirne poti in odtisi v bazi ostanejo nespremenjeni. To še ne priključi obnovljene aplikacije na nove datoteke.
 - Tabela računov se preveri na zahtevane stolpce. **Ukaz ne opravi vsebinske revizije računov ali zaporedij.** Izvajalec naj obnovljeno bazo pregleda samo za branje: število računov po podjetju, zadnje številke, stanja dostave in odprti mesečni cikel. Primerjajte z evidenco do datuma posnetka.
 - Odprite reprezentativne PDF-je iz obnovljenega arhiva. Preverite izdajatelja, številko, zneske in berljivost.
 - PRD §11.3 posebej zahteva vse referencirane priloge pogodb. V tej podlagi ni izveden model nalaganja pogodbenih prilog niti samodejna kontrola njihovih referenc. Celotna mapa `media/` se kopira, vendar to **ni dokaz popolnosti prilog**. S seznamom pogodbenih prilog preverite prisotnost in odpiranje vsake datoteke. Če seznama ali priloge ni, zabeležite vrzel in ustavite odobritev obnove.
+
+**Stari ZIP-i formata 1 ostanejo podprti za izolirano obnovo baze, arhiva in medijskih datotek.** Ukaz ob uspehu doda opozorilo `Legacy v1: official PDF completeness is not verified.` Ti posnetki nimajo preverjenega inventarja uradnih PDF in niso enakovredni formatu 2. Odsotnih izvirnih bajtov ni dovoljeno nadomestiti z regeneracijo registriranega dokumenta. Starega ZIP-a ne označite kot format 2 in ne odobrite produkcijskega nadaljevanja brez ločenega preverjanja popolnosti. Varna aktivacija, priklop poti in uskladitev številčenja ter dostav so ločena naloga T9-C.
 
 ### Ustavitev, preklop in možnost vrnitve
 
