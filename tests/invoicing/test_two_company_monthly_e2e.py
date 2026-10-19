@@ -603,8 +603,32 @@ def test_two_company_confirmed_failure_safe_recovery(flow):
     assert len(flow["calls"]) == 2  # Neither terminal result is automatically retried.
     failed = DeliveryAttempt.objects.get(invoice=flow["invoices"][1])
     assert failed.result == "CONFIRMED_FAILURE"
-    retry = prepare_retry_attempt(failed)
+    failure_record = DeliveryAttempt.objects.values().get(pk=failed.pk)
+    values = {
+        "cycle_id": flow["cycle"].pk, "invoice_id": failed.invoice_id,
+        "attempt_id": failed.pk, "reason": "Provider confirmed rejection is resolved",
+    }
+    content = flow["client"].get(reverse("ui:mesecni_obracun")).content.decode()
+    assert content.count("Pripravi ponovno pošiljanje") == 1
+    _post(flow, "prepare_failed_retry", **values)
+    assert len(flow["calls"]) == 2  # Preparation does not submit mail.
+    retry = DeliveryAttempt.objects.get(invoice_id=failed.invoice_id, sequence=2)
+    assert retry.result == "PREPARED"
     assert retry.sequence == 2
+    audit = AuditLogEntry.objects.get(polje="confirmed_failure_retry")
+    assert audit.object_id == failed.pk and audit.razlog == values["reason"]
+    assert json.loads(audit.nova_vrednost) == {
+        "retry_attempt_id": retry.pk, "cycle_id": flow["cycle"].pk,
+    }
+    repeated = flow["client"].post(
+        reverse("ui:mesecni_obracun"), {"action": "prepare_failed_retry", **values},
+    )
+    assert repeated.url.endswith("retry_result=stale")
+    assert DeliveryAttempt.objects.filter(invoice_id=failed.invoice_id).count() == 2
+    assert len(flow["calls"]) == 2
+    assert DeliveryAttempt.objects.values().get(pk=failed.pk) == failure_record
+    for field in ("sender", "recipients_to", "recipients_cc", "recipients_bcc"):
+        assert getattr(retry, field) == getattr(failed, field)
     assert (retry.pdf_path, retry.pdf_checksum) == (
         failed.pdf_path,
         failed.pdf_checksum,
@@ -612,6 +636,14 @@ def test_two_company_confirmed_failure_safe_recovery(flow):
     flow["outcomes"].clear()
     _post(flow, "send_delivery")
     assert len(flow["calls"]) == 3
+    retry.refresh_from_db()
+    assert retry.result == "ACCEPTED"
+    sent_message = flow["calls"][-1]
+    assert next(iter(sent_message.iter_attachments())).get_payload(decode=True) == _rendered(
+        flow, flow["invoices"][1],
+    ).read_bytes()
+    _post(flow, "send_delivery")
+    assert len(flow["calls"]) == 3  # A repeated send never resubmits the accepted retry.
     assert list(ArchivedFile.objects.values()) == first_archive
     _finish(flow)
     for path, identity in first_bytes.items():

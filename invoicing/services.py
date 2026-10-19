@@ -3690,6 +3690,46 @@ def stanje_dostave_mesecnega_cikla(cycle):
     return _rezultat_mesecne_dostave(cycle)
 
 
+def pripravi_ponovno_dostavo_mesecnega_racuna(
+    cycle, *, invoice_id, attempt_id, reason,
+):
+    """Prepare one confirmed-failure NP retry and its reason atomically."""
+    from delivery.models import DeliveryAttempt
+    from delivery.services import prepare_retry_attempt
+
+    if not isinstance(reason, str) or not reason.strip():
+        raise ValidationError("Vnesite razlog za ponovni poskus.", code="retry_reason")
+    with transaction.atomic():
+        cycle = _preveri_aktivni_korak_6(cycle)
+        delivery = _rezultat_mesecne_dostave(cycle)
+        if not any(
+            item["invoice_id"] == invoice_id
+            and item["latest_attempt_id"] == attempt_id
+            and item["delivery_state"] == StanjeMesecneDostave.DELIVERY_FAILED
+            for item in delivery["per_invoice"]
+        ):
+            raise ValidationError(
+                "Račun nima zadnje potrjene napake v izbranem zamrznjenem paketu. "
+                "Osvežite stran in preverite stanje računa.",
+                code="retry_stale",
+            )
+        source = DeliveryAttempt.objects.select_related("invoice").get(
+            pk=attempt_id, invoice_id=invoice_id,
+        )
+        if source.invoice.document_type != Invoice.DocumentType.NP:
+            raise ValidationError("Ponovitev je dovoljena samo za NP.", code="retry_stale")
+        retry = prepare_retry_attempt(source)
+        AuditLogEntry.objects.create(
+            content_type=ContentType.objects.get_for_model(DeliveryAttempt),
+            object_id=source.pk,
+            polje="confirmed_failure_retry",
+            stara_vrednost=source.result,
+            nova_vrednost=json.dumps({"retry_attempt_id": retry.pk, "cycle_id": cycle.pk}),
+            razlog=reason.strip(),
+        )
+        return retry
+
+
 def pripravi_dostavo_mesecnega_cikla(cycle):
     from delivery.services import prepare_attempt
 

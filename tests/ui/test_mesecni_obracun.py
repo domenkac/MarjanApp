@@ -1533,7 +1533,7 @@ def test_other_delivery_states_have_no_unknown_form(
         content = client.get("/mesecni-obracun/").content.decode()
     assert 'value="unknown_sent"' not in content
     assert 'value="unknown_not_sent"' not in content
-    assert 'name="reason"' not in content
+    assert 'id="unknown-reason-' not in content
 
 
 @pytest.mark.django_db
@@ -1962,3 +1962,233 @@ def test_napaka_nastavitve_enega_podjetja_ne_blokira_drugega(
     content = response.content.decode()
     assert "Za račun NP-00001 SMTP nastavitev ni mogoče uporabiti." in content
     assert "NE_RAZKRIJ" not in content
+
+
+@pytest.fixture
+def failed_np_delivery(ready_company, settings, tmp_path, monkeypatch):  # noqa: F811
+    import socket
+
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = mark_confirmed_failure(
+        DeliveryAttempt.objects.get(), code="SMTP_DATA_REJECTED",
+        message="Sporočilo zavrnjeno <script>alert(1)</script>",
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Retry preparation must not send, access credentials, or regenerate PDF")
+
+    for target in (
+        "delivery.services.send_pdf_email", "delivery.transport.send_prepared_email",
+        "delivery.credentials.load_password", "keyring.get_password",
+        "ui.views.resolve_smtp_config", "ui.views.resolve_keyring_credential_ref",
+        "rendering.services.render_pdf",
+    ):
+        monkeypatch.setattr(target, forbidden)
+    monkeypatch.setattr(socket.socket, "connect", forbidden)
+    monkeypatch.setattr(socket, "create_connection", forbidden)
+    return cycle, attempt
+
+
+def _failed_retry_data(cycle, attempt):
+    return {
+        "action": "prepare_failed_retry", "cycle_id": cycle.pk,
+        "invoice_id": attempt.invoice_id, "attempt_id": attempt.pk,
+        "reason": "  Odpravljena zavrnitev pri ponudniku.  ",
+    }
+
+
+@pytest.mark.django_db
+def test_confirmed_failure_retry_get_is_read_only(client, failed_np_delivery):
+    cycle, attempt = failed_np_delivery
+    before = _unknown_ui_snapshot()
+    content = client.get("/mesecni-obracun/", _failed_retry_data(cycle, attempt)).content.decode()
+    assert "Pripravi ponovno pošiljanje" in content
+    assert "SMTP_DATA_REJECTED" in content
+    assert "&lt;script&gt;alert(1)&lt;/script&gt;" in content
+    assert "Ne pošlje e-pošte." in content
+    assert f'name="cycle_id" value="{cycle.pk}"' in content
+    assert 'name="reason" required' in content
+    assert 'name="csrfmiddlewaretoken"' in content
+    assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db(transaction=True)
+def test_confirmed_failure_retry_prepares_once_with_atomic_audit(
+    client, failed_np_delivery, settings, tmp_path, monkeypatch,
+):
+    import json
+    from pathlib import Path
+
+    cycle, attempt = failed_np_delivery
+    before = _unknown_ui_snapshot()
+    pdf = Path(settings.RENDERING_ROOT) / attempt.pdf_path
+    original_pdf = pdf.read_bytes(), pdf.stat().st_mtime_ns
+    data = _failed_retry_data(cycle, attempt)
+    response = client.post("/mesecni-obracun/", data)
+    assert response.status_code == 302
+    assert response.url == "/mesecni-obracun/?retry_result=prepared"
+    retry = DeliveryAttempt.objects.get(invoice_id=attempt.invoice_id, sequence=2)
+    assert retry.result == DeliveryAttempt.Result.PREPARED
+    for field in ("pdf_path", "pdf_checksum", "sender", "recipients_to", "recipients_cc", "recipients_bcc"):
+        assert getattr(retry, field) == getattr(attempt, field)
+    assert DeliveryAttempt.objects.values().get(pk=attempt.pk) == before[DeliveryAttempt][0]
+    audit = AuditLogEntry.objects.get(polje="confirmed_failure_retry")
+    assert audit.content_type == ContentType.objects.get_for_model(DeliveryAttempt)
+    assert audit.object_id == attempt.pk
+    assert audit.stara_vrednost == DeliveryAttempt.Result.CONFIRMED_FAILURE
+    assert json.loads(audit.nova_vrednost) == {"retry_attempt_id": retry.pk, "cycle_id": cycle.pk}
+    assert audit.razlog == data["reason"].strip()
+    after = _unknown_ui_snapshot()
+    for model in (InvoiceLine, MonthlyCycle, MonthlyBatch, MonthlyCandidateReview, NumberSequence):
+        assert after[model] == before[model]
+    before[Invoice][0]["status"] = Invoice.Status.IZBRAN_ZA_POSILJANJE
+    assert after[Invoice] == before[Invoice]
+    content = client.get(response.url).content.decode()
+    assert "Ponovni poskus je pripravljen. E-pošta še ni poslana." in content
+    assert "Pošlji pripravljene račune" in content
+    assert "Pripravi ponovno pošiljanje" not in content
+    assert (pdf.read_bytes(), pdf.stat().st_mtime_ns) == original_pdf
+    stable = _unknown_ui_snapshot()
+    repeated = client.post("/mesecni-obracun/", data)
+    assert repeated.url.endswith("retry_result=stale")
+    assert _unknown_ui_snapshot() == stable
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("invalid", [
+    "empty_reason", "blank_reason", "missing_reason", "wrong_invoice", "wrong_attempt",
+    "malformed", "missing_id", "stale_cycle", "missing_cycle", "outside_step6",
+    "closed_cycle", "outside_package", "other_cycle_invoice", "nonlatest", "wrong_status", "pdf_metadata",
+    "bad_recipients",
+])
+def test_confirmed_failure_retry_invalid_post_does_not_mutate(client, failed_np_delivery, invalid):
+    cycle, attempt = failed_np_delivery
+    data = _failed_retry_data(cycle, attempt)
+    if invalid == "empty_reason":
+        data["reason"] = ""
+    elif invalid == "blank_reason":
+        data["reason"] = "   "
+    elif invalid == "missing_reason":
+        data.pop("reason")
+    elif invalid == "wrong_invoice":
+        data["invoice_id"] = 999999
+    elif invalid == "wrong_attempt":
+        data["attempt_id"] = 999999
+    elif invalid == "malformed":
+        data["attempt_id"] = "invalid"
+    elif invalid == "missing_id":
+        data.pop("invoice_id")
+    elif invalid == "stale_cycle":
+        other = MonthlyCycle.objects.create(
+            obdobje=date(2025, 1, 1), datum_izdaje=date(2025, 1, 31),
+            trenutni_korak=6, status=MonthlyCycle.Status.ZAKLJUCEN,
+        )
+        data["cycle_id"] = other.pk
+    elif invalid == "missing_cycle":
+        data.pop("cycle_id")
+    elif invalid == "outside_step6":
+        MonthlyCycle.objects.filter(pk=cycle.pk).update(trenutni_korak=5)
+    elif invalid == "closed_cycle":
+        MonthlyCycle.objects.filter(pk=cycle.pk).update(status=MonthlyCycle.Status.ZAKLJUCEN)
+    elif invalid in {"outside_package", "other_cycle_invoice"}:
+        values = Invoice.objects.values().get(pk=attempt.invoice_id)
+        values.pop("id")
+        values.update(stevilka="NP-99999", lease_id=None)
+        if invalid == "other_cycle_invoice":
+            MonthlyCycle.objects.create(
+                obdobje=date(2025, 1, 1), datum_izdaje=date(2025, 1, 31),
+                trenutni_korak=6, status=MonthlyCycle.Status.ZAKLJUCEN,
+            )
+            values.update(
+                lease_id=attempt.invoice.lease_id, obdobje_od=date(2025, 1, 1),
+                obdobje_do=date(2025, 1, 31), datum_izdaje=date(2025, 1, 31),
+            )
+        outsider = Invoice.objects.create(**values)
+        values = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+        values.pop("id")
+        values["invoice_id"] = outsider.pk
+        outside_attempt = DeliveryAttempt.objects.create(**values)
+        data.update(invoice_id=outsider.pk, attempt_id=outside_attempt.pk)
+    elif invalid == "nonlatest":
+        values = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+        values.pop("id")
+        values["sequence"] += 1
+        DeliveryAttempt.objects.create(**values)
+    elif invalid == "wrong_status":
+        Invoice.objects.filter(pk=attempt.invoice_id).update(status=Invoice.Status.POSLAN)
+    elif invalid == "pdf_metadata":
+        Invoice.objects.filter(pk=attempt.invoice_id).update(checksum="f" * 64)
+    elif invalid == "bad_recipients":
+        DeliveryAttempt.objects.filter(pk=attempt.pk).update(recipients_to=[])
+    before = _unknown_ui_snapshot()
+    response = client.post("/mesecni-obracun/", data)
+    assert response.status_code == 302
+    assert "retry_result=" in response.url and "prepared" not in response.url
+    assert _unknown_ui_snapshot() == before
+    content = client.get(response.url).content.decode()
+    assert "Ponovni poskus ni pripravljen." in content
+    assert "Traceback" not in content
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("state", ["prepared", "started", "unknown", "accepted"])
+def test_nonfailure_never_exposes_or_accepts_confirmed_retry(
+    client, ready_company, settings, tmp_path, state,  # noqa: F811
+):
+    cycle = _step6_cycle(ready_company, settings, tmp_path)
+    pripravi_dostavo_mesecnega_cikla(cycle)
+    attempt = DeliveryAttempt.objects.get()
+    if state != "prepared":
+        attempt = mark_submission_started(attempt)
+    if state == "unknown":
+        attempt = mark_result_unknown(attempt, code="SMTP_RESULT_UNKNOWN")
+    elif state == "accepted":
+        attempt = mark_accepted(attempt, code="SMTP_ACCEPTED")
+    with delivery_execution_lock(attempt.pk) if state == "started" else nullcontext():
+        before = _unknown_ui_snapshot()
+        content = client.get("/mesecni-obracun/").content.decode()
+        assert "Pripravi ponovno pošiljanje" not in content
+        response = client.post("/mesecni-obracun/", _failed_retry_data(cycle, attempt))
+        assert response.url.endswith("retry_result=stale")
+        assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db
+@pytest.mark.parametrize("token", [False, True])
+def test_confirmed_failure_retry_requires_csrf(failed_np_delivery, token):
+    cycle, attempt = failed_np_delivery
+    csrf_client = Client(enforce_csrf_checks=True)
+    data = _failed_retry_data(cycle, attempt)
+    if token:
+        csrf_client.get("/mesecni-obracun/")
+        data["csrfmiddlewaretoken"] = csrf_client.cookies["csrftoken"].value
+    before = _unknown_ui_snapshot()
+    response = csrf_client.post("/mesecni-obracun/", data)
+    assert response.status_code == (302 if token else 403)
+    if token:
+        assert response.url.endswith("retry_result=prepared")
+    else:
+        assert _unknown_ui_snapshot() == before
+
+
+@pytest.mark.django_db(transaction=True)
+def test_confirmed_retry_audit_failure_rolls_back_preparation(client, failed_np_delivery, monkeypatch):
+    from django.db import DatabaseError
+
+    cycle, attempt = failed_np_delivery
+    before = _unknown_ui_snapshot()
+    original = AuditLogEntry.save
+
+    def fail_retry_audit(self, *args, **kwargs):
+        if self.polje == "confirmed_failure_retry":
+            raise DatabaseError("private database detail must not be displayed")
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(AuditLogEntry, "save", fail_retry_audit)
+    response = client.post("/mesecni-obracun/", _failed_retry_data(cycle, attempt))
+    assert response.url.endswith("retry_result=storage")
+    assert _unknown_ui_snapshot() == before
+    content = client.get(response.url).content.decode()
+    assert "Ponovnega poskusa in razloga ni bilo mogoče shraniti." in content
+    assert "private database detail" not in content

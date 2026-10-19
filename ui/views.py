@@ -106,6 +106,7 @@ from invoicing.services import (
     premakni_mesecni_cikel,
     preveri_predhodno_kontrolo,
     pripravi_dostavo_mesecnega_cikla,
+    pripravi_ponovno_dostavo_mesecnega_racuna,
     shrani_prvi_korak,
     so_vsi_uspesni_izracuni_aktivni,
     stanje_arhiviranja_mesecnega_cikla,
@@ -1289,6 +1290,19 @@ def mesecni_obracun(request):
     nadaljevanje = None
     sporocilo_napake = None
     review_error = None
+    retry_feedback = {
+        "prepared": "Ponovni poskus je pripravljen. E-pošta še ni poslana. "
+        "Za pošiljanje uporabite »Pošlji pripravljene račune«.",
+        "reason": "Ponovni poskus ni pripravljen. Vnesite razlog: kaj ste odpravili "
+        "oziroma zakaj želite ponoviti pošiljanje.",
+        "stale": "Ponovni poskus ni pripravljen. Cikel, račun ali zadnji poskus "
+        "ne ustreza potrjeni napaki izbranega paketa v aktivnem koraku 6. "
+        "Osvežite stran in preverite prikazano stanje.",
+        "snapshot": "Ponovni poskus ni pripravljen. Preverite nespremenljivi PDF "
+        "in zamrznjene prejemnike zadnjega neuspešnega poskusa.",
+        "storage": "Ponovnega poskusa in razloga ni bilo mogoče shraniti. "
+        "Osvežite stran in preverite zadnji poskus pred ponovitvijo.",
+    }.get(request.GET.get("retry_result"))
     if request.GET.get("unknown_error"):
         review_error = (
             "Odločitve ni bilo mogoče shraniti. Vnesite razlog in preverite "
@@ -1412,6 +1426,29 @@ def mesecni_obracun(request):
                 return redirect("ui:mesecni_obracun")
         except (MesecniCikelNapaka, ValidationError) as exc:
             review_error = _review_error_message(exc)
+    if request.method == "POST" and action == "prepare_failed_retry":
+        result = "prepared"
+        try:
+            if not cycle or int(request.POST.get("cycle_id", "")) != cycle.pk:
+                raise ValueError
+            pripravi_ponovno_dostavo_mesecnega_racuna(
+                cycle,
+                invoice_id=int(request.POST.get("invoice_id", "")),
+                attempt_id=int(request.POST.get("attempt_id", "")),
+                reason=request.POST.get("reason", ""),
+            )
+        except (ValueError, MesecniCikelNapaka, DeliveryAttempt.DoesNotExist):
+            result = "stale"
+        except ValidationError as exc:
+            result = {"retry_reason": "reason", "retry_stale": "stale"}.get(
+                getattr(exc, "code", None), "snapshot",
+            )
+        except DatabaseError:
+            result = "storage"
+        response = redirect("ui:mesecni_obracun")
+        response["Location"] += f"?retry_result={result}"
+        return response
+
     if request.method == "POST" and action in {"unknown_sent", "unknown_not_sent"}:
         response = redirect("ui:mesecni_obracun")
         try:
@@ -1776,6 +1813,7 @@ def mesecni_obracun(request):
             "review_rows": review_rows,
             "review_summary": review_summary,
             "review_error": review_error,
+            "retry_feedback": retry_feedback,
             "final_render_can_attempt": final_render_can_attempt,
             "step6_all_pdfs_ready": step6_all_pdfs_ready,
             "delivery_state": delivery_state,

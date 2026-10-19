@@ -10,6 +10,7 @@
 <div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">error</span>{{ sporocilo_napake }}</div>
 {% endif %}
 {% if review_error and trenutni_korak != 4 %}<div class="form-note" role="alert"><span class="material-symbols-outlined" aria-hidden="true">error</span>{{ review_error }}</div>{% endif %}
+{% if retry_feedback %}<p class="form-note" role="status">{{ retry_feedback }}</p>{% endif %}
 
 {% if nadaljevanje and trenutni_korak == 2 %}
 <header class="page-heading billing-heading">
@@ -116,6 +117,21 @@
   <textarea id="unknown-reason-{{ item.latest_attempt_id }}" name="reason" required></textarea>
   <button class="button-secondary" name="action" value="unknown_sent" type="submit">Potrdi, da je bilo poslano</button>
   <button class="button-secondary" name="action" value="unknown_not_sent" type="submit">Potrdi, da ni bilo poslano</button>
+</form>
+{% elif item.delivery_state == 'DELIVERY_FAILED' %}
+<p>{{ item.message }}</p>
+{% if item.latest_attempt_result_code %}<p>{{ item.latest_attempt_result_code }}</p>{% endif %}
+{% if item.latest_attempt_message %}<p>{{ item.latest_attempt_message }}</p>{% endif %}
+<p>Dejanje pripravi nov poskus z istim PDF in zamrznjenimi prejemniki. Ne pošlje e-pošte.</p>
+<form method="post">
+  {% csrf_token %}
+  <input type="hidden" name="cycle_id" value="{{ delivery_state.cycle_id }}">
+  <input type="hidden" name="invoice_id" value="{{ item.invoice_id }}">
+  <input type="hidden" name="attempt_id" value="{{ item.latest_attempt_id }}">
+  <label for="retry-reason-{{ item.latest_attempt_id }}">Razlog: kaj ste odpravili oziroma zakaj želite ponoviti pošiljanje</label>
+  <textarea id="retry-reason-{{ item.latest_attempt_id }}" name="reason" required></textarea>
+  <p>V razlog ne vnašajte gesel ali drugih skrivnosti.</p>
+  <button class="button-secondary" name="action" value="prepare_failed_retry" type="submit">Pripravi ponovno pošiljanje</button>
 </form>
 {% else %}{{ item.message }}{% endif %}
 </td></tr>{% endfor %}
