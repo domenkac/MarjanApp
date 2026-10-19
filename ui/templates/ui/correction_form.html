@@ -1,0 +1,14 @@
+{% extends "ui/base.html" %}
+{% block title %}{{ heading }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>{{ heading }}</h1><a href="{% url 'ui:correction_list' %}">Storno in dobropisi</a></header>
+{% if company %}<p>Izdajatelj: {{ company.naziv }}</p>{% endif %}
+{% if invoice %}<p>{{ invoice.get_document_type_display }} #{{ invoice.pk }} · izvirnik {{ invoice.povezan_racun.stevilka }}</p>{% endif %}
+{% if source_lines %}<section class="panel"><h2>Uporabi podatke izvirne postavke</h2>
+<p>Izberite izvirno postavko za ohranitev zgodovinskih dokazil DDV. Pri samostojnem ST je izbor obvezen. Zneske dobropisa vnesite ročno.</p>
+{% for line in source_lines %}<p><a href="?source_line={{ line.pk }}">{{ line.opis }}</a> · {{ line.ddv_nacin_obracuna }} · {{ line.ddv_stopnja|floatformat:2 }} % · {{ line.skupaj|floatformat:2 }} EUR</p>{% endfor %}
+</section>{% endif %}
+{% if source %}<p>Izvirna postavka: {{ source.opis }}. Režim {{ source.ddv_rezim_sifra|default:"zgodovinsko neznan" }}, zahteva polni odbitek: {{ source.ddv_zahteva_polni_odbitek|yesno:"Da,Ne,Ni podatka" }}. Podatki DDV ostanejo zgodovinski. Vnesite vse zneske.</p>{% endif %}
+<section class="panel"><form method="post">{% csrf_token %}{{ form.as_p }}<button class="button-primary" type="submit">Shrani osnutek</button></form></section>
+{% if invoice %}<p><a href="{% url 'ui:correction_review' invoice.company_id invoice.pk %}">Nazaj na pregled osnutka</a></p>{% endif %}
+{% endblock %}

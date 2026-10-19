@@ -1,0 +1,21 @@
+{% for line in lines %}
+<section class="panel"><h3>{{ line.opis }}</h3><dl>
+  <dt>Enota mere</dt><dd>{{ line.enota_mere|default:"—" }}</dd>
+  <dt>Osnova (EUR)</dt><dd>{{ line.osnova|floatformat:2 }}</dd>
+  <dt>Stopnja DDV</dt><dd>{{ line.ddv_stopnja|floatformat:2 }} %</dd>
+  <dt>DDV (EUR)</dt><dd>{{ line.ddv_znesek|floatformat:2 }}</dd>
+  <dt>Skupaj (EUR)</dt><dd>{{ line.skupaj|floatformat:2 }}</dd>
+  <dt>Način obračuna DDV</dt><dd>{{ line.ddv_nacin_obracuna }}</dd>
+  <dt>eSLOG koda DDV</dt><dd>{{ line.ddv_eslog_koda }}</dd>
+  <dt>DDV režim</dt><dd>{{ line.ddv_rezim_sifra|default:"—" }}</dd>
+  <dt>Zahteva polni odbitek</dt><dd>{{ line.ddv_zahteva_polni_odbitek|yesno:"Da,Ne,Ni podatka" }}</dd>
+  <dt>Skupina DDV rekapitulacije</dt><dd>{{ line.ddv_rekap_skupina }}</dd>
+  <dt>DDV klavzula</dt><dd>{{ line.ddv_klavzula|default:"—"|linebreaksbr }}</dd>
+  <dt>Referenca listine</dt><dd>{{ line.referenca_listine|default:"—" }}</dd>
+  <dt>Datum reference</dt><dd>{{ line.datum_reference|date:"d. m. Y"|default:"—" }}</dd>
+  <dt>Razlog ročnega popravka postavke</dt><dd>{{ line.razlog_rocnega_popravka|default:"—" }}</dd>
+</dl>
+{% if editable %}<a href="{% url 'ui:correction_line_edit' invoice.company_id invoice.pk line.pk %}">Uredi postavko</a>
+<form method="post" action="{% url 'ui:correction_line_delete' invoice.company_id invoice.pk line.pk %}">{% csrf_token %}<button class="button-secondary" type="submit">Odstrani postavko</button></form>{% endif %}
+</section>
+{% empty %}<p>Ni postavk. Praznega dobropisa ni mogoče izdati.</p>{% endfor %}

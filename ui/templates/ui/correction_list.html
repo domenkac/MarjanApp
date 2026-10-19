@@ -1,0 +1,25 @@
+{% extends "ui/base.html" %}
+{% block title %}Storno in dobropisi · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>Storno in dobropisi</h1></header>
+<section class="panel">
+  <form method="get">
+    <label for="company">Izdajatelj</label>
+    <select id="company" name="company"><option value="">Izberite izdajatelja</option>
+      {% for item in companies %}<option value="{{ item.pk }}"{% if item.pk == company.pk %} selected{% endif %}>{{ item.naziv }}</option>{% endfor %}
+    </select>
+    <label for="q">Poišči izvirnik po številki ali prejemniku</label><input id="q" name="q" value="{{ search }}">
+    <button class="button-secondary" type="submit">Poišči</button>
+  </form>
+  {% if company %}<p><a class="button-primary" href="{% url 'ui:correction_new' company.pk %}">Nov storno ali dobropis</a></p>
+  <h2>Izdani izvirni računi NP in ST</h2>
+  {% for source in sources %}<p><a href="{% url 'ui:correction_original' source.company_id source.pk %}">{{ source.stevilka }}</a> · {{ source.prejemnik_naziv }} · {{ source.datum_izdaje|date:"d. m. Y" }} · {{ source.skupaj_z_ddv|floatformat:2 }} EUR
+    <a href="{% url 'ui:correction_new' source.company_id %}?original={{ source.pk }}">Pripravi popravek</a></p>
+  {% empty %}<p>Ni ustreznih izdanih izvirnikov.</p>{% endfor %}{% endif %}
+</section>
+<section class="panel"><h2>Osnutki in izdani popravki</h2>
+  {% for invoice in invoices %}<p><a href="{% if invoice.stevilka %}{% url 'ui:correction_detail' invoice.company_id invoice.pk %}{% else %}{% url 'ui:correction_review' invoice.company_id invoice.pk %}{% endif %}">{{ invoice.get_document_type_display }} · {{ invoice.stevilka|default:"Osnutek" }} · #{{ invoice.pk }}</a>
+    · {{ invoice.izdajatelj_naziv }} · {{ invoice.prejemnik_naziv }} · izvirnik {{ invoice.povezan_racun.stevilka }} · {{ invoice.get_status_display }}</p>
+  {% empty %}<p>Ni storna ali dobropisov.</p>{% endfor %}
+</section>
+{% endblock %}

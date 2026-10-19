@@ -1,0 +1,19 @@
+<div class="dashboard-grid">
+  <section class="panel"><h2>Izvirni račun</h2>
+    <p><a href="{% url 'ui:correction_original' original.company_id original.pk %}">{{ original.get_document_type_display }} {{ original.stevilka }}</a> · interni zapis #{{ original.pk }}</p>
+    <p>Izdajatelj: {{ original.izdajatelj_naziv }} · {{ original.izdajatelj_naslov }} · {{ original.izdajatelj_davcna_stevilka }}</p>
+    <p>Prejemnik: {{ original.prejemnik_naziv }} · {{ original.prejemnik_naslov }} · {{ original.prejemnik_davcna_stevilka }}</p>
+    <p>Datum izdaje: {{ original.datum_izdaje|date:"d. m. Y" }}</p>
+    {% include "ui/partials/correction_lines.html" with lines=original_lines editable=False %}
+    <p>Osnova {{ original.osnova_skupaj|floatformat:2 }} EUR · DDV {{ original.ddv_skupaj|floatformat:2 }} EUR · skupaj {{ original.skupaj_z_ddv|floatformat:2 }} EUR</p>
+  </section>
+  <section class="panel"><h2>{{ invoice.get_document_type_display }} — popravek</h2>
+    <p>Izdajatelj: {{ invoice.izdajatelj_naziv }} · {{ invoice.izdajatelj_naslov }} · {{ invoice.izdajatelj_davcna_stevilka }}</p>
+    <p>Prejemnik: {{ invoice.prejemnik_naziv }} · {{ invoice.prejemnik_naslov }} · {{ invoice.prejemnik_davcna_stevilka }}</p>
+    <p>Datum izdaje: {{ invoice.datum_izdaje|date:"d. m. Y" }}</p>
+    <p>Razlog: {{ invoice.razlog|linebreaksbr }}</p>
+    {% include "ui/partials/correction_lines.html" %}
+    <h3>Skupni zneski popravka</h3>
+    <p>Osnova {{ totals.osnova|floatformat:2 }} EUR · DDV {{ totals.ddv_znesek|floatformat:2 }} EUR · skupaj {{ totals.skupaj|floatformat:2 }} EUR</p>
+  </section>
+</div>

@@ -1,0 +1,15 @@
+{% extends "ui/base.html" %}
+{% block title %}Pregled popravka · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>{% if confirming %}Dokončna potrditev{% else %}Pregled popravka{% endif %}</h1><a href="{% url 'ui:correction_list' %}">Storno in dobropisi</a></header>
+<p class="status-badge">Osnutek — še ni izdan</p><p>Številka ni dodeljena. Interni zapis #{{ invoice.pk }}.</p>
+{% if not confirming %}<p><a href="{% url 'ui:correction_edit' invoice.company_id invoice.pk %}">Uredi datum in razlog</a></p>
+{% if invoice.document_type == 'DOBROPIS' %}<p><a class="button-secondary" href="{% url 'ui:correction_line_new' invoice.company_id invoice.pk %}">Dodaj postavko dobropisa</a></p>
+{% include "ui/partials/correction_comparison.html" with editable=True %}
+{% else %}<p>Vrstice storna zrcalijo izvirnik. Ročno urejanje ni dovoljeno.</p>{% include "ui/partials/correction_comparison.html" with editable=False %}{% endif %}
+{% else %}{% include "ui/partials/correction_comparison.html" with editable=False %}{% endif %}
+<section class="panel"><h2>{% if confirming %}Dokončna izdaja{% else %}Obvezen posamični pregled{% endif %}</h2>
+<p>{% if confirming %}Po potrditvi je dokument nespremenljiv in dobi uradno številko.{% else %}Pregled ne dodeli številke. Sledi ločena dokončna potrditev.{% endif %}</p>
+<form method="post">{% csrf_token %}{{ form.as_p }}<button class="button-primary" type="submit">{% if confirming %}Dokončno izdaj{% else %}Potrdi pregled{% endif %}</button></form>
+</section>
+{% endblock %}

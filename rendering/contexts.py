@@ -432,6 +432,15 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
         )
     if svezi.document_type == Invoice.DocumentType.ST:
         _preveri_st_posnetek(svezi, vrstice)
+    elif (svezi.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS)
+            and svezi.povezan_racun.document_type == Invoice.DocumentType.ST
+            and svezi.povezan_racun.lease_id is None):
+        from invoicing.corrections import validate_st_correction_pdf
+
+        try:
+            validate_st_correction_pdf(svezi, vrstice)
+        except ValidationError as napaka:
+            raise PdfRenderNapaka("ST_REFERENCA_NEVELJAVNA", str(napaka)) from napaka
     return svezi, vrstice
 
 

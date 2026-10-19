@@ -1,5 +1,6 @@
 from django.urls import path
 
+from . import corrections
 from .indexation import (
     adjustment_detail,
     adjustment_list,
@@ -84,6 +85,18 @@ from .views import (
 app_name = "ui"
 
 urlpatterns = [
+    path("storno-dobropisi/", corrections.correction_list, name="correction_list"),
+    path("storno-dobropisi/<int:company_id>/nov/", corrections.correction_new, name="correction_new"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/izvirnik/", corrections.correction_original, name="correction_original"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/", corrections.correction_review, name="correction_review"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/uredi/", corrections.correction_edit, name="correction_edit"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/postavka/", corrections.correction_line, name="correction_line_new"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/postavka/<int:line_id>/", corrections.correction_line, name="correction_line_edit"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/postavka/<int:line_id>/izbrisi/", corrections.correction_line_delete, name="correction_line_delete"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/potrditev/", corrections.correction_confirm, name="correction_confirm"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/izdan/", corrections.correction_detail, name="correction_detail"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/pdf/", corrections.correction_pdf, name="correction_pdf"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/pdf/ponovi/", corrections.correction_retry_pdf, name="correction_retry_pdf"),
     path("zacetna-nastavitev/", first_run_setup, name="first_run_setup"),
     path("pogodbe/<int:lease_id>/podaljsaj/", pogodba_podaljsaj, name="pogodba_podaljsaj"),
     path("indeksacija/", indexation_list, name="indexation_list"),

@@ -1,0 +1,8 @@
+{% extends "ui/base.html" %}
+{% block title %}Izvirnik {{ invoice.stevilka }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>Izvirni {{ invoice.get_document_type_display }} {{ invoice.stevilka }}</h1><a href="{% url 'ui:correction_list' %}?company={{ invoice.company_id }}">Storno in dobropisi</a></header>
+<p>Interni zapis #{{ invoice.pk }} · {{ invoice.get_status_display }}</p>
+{% include "ui/partials/st_snapshots.html" %}
+<p><a class="button-secondary" href="{% url 'ui:correction_new' invoice.company_id %}?original={{ invoice.pk }}">Pripravi popravek</a></p>
+{% endblock %}

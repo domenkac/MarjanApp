@@ -1,0 +1,13 @@
+{% extends "ui/base.html" %}
+{% block title %}{{ invoice.get_document_type_display }} {{ invoice.stevilka }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>{{ invoice.get_document_type_display }} {{ invoice.stevilka }}</h1><a href="{% url 'ui:correction_list' %}">Storno in dobropisi</a></header>
+<p class="status-badge">{{ invoice.get_status_display }}</p><p>Dokument je izdan. Številka: {{ invoice.stevilka }}.</p>
+{% include "ui/partials/correction_comparison.html" with editable=False %}
+<section class="panel"><h2>Uradni PDF</h2>
+{% if pdf_error %}<p class="form-errors" role="alert">{{ pdf_error }}</p>{% endif %}
+{% if pdf_state.state == 'READY' %}<p>PDF je pripravljen. Celovitost je preverjena.</p><a href="{% url 'ui:correction_pdf' invoice.company_id invoice.pk %}">Odpri PDF</a> · <a href="{% url 'ui:correction_pdf' invoice.company_id invoice.pk %}?download=1">Prenesi PDF</a>
+{% else %}<p>PDF še ni na voljo ali njegova celovitost ni potrjena. Izdana številka ostaja veljavna. Registriranega PDF ni dovoljeno zamenjati.</p>{% endif %}
+<form method="post" action="{% url 'ui:correction_retry_pdf' invoice.company_id invoice.pk %}">{% csrf_token %}<button class="button-secondary" type="submit">Ponovi samo pripravo PDF</button></form>
+</section>
+{% endblock %}

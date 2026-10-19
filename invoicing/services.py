@@ -1059,18 +1059,31 @@ def spremeni_podatke_racuna(invoice: Invoice, **spremembe) -> Invoice:
 
 
 @transaction.atomic
-def dodaj_vrstico(invoice: Invoice, **podatki) -> InvoiceLine:
+def dodaj_vrstico(invoice: Invoice, *, izvirna_vrstica: InvoiceLine | None = None, **podatki) -> InvoiceLine:
     svezi = preveri_uredljiv_osnutek(invoice)
     _zavrni_splosno_urejanje_st(svezi)
     if "invoice" in podatki or "invoice_id" in podatki:
         raise ValueError("Račun vrstice določa argument invoice.")
     if svezi.document_type == Invoice.DocumentType.STORNO:
         raise ValueError("Vrstic storna ni dovoljeno ročno spreminjati.")
+    if izvirna_vrstica is not None and svezi.document_type != Invoice.DocumentType.DOBROPIS:
+        raise ValueError("Izvirna postavka je podprta samo za dobropis.")
+    if svezi.document_type == Invoice.DocumentType.DOBROPIS and (
+        {"ddv_rezim_sifra", "ddv_zahteva_polni_odbitek"} & podatki.keys()
+    ):
+        raise ValueError("Dokazila DDV določa preverjena izvirna postavka, ne ročni vnos.")
     vrstica = InvoiceLine(invoice=svezi, **podatki)
     if svezi.document_type == Invoice.DocumentType.DOBROPIS:
+        from .corrections import prepare_credit_source
+
+        izvirna_vrstica = prepare_credit_source(vrstica, izvirna_vrstica)
         _preveri_rocno_vrstico_dobropisa(vrstica)
     vrstica.full_clean()
     vrstica.save()
+    if svezi.document_type == Invoice.DocumentType.DOBROPIS:
+        from .corrections import record_credit_source
+
+        record_credit_source(vrstica, izvirna_vrstica)
     return vrstica
 
 
@@ -1088,6 +1101,9 @@ def spremeni_vrstico(vrstica: InvoiceLine, **spremembe) -> InvoiceLine:
     for polje, vrednost in spremembe.items():
         setattr(sveza, polje, vrednost)
     if invoice.document_type == Invoice.DocumentType.DOBROPIS:
+        from .corrections import credit_source
+
+        credit_source(sveza)
         _preveri_rocno_vrstico_dobropisa(sveza)
     sveza.full_clean()
     sveza.save(update_fields=spremembe)
@@ -1475,11 +1491,17 @@ _SNAPSHOT_POLJA_KOREKCIJE = (
 
 
 def _preveri_izvirnik_korekcije(original: Invoice) -> Invoice:
+    if not isinstance(original, Invoice) or original.pk is None or original._state.adding:
+        raise ValueError("Korekcija zahteva shranjen izvirni račun.")
     original = Invoice.objects.get(pk=original.pk)
-    if not original.stevilka:
+    if not original.stevilka or original.status in (Invoice.Status.OSNUTEK, Invoice.Status.ARHIVIRAN_NI_IZDAN):
         raise ValueError("Izvirnik ni izdan.")
-    if original.document_type not in (Invoice.DocumentType.NP, Invoice.DocumentType.ST):
+    if original.document_type not in (Invoice.DocumentType.NP, Invoice.DocumentType.ST) or original.povezan_racun_id:
         raise ValueError("Korekcija zahteva izvirni NP ali ST.")
+    if original.document_type == Invoice.DocumentType.ST and original.lease_id is None:
+        from .corrections import original_references
+
+        original_references(original)
     return original
 
 
@@ -1507,6 +1529,9 @@ def _storno_vrstica(originalna: InvoiceLine, storno: Invoice) -> InvoiceLine:
         lease_id=originalna.lease_id,
         lease_item_id=originalna.lease_item_id,
         opis=originalna.opis,
+        enota_mere=originalna.enota_mere,
+        referenca_listine=originalna.referenca_listine,
+        datum_reference=originalna.datum_reference,
         osnova=-originalna.osnova,
         ddv_stopnja=originalna.ddv_stopnja,
         ddv_znesek=-originalna.ddv_znesek,
@@ -1532,6 +1557,9 @@ def _kljuc_storno_vrstice(vrstica: InvoiceLine) -> tuple:
         vrstica.lease_id,
         vrstica.lease_item_id,
         vrstica.opis,
+        vrstica.enota_mere,
+        vrstica.referenca_listine,
+        vrstica.datum_reference,
         vrstica.osnova,
         vrstica.ddv_stopnja,
         vrstica.ddv_znesek,
@@ -1596,8 +1624,15 @@ def _potrdi_korekcijski_osnutek(
     logo_pot: str,
     podpis_vir: str,
     podpis_pot: str,
+    expected_fingerprint: str | None = None,
+    asset_evidence: dict | None = None,
 ) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
+    if expected_fingerprint is not None:
+        from .correction_review import correction_fingerprint
+
+        if correction_fingerprint(invoice) != expected_fingerprint:
+            raise ValueError("Pregled korekcijskega osnutka je zastarel.")
     if (
         invoice.document_type
         not in (
@@ -1615,7 +1650,20 @@ def _potrdi_korekcijski_osnutek(
         raise ValueError("Podpisnik se je med potrditvijo spremenil.")
     if invoice.company.logotip.name != logo_vir:
         raise ValueError("Logotip podjetja se je med potrditvijo spremenil.")
-    invoice.eslog_konfiguracija_snapshot = _razresi_eslog_snapshot(invoice)
+    from .corrections import standalone_original
+
+    standalone_st = standalone_original(original)
+    if standalone_st:
+        if settings.FEATURE_ESLOG or invoice.eslog_konfiguracija_snapshot is not None:
+            raise ValidationError("Korekcije samostojnega ST so v V1 podprte samo brez eSLOG.")
+        if (invoice.rendered_pdf_path or invoice.checksum or invoice.rendered_eslog_path
+                or invoice.rendered_eslog_checksum or invoice.dostavni_kontakti_snapshot
+                or invoice.rok_placila is not None or invoice.pdf_template_version):
+            raise ValidationError("Osnutek korekcije ST vsebuje nepodprte izdane podatke.")
+        if asset_evidence != {logo_vir: logo_pot, podpis_vir: podpis_pot}:
+            raise ValidationError("Manjkajo predhodno preverjeni asseti korekcije ST.")
+    else:
+        invoice.eslog_konfiguracija_snapshot = _razresi_eslog_snapshot(invoice)
     if (
         invoice.company_id != original.company_id
         or invoice.lease_id != original.lease_id
@@ -1641,6 +1689,9 @@ def _potrdi_korekcijski_osnutek(
             raise ValueError("Vrstice storna se ne ujemajo z izvirnikom.")
     else:
         for vrstica in vrstice:
+            from .corrections import credit_source
+
+            credit_source(vrstica)
             _preveri_rocno_vrstico_dobropisa(vrstica)
             vrstica.full_clean()
 
@@ -1656,6 +1707,12 @@ def _potrdi_korekcijski_osnutek(
     _preveri_ddv_klavzule(vrstice)
     _preveri_mesanje_eslog_o(vrstice)
 
+    references = None
+    if standalone_st:
+        from .corrections import validate_st_history
+
+        references = validate_st_history(invoice, original, vrstice)
+
     invoice.osnova_skupaj = sum((v.osnova for v in vrstice), Decimal("0.00"))
     invoice.ddv_skupaj = sum((v.ddv_znesek for v in vrstice), Decimal("0.00"))
     invoice.skupaj_z_ddv = invoice.osnova_skupaj + invoice.ddv_skupaj
@@ -1664,8 +1721,10 @@ def _potrdi_korekcijski_osnutek(
     invoice.izdajatelj_podpisnik_funkcija = podpisnik.funkcija
     invoice.izdajatelj_logotip_slika_pot = logo_pot
     invoice.izdajatelj_podpisnik_slika_pot = podpis_pot
-    invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
-    zaporedna = dodeli_naslednjo_stevilko(invoice.company, tip, invoice.datum_izdaje)
+    invoice.pdf_template_version = settings.ST_PDF_TEMPLATE_VERSION if standalone_st else settings.PDF_TEMPLATE_VERSION
+    zaporedna = dodeli_naslednjo_stevilko(
+        invoice.company, tip, invoice.datum_izdaje, **({"asset_evidence": asset_evidence} if standalone_st else {}),
+    )
     if tip == Invoice.DocumentType.NP:
         invoice.stevilka = f"NP-{zaporedna:05d}"
     else:
@@ -1686,10 +1745,16 @@ def _potrdi_korekcijski_osnutek(
             "eslog_konfiguracija_snapshot",
         ]
     )
+    if standalone_st:
+        from .corrections import record_st_correction_pdf
+
+        record_st_correction_pdf(invoice, references)
     return invoice
 
 
-def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
+def potrdi_korekcijski_osnutek(
+    osnutek: Invoice, *, expected_fingerprint: str | None = None,
+) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
     if invoice.document_type not in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
         raise ValueError("Račun ni korekcijski osnutek.")
@@ -1698,8 +1763,20 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
     )
     logo_vir = invoice.company.logotip.name
     podpis_vir = podpisnik.podpis_slika.name
-    logo_pot = shrani_nespremenljiv_asset(logo_vir)
-    podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
+    from .corrections import standalone_original
+
+    original = _preveri_izvirnik_korekcije(invoice.povezan_racun)
+    asset_evidence = None
+    if standalone_original(original):
+        from .st_confirmation import _assets, _outside_transaction
+
+        _outside_transaction()
+        asset_evidence = _assets(invoice, podpisnik)
+        logo_pot = asset_evidence[logo_vir]
+        podpis_pot = asset_evidence[podpis_vir]
+    else:
+        logo_pot = shrani_nespremenljiv_asset(logo_vir)
+        podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
     return _potrdi_korekcijski_osnutek(
         osnutek,
         podpisnik_id=podpisnik.pk,
@@ -1707,6 +1784,8 @@ def potrdi_korekcijski_osnutek(osnutek: Invoice) -> Invoice:
         logo_pot=logo_pot,
         podpis_vir=podpis_vir,
         podpis_pot=podpis_pot,
+        expected_fingerprint=expected_fingerprint,
+        asset_evidence=asset_evidence,
     )
 
 

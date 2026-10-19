@@ -6,6 +6,7 @@
     </div>
     <p class="nav-label">Glavni meni</p>
     <nav class="nav-list">
+      <a class="nav-item{% if active_page == 'corrections' %} is-active{% endif %}" href="{% url 'ui:correction_list' %}"{% if active_page == 'corrections' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">undo</span>Storno in dobropisi</a>
       <a class="nav-item{% if active_section == 'dashboard' and active_page != 'st' %} is-active{% endif %}" href="{% url 'ui:dashboard' %}"{% if active_section == 'dashboard' and active_page != 'st' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">dashboard</span>Nadzorna plošča</a>
       <div class="nav-subsection" aria-label="Računi na nadzorni plošči">
         <a class="nav-item{% if active_page == 'st' %} is-active{% endif %}" href="{% url 'ui:st_list' %}"{% if active_page == 'st' %} aria-current="page"{% endif %}><span class="material-symbols-outlined" aria-hidden="true">receipt_long</span>Ročni storitveni računi</a>
