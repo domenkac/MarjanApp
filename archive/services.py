@@ -6,6 +6,7 @@ from enum import StrEnum
 from pathlib import Path
 from tempfile import NamedTemporaryFile
 
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import connection, transaction
 
 from core.pravila import slugify_naziv
@@ -181,6 +182,13 @@ def _verified_source(invoice: Invoice) -> tuple[Invoice, bytes, DeliveryAttempt]
     if not _SHA256.fullmatch(invoice.checksum or ""):
         raise ArchiveConflict("Invoice checksum is invalid.")
     attempt = _delivery_evidence(invoice)
+    if invoice.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
+        from delivery.corrections import validate_correction_attempt
+
+        try:
+            validate_correction_attempt(attempt)
+        except (ValidationError, ValueError, ObjectDoesNotExist) as error:
+            raise ArchiveConflict("Correction delivery evidence is invalid.") from error
     state = stanje_koncnega_pdf(invoice)
     if state["state"] != "READY":
         raise ArchiveConflict(
@@ -206,6 +214,11 @@ def archive_pdf(
                 "Archive operation cannot run inside a DB transaction."
             )
         invoice, source, attempt = _verified_source(invoice)
+        if invoice.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
+            from .st_invoices import _configured_roots
+
+            if roots != _configured_roots():
+                raise ArchiveConflict("Correction archive roots differ from configured roots.")
         checksum = invoice.checksum
         paths = archive_paths(invoice, roots)
         identity = {

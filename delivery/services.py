@@ -118,6 +118,11 @@ def build_pdf_email(attempt: DeliveryAttempt, *, subject, body) -> PreparedEmail
         raise ValidationError("Delivery attempt must be persisted before composition.")
     current = DeliveryAttempt.objects.select_related("invoice").get(pk=attempt.pk)
     invoice = current.invoice
+    if invoice.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
+        from .corrections import correction_email_content, validate_correction_attempt
+
+        validate_correction_attempt(current)
+        subject, body = correction_email_content(invoice)
     if invoice.document_type == Invoice.DocumentType.ST:
         from .st_delivery import require_st_invoice
 
@@ -566,6 +571,10 @@ def _send_pdf_email(
     current = DeliveryAttempt.objects.get(pk=attempt.pk)
     if current.result != DeliveryAttempt.Result.PREPARED:
         raise ValidationError("Only a prepared delivery attempt can be sent.")
+    if current.invoice.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
+        from .corrections import validate_correction_send
+
+        validate_correction_send(current, smtp_config)
     if current.invoice.document_type == Invoice.DocumentType.ST:
         from .st_delivery import validate_st_send
 

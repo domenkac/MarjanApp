@@ -1,6 +1,12 @@
 from django.urls import path
 
 from . import corrections
+from .correction_delivery import (
+    correction_archive,
+    correction_attempt_action,
+    correction_delivery,
+    correction_prepare_delivery,
+)
 from .indexation import (
     adjustment_detail,
     adjustment_list,
@@ -86,6 +92,10 @@ app_name = "ui"
 
 urlpatterns = [
     path("storno-dobropisi/", corrections.correction_list, name="correction_list"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/dostava/", correction_delivery, name="correction_delivery"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/dostava/pripravi/", correction_prepare_delivery, name="correction_prepare_delivery"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/dostava/<int:attempt_id>/", correction_attempt_action, name="correction_delivery_action"),
+    path("storno-dobropisi/<int:company_id>/<int:invoice_id>/arhiv/", correction_archive, name="correction_archive"),
     path("storno-dobropisi/<int:company_id>/nov/", corrections.correction_new, name="correction_new"),
     path("storno-dobropisi/<int:company_id>/<int:invoice_id>/izvirnik/", corrections.correction_original, name="correction_original"),
     path("storno-dobropisi/<int:company_id>/<int:invoice_id>/", corrections.correction_review, name="correction_review"),

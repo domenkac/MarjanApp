@@ -1,0 +1,7 @@
+<section class="panel"><h2>Arhiv korekcije</h2>
+<p role="status">{{ archive_state.message }}</p>
+{% if archive_state.can_archive %}
+<form method="post" action="{% url 'ui:correction_archive' invoice.company_id invoice.pk %}">{% csrf_token %}
+<button type="submit">{% if archive_state.retry %}Ponovi nepopolno arhiviranje{% else %}Arhiviraj korekcijo{% endif %}</button></form>
+{% endif %}
+</section>

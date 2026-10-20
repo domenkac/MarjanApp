@@ -10,4 +10,9 @@
 {% else %}<p>PDF še ni na voljo ali njegova celovitost ni potrjena. Izdana številka ostaja veljavna. Registriranega PDF ni dovoljeno zamenjati.</p>{% endif %}
 <form method="post" action="{% url 'ui:correction_retry_pdf' invoice.company_id invoice.pk %}">{% csrf_token %}<button class="button-secondary" type="submit">Ponovi samo pripravo PDF</button></form>
 </section>
+<section class="panel"><h2>Dostava korekcije</h2>
+<p role="status">{{ result_label }}</p>
+<a href="{% url 'ui:correction_delivery' invoice.company_id invoice.pk %}">Prejemniki, pošiljanje in zgodovina dostave</a>
+</section>
+{% include "ui/partials/correction_archive.html" %}
 {% endblock %}

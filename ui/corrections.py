@@ -310,8 +310,11 @@ def _render_and_redirect(invoice):
 @require_GET
 @override("sl")
 def correction_detail(request, company_id, invoice_id):
+    from .correction_delivery import delivery_context
+
     invoice = _issued(company_id, invoice_id)
     context = _review_context(invoice)
+    context.update(delivery_context(invoice))
     context.update(pdf_state=_pdf_state(invoice), pdf_error=_PDF_ERROR if request.GET.get("pdf_error") else None)
     return render(request, "ui/correction_detail.html", context)
 

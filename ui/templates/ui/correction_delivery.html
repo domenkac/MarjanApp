@@ -1,0 +1,62 @@
+{% extends "ui/base.html" %}
+{% block title %}Dostava {{ invoice.get_document_type_display }} {{ invoice.stevilka }} · Marjan{% endblock %}
+{% block content %}
+<header class="page-heading"><h1>Dostava: {{ invoice.get_document_type_display }} {{ invoice.stevilka }}</h1>
+<a href="{% url 'ui:correction_detail' invoice.company_id invoice.pk %}">Nazaj na izdano korekcijo</a></header>
+<p>Izvirni dokument: {{ invoice.povezan_racun.document_type }} {{ invoice.povezan_racun.stevilka }} · {{ invoice.povezan_racun.datum_izdaje }}</p>
+<p role="status">{{ result_label }}</p>
+{% if action_error %}<p role="alert">{{ action_error }}</p>{% endif %}
+{% if can_prepare %}
+<section class="panel"><h2>Izrecni pregled prejemnikov</h2>
+{% if suggestion %}<p>Prejšnji kontakt je samo predlog. Izrecno preverite, ali je primeren za to korekcijo.</p>{% endif %}
+<p>Naslove ločite z vejico ali podpičjem. Isti naslov ne sme nastopati v več vlogah.</p>
+<form method="post">{% csrf_token %}{{ form.as_p }}<button type="submit">Preglej prejemnike</button></form>
+</section>
+{% if review %}
+<section class="panel"><h2>Končni pregled dostave korekcije</h2>
+<dl><dt>Dokument</dt><dd>{{ review.document_type }} {{ review.number }}</dd>
+<dt>Izvirnik</dt><dd>{{ review.original_type }} {{ review.original_number }}</dd>
+<dt>Pošiljatelj</dt><dd>{{ review.sender }}</dd>
+<dt>TO</dt><dd>{{ review.recipients_to|join:", " }}</dd>
+<dt>CC — vidna kopija</dt><dd>{{ review.recipients_cc|join:", "|default:"Brez" }}</dd>
+<dt>BCC — skrita kopija računovodji</dt><dd>{{ review.recipients_bcc|join:", " }}</dd>
+<dt>SHA-256 uradnega PDF</dt><dd>{{ review.pdf_checksum }}</dd></dl>
+<p>Potrditev pripravi nespremenljiv poskus. Pošiljanje zahteva ločeno dejanje.</p>
+<form method="post" action="{% url 'ui:correction_prepare_delivery' invoice.company_id invoice.pk %}">{% csrf_token %}
+{{ confirm_form.as_p }}<button type="submit">Potrdi pregled in pripravi dostavo</button></form>
+</section>
+{% endif %}{% endif %}
+{% if attempt %}
+<section class="panel"><h2>Zadnji poskus: {{ attempt.sequence }} · {{ attempt.result }}</h2>
+<dl><dt>Pošiljatelj</dt><dd>{{ attempt.sender }}</dd><dt>TO</dt><dd>{{ attempt.recipients_to|join:", " }}</dd>
+<dt>CC — vidna kopija</dt><dd>{{ attempt.recipients_cc|join:", "|default:"Brez" }}</dd>
+<dt>BCC — skrita kopija računovodji</dt><dd>{{ attempt.recipients_bcc|join:", " }}</dd>
+<dt>SHA-256 uradnega PDF</dt><dd>{{ attempt.pdf_checksum }}</dd></dl>
+{% if attempt.result_code %}<p>Koda rezultata: {{ attempt.result_code }}. {{ failure_label }}</p>{% endif %}
+{% if attempt.result == 'PREPARED' %}
+<form method="post" action="{% url 'ui:correction_delivery_action' invoice.company_id invoice.pk attempt.pk %}">{% csrf_token %}<button name="action" value="send" type="submit">Pošlji PDF korekcije</button></form>
+{% elif attempt.result == 'CONFIRMED_FAILURE' %}
+<p>Ponovni poskus ohrani istega pošiljatelja, prejemnike in PDF. Priprava ne pošlje sporočila.</p>
+<form method="post" action="{% url 'ui:correction_delivery_action' invoice.company_id invoice.pk attempt.pk %}">{% csrf_token %}
+<label for="retry-reason">Razlog ponovitve (obvezno)</label><textarea name="reason" id="retry-reason" required></textarea>
+<button name="action" value="retry" type="submit">Pripravi varen ponovni poskus</button></form>
+{% elif attempt.result == 'UNKNOWN' and invoice.status == 'REZULTAT_NI_ZNAN' %}
+<p>Samodejno ponovno pošiljanje je blokirano. Preverite zanesljivo dokazilo pošiljanja. Prazna mapa Poslano ne dokazuje, da sporočilo ni bilo poslano.</p>
+<form method="post" action="{% url 'ui:correction_delivery_action' invoice.company_id invoice.pk attempt.pk %}">{% csrf_token %}
+<label for="unknown-reason">Dokazilo, razlog in ugotovitev preverjanja (obvezno)</label><textarea name="reason" id="unknown-reason" required></textarea>
+<button name="action" value="unknown_sent" type="submit">Preverjeno: sporočilo je poslano</button>
+<button name="action" value="unknown_not_sent" type="submit">Potrjujem, da ni poslano — pripravi ponovni poskus</button></form>
+{% elif attempt.result == 'SUBMISSION_STARTED' %}
+<p>Oddaja se je začela. Ponovno pošiljanje je blokirano. Aktivni pošiljatelj ostane zaščiten z zaklepom.</p>
+<form method="post" action="{% url 'ui:correction_delivery_action' invoice.company_id invoice.pk attempt.pk %}">{% csrf_token %}<button name="action" value="recover" type="submit">Preveri prekinjeno oddajo</button></form>
+{% endif %}</section>
+<section class="panel" id="history"><h2>Zgodovina dostave</h2>
+{% for entry in history %}<article><h3>Poskus {{ entry.sequence }} · {{ entry.result }}</h3>
+<p>Pripravljeno: {{ entry.prepared_at }}{% if entry.completed_at %} · Končano: {{ entry.completed_at }}{% endif %}</p>
+<p>Pošiljatelj: {{ entry.sender }} · TO: {{ entry.recipients_to|join:", " }} · CC: {{ entry.recipients_cc|join:", "|default:"Brez" }}</p>
+<p>BCC — skrita kopija računovodji: {{ entry.recipients_bcc|join:", " }}</p>
+<p>SHA-256: {{ entry.pdf_checksum }}{% if entry.result_code %} · {{ entry.result_code }}{% endif %}</p></article>{% endfor %}
+</section>
+{% endif %}
+{% include "ui/partials/correction_archive.html" %}
+{% endblock %}
