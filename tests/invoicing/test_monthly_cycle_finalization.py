@@ -8,6 +8,7 @@ from django.test.utils import CaptureQueriesContext
 from django.utils import timezone
 
 from delivery.models import MonthlySummaryAttempt
+from delivery.services import _monthly_summary_body, _monthly_summary_snapshot
 from invoicing import services
 from invoicing.models import MonthlyCycle
 from invoicing.services import (
@@ -67,15 +68,16 @@ def _final_state(cycle, **overrides):
     return state
 
 
-def _summary(cycle, result=MonthlySummaryAttempt.Result.ACCEPTED, *, sequence=1, snapshot=None):
+def _summary(cycle, result=MonthlySummaryAttempt.Result.ACCEPTED, *, sequence=1, snapshot=None, state=None):
+    snapshot = snapshot or _monthly_summary_snapshot(cycle, state or _final_state(cycle), timezone.now())
     return MonthlySummaryAttempt.objects.create(
         cycle=cycle,
         sequence=sequence,
         sender="owner@example.com",
         recipient="owner@example.com",
         subject="Mesečni postopek – 08/2026",
-        body="Summary",
-        summary_snapshot=snapshot or {"requires_attention": False},
+        body=_monthly_summary_body(snapshot) if "counts" in snapshot else "Summary",
+        summary_snapshot=snapshot,
         result=result,
         result_code="SMTP_ACCEPTED" if result == MonthlySummaryAttempt.Result.ACCEPTED else "",
         completed_at=timezone.now() if result == MonthlySummaryAttempt.Result.ACCEPTED else None,
@@ -178,7 +180,8 @@ def test_unresolved_final_control_state_blocks_closure(monkeypatch, failure):
 
 def test_zero_selected_package_can_close(monkeypatch):
     cycle = _cycle()
-    _summary(cycle)
+    _summary(cycle, state=_final_state(cycle, prepared_count=0, sent_count=0,
+                                     archive_verified_count=0, intentionally_unissued_count=1))
     monkeypatch.setattr(
         services,
         "stanje_zakljucne_kontrole_mesecnega_cikla",
@@ -364,15 +367,50 @@ def test_same_period_remains_rejected_after_closure(monkeypatch):
         zacni_ali_nadaljuj_mesecni_cikel(cycle.obdobje, cycle.datum_izdaje)
 
 
-def test_historic_attention_snapshot_does_not_override_current_control(monkeypatch):
+def test_historic_attention_snapshot_cannot_prove_current_success(monkeypatch):
     cycle = _cycle()
     _summary(cycle, snapshot={"requires_attention": True, "headline": "Mesečni postopek zahteva pozornost"})
     _successful(monkeypatch, cycle)
 
+    with pytest.raises(ValidationError, match="incomplete or stale"):
+        zakljuci_mesecni_cikel(cycle)
+    cycle.refresh_from_db()
+    assert cycle.status == MonthlyCycle.Status.V_TEKU
+    assert cycle.completion_snapshot is None
+
+
+def test_verified_unknown_closes_current_cycle_without_fabricating_acceptance(monkeypatch):
+    from delivery.report_recovery import resolve_monthly_summary_as_sent
+
+    cycle = _cycle()
+    attempt = _summary(cycle)
+    MonthlySummaryAttempt.objects.filter(pk=attempt.pk).update(result="UNKNOWN", result_code="SMTP_RESULT_UNKNOWN")
+    attempt.refresh_from_db()
+    _successful(monkeypatch, cycle)
+    resolve_monthly_summary_as_sent(attempt, cycle_id=cycle.pk, reason="Verified exact message in sent folder")
+
     closed = zakljuci_mesecni_cikel(cycle)
 
-    assert closed.status == MonthlyCycle.Status.ZAKLJUCEN
-    assert closed.completion_snapshot["headline"] == "Mesečni postopek uspešno zaključen"
+    assert closed.completion_snapshot["summary_result"] == "UNKNOWN"
+    assert closed.completion_snapshot["summary_resolution"] == "SENT_VERIFIED"
+    assert closed.completion_snapshot["summary_result_code"] == "SMTP_RESULT_UNKNOWN"
+    assert zakljuci_mesecni_cikel(closed).pk == cycle.pk
+    assert MonthlySummaryAttempt.objects.get().result == "UNKNOWN"
+
+
+def test_full_historical_attention_summary_remains_stale_after_sent_verification(monkeypatch):
+    from delivery.report_recovery import resolve_monthly_summary_as_sent
+
+    cycle = _cycle()
+    attempt = _summary(cycle, state=_final_state(cycle, requires_attention=True,
+                                               headline="Mesečni postopek zahteva pozornost"))
+    MonthlySummaryAttempt.objects.filter(pk=attempt.pk).update(result="UNKNOWN", result_code="SMTP_RESULT_UNKNOWN")
+    attempt.refresh_from_db()
+    _successful(monkeypatch, cycle)
+    resolve_monthly_summary_as_sent(attempt, cycle_id=cycle.pk, reason="Verified original attention message")
+    with pytest.raises(ValidationError, match="stale"):
+        zakljuci_mesecni_cikel(cycle)
+    assert MonthlySummaryAttempt.objects.count() == 1
 
 
 def test_unsaved_cycle_cannot_be_finalized():

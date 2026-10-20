@@ -4,6 +4,7 @@ from importlib import reload
 from pathlib import Path
 
 import pytest
+from django.contrib.contenttypes.models import ContentType
 from django.db import connection
 from django.utils import timezone
 
@@ -14,6 +15,7 @@ from accounting_export.task_state import (
     accountant_control_task_state,
 )
 from companies.models import Company
+from core.models import AuditLogEntry
 from delivery.models import AccountantReportDeliveryAttempt as Attempt
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from tests.accounting_export.test_report_snapshot import (
@@ -170,8 +172,13 @@ def test_new_numbered_document_stales_and_replacement_clears(reported, kind):
     assert stale.state == "ZASTARELO" and stale.warning
     assert stale.companies[0].stale and stale.companies[0].issue_code == "NEW_ISSUED_DOCUMENT"
     replacement = create_accountant_report(company=reported.company, period=reported.period)
-    accept(replacement, result="UNKNOWN")
+    uncertain = accept(replacement, result="UNKNOWN")
     assert state().state == "ZASTARELO"
+    AuditLogEntry.objects.create(
+        content_type=ContentType.objects.get_for_model(Attempt), object_id=uncertain.pk,
+        polje="unknown_resolution", stara_vrednost="UNRESOLVED",
+        nova_vrednost="NOT_SENT_CONFIRMED", razlog="Provider verified no submission; retry allowed.",
+    )
     accept(replacement, sequence=2, completed_at=datetime(2026, 10, 2, tzinfo=UTC))
     assert accountant_control_task_state(as_of=date(2026, 10, 20)).state == "ZAKLJUCENO"
     assert state().companies[0].accepted_report_id == replacement.pk

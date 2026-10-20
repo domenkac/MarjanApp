@@ -3,9 +3,11 @@ from types import SimpleNamespace
 import pytest
 from django.core.exceptions import ValidationError
 from django.urls import reverse
+from django.utils import timezone
 
 from delivery.credentials import KeyringCredentialRef
 from delivery.models import MonthlySummaryAttempt, MonthlySummaryConfiguration
+from delivery.services import _monthly_summary_body, _monthly_summary_snapshot
 from delivery.transport import SmtpConfig, SmtpResult, SmtpSecurity
 from invoicing.models import MonthlyCycle
 
@@ -65,6 +67,7 @@ def final_state(pending=0):
         "unknown_count": 0,
         "delivery_pending_count": pending,
         "archive_pending_count": 0,
+        "archive_complete": False,
         "conflict_count": 0,
         "per_company": [],
         "issues": [],
@@ -72,14 +75,20 @@ def final_state(pending=0):
 
 
 def attempt(cycle, result=MonthlySummaryAttempt.Result.PREPARED, sequence=1):
+    from invoicing.services import stanje_zakljucne_kontrole_mesecnega_cikla
+
+    cycle.refresh_from_db()
+    state = stanje_zakljucne_kontrole_mesecnega_cikla(cycle)
+    state.update(cycle_id=cycle.pk, period=cycle.obdobje)
+    snapshot = _monthly_summary_snapshot(cycle, state, timezone.now())
     return MonthlySummaryAttempt.objects.create(
         cycle=cycle,
         sequence=sequence,
         sender="user@example.com",
         recipient="user@example.com",
         subject="Poročilo",
-        body="Vsebina",
-        summary_snapshot={},
+        body=_monthly_summary_body(snapshot),
+        summary_snapshot=snapshot,
         result=result,
     )
 
@@ -90,11 +99,16 @@ def successful_final_state():
         headline="Mesečni postopek uspešno zaključen",
         requires_attention=False,
         all_required_work_successful=True,
+        archive_complete=True,
     )
     return state
 
 
 def prepare_finalization_ui(monkeypatch, cycle, state):
+    monkeypatch.setattr(
+        "invoicing.services.stanje_zakljucne_kontrole_mesecnega_cikla",
+        lambda _cycle: state,
+    )
     monkeypatch.setattr(
         "ui.views.stanje_zakljucne_kontrole_mesecnega_cikla",
         lambda _cycle: state,

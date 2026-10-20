@@ -9,6 +9,7 @@ from django.utils import timezone
 
 from core.calendar import next_slovenian_working_day
 from delivery.models import AccountantReportDeliveryAttempt as Attempt
+from delivery.report_recovery import has_report_sent_evidence, unresolved
 from invoicing.models import MonthlyBatch, MonthlyCycle
 
 from .services import issued_invoice_queryset
@@ -57,6 +58,10 @@ class CompanyTaskState:
     issue_code: str
     action_label: str = ""
     action_blocked_message: str = ""
+    recovery_attempt_id: int | None = None
+    recovery_report_id: int | None = None
+    recovery_recipient: str = ""
+    recovery_result: str = ""
 
     @property
     def state_label(self):
@@ -166,11 +171,11 @@ def _load_task_evidence(periods, cycles):
         report__company_id__in=company_ids, report__period__in=periods,
     ).select_related("report"):
         key = (attempt.report.period, attempt.report.company_id)
-        if key not in latest or (attempt.prepared_at, attempt.pk) > (
-            latest[key].prepared_at, latest[key].pk,
+        if key not in latest or (unresolved(attempt), attempt.prepared_at, attempt.pk) > (
+            unresolved(latest[key]), latest[key].prepared_at, latest[key].pk,
         ):
             latest[key] = attempt
-        if attempt.result == Attempt.Result.ACCEPTED:
+        if has_report_sent_evidence(attempt):
             # Completion is frozen by Accounting 4. PK is the cross-report tie-breaker.
             order = (attempt.completed_at or attempt.prepared_at, attempt.pk)
             previous = accepted.get(key)
@@ -196,6 +201,10 @@ def _company_states(membership, period, latest, accepted, issued):
                 for row in sent.report.snapshot["issued_rows"]
             }
             stale = bool(issued[key] - represented)
+        if attempt and unresolved(attempt):
+            state = _ATTEMPT_STATES[attempt.result]
+            issue = attempt.result
+        elif sent:
             state = "STALE" if stale else "CURRENT"
             issue = "NEW_ISSUED_DOCUMENT" if stale else ""
         else:
@@ -207,6 +216,10 @@ def _company_states(membership, period, latest, accepted, issued):
             latest_attempt_id=attempt.pk if attempt else None,
             latest_attempt_result=attempt.result if attempt else None,
             stale=stale, issue_code=issue,
+            recovery_attempt_id=attempt.pk if attempt and unresolved(attempt) else None,
+            recovery_report_id=attempt.report_id if attempt and unresolved(attempt) else None,
+            recovery_recipient=attempt.recipient if attempt and unresolved(attempt) else "",
+            recovery_result=attempt.result if attempt and unresolved(attempt) else "",
         ))
     return tuple(rows)
 

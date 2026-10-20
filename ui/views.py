@@ -79,6 +79,11 @@ from delivery.models import (
     MonthlySummaryAttempt,
     MonthlySummaryConfiguration,
 )
+from delivery.report_recovery import (
+    has_report_sent_evidence,
+    require_monthly_current,
+    resolution,
+)
 from delivery.services import (
     prepare_monthly_summary,
     prepare_monthly_summary_retry,
@@ -1155,6 +1160,7 @@ def dashboard(request):
     )
 
 
+@transaction.non_atomic_requests
 @require_POST
 def accountant_control_send(request):
     try:
@@ -1267,6 +1273,7 @@ def mesecni_obracun_predogled_pdf(request):
 
 
 @require_http_methods(["GET", "POST"])
+@transaction.non_atomic_requests
 def mesecni_obracun(request):
     cycle = nalozi_aktivni_mesecni_cikel()
     podjetja = (
@@ -1735,6 +1742,7 @@ def mesecni_obracun(request):
     final_control_state = None
     monthly_summary_configuration_valid = False
     latest_monthly_summary_attempt = None
+    monthly_summary_stale = False
     monthly_cycle_can_finalize = False
     archive_configuration_valid = False
     archive_can_run = False
@@ -1777,19 +1785,27 @@ def mesecni_obracun(request):
             .order_by("-sequence")
             .first()
         )
+        monthly_summary_stale = bool(latest_monthly_summary_attempt and not final_control_state)
+        if latest_monthly_summary_attempt and final_control_state:
+            try:
+                require_monthly_current(latest_monthly_summary_attempt, state=final_control_state)
+            except ValidationError:
+                monthly_summary_stale = True
         monthly_cycle_can_finalize = bool(
             final_control_state
             and final_control_state["all_required_work_successful"] is True
             and final_control_state["requires_attention"] is False
             and latest_monthly_summary_attempt
-            and latest_monthly_summary_attempt.result
-            == MonthlySummaryAttempt.Result.ACCEPTED
+            and has_report_sent_evidence(latest_monthly_summary_attempt)
+            and not monthly_summary_stale
         )
         summary_error = request.GET.get("summary_error")
         if summary_error == "configuration":
             review_error = "Nastavitve zbirnega poročila niso veljavne."
         elif summary_error == "send":
             review_error = "Zbirnega poročila ni bilo mogoče poslati."
+        elif summary_error == "recovery":
+            review_error = "Odločitve ni mogoče shraniti. Preverite razlog, poskus in aktualnost poročila. Zastarelo poročilo zahteva poslovno odločitev."
     return render(
         request,
         "ui/mesecni_obracun.html",
@@ -1823,6 +1839,8 @@ def mesecni_obracun(request):
             "final_control_state": final_control_state,
             "monthly_summary_configuration_valid": monthly_summary_configuration_valid,
             "latest_monthly_summary_attempt": latest_monthly_summary_attempt,
+            "monthly_summary_stale": monthly_summary_stale,
+            "monthly_summary_resolution": resolution(latest_monthly_summary_attempt) if latest_monthly_summary_attempt else None,
             "monthly_cycle_can_finalize": monthly_cycle_can_finalize,
             "archive_configuration_valid": archive_configuration_valid,
             "archive_can_run": archive_can_run,

@@ -110,7 +110,7 @@ def test_invalid_action_rejected_with_prg(client, ui_setup, change):
 
 
 @pytest.mark.parametrize("state", ["UNKNOWN", "SUBMISSION_STARTED"])
-def test_uncertain_rows_have_no_form_and_post_blocks(client, ui_setup, state):
+def test_uncertain_rows_offer_only_recovery_and_send_post_blocks(client, ui_setup, state):
     from accounting_export.services import create_accountant_report
 
     company, calls = ui_setup
@@ -122,7 +122,9 @@ def test_uncertain_rows_have_no_form_and_post_blocks(client, ui_setup, state):
         .split("Aktivna opravila", 1)[1]
         .split("</section>", 1)[0]
     )
-    assert "<form" not in panel and "Samodejno ponovno pošiljanje ni na voljo" in panel
+    assert reverse("ui:accountant_report_recovery") in panel
+    assert reverse("ui:accountant_control_send") not in panel
+    assert "Samodejno ponovno pošiljanje ni na voljo" in panel
     before = list(Attempt.objects.values())
     response = post(client, company)
     assert response.url == f"/?accountant_result={state}"
@@ -208,7 +210,7 @@ def test_stale_accepted_with_prepared_replacement_uses_continue(
     assert AccountantReport.objects.count() == 2
 
 
-def test_ui_unknown_stale_has_no_form(client, ui_setup, tmp_path):
+def test_ui_unknown_stale_offers_recovery_without_send(client, ui_setup, tmp_path):
     from tests.accounting_export.test_report_snapshot import _invoice, _line
     from tests.accounting_export.test_workflow import prepared
 
@@ -223,7 +225,9 @@ def test_ui_unknown_stale_has_no_form(client, ui_setup, tmp_path):
         .split("Aktivna opravila", 1)[1]
         .split("</section>", 1)[0]
     )
-    assert "Zastarelo" in content and "<form" not in content
+    assert "Zastarelo" in content
+    assert reverse("ui:accountant_report_recovery") in content
+    assert reverse("ui:accountant_control_send") not in content
     assert "Samodejno ponovno pošiljanje ni na voljo" in content
     assert post(client, company).url == "/?accountant_result=UNKNOWN"
     assert len(calls) == 1 and AccountantReport.objects.count() == 2

@@ -15,6 +15,7 @@ from delivery.configuration import (
     resolve_smtp_config_for_username,
 )
 from delivery.models import AccountantReportDeliveryAttempt as Attempt
+from delivery.report_recovery import has_report_sent_evidence, unresolved
 from delivery.services import (
     prepare_accountant_report_delivery,
     prepare_accountant_report_delivery_retry,
@@ -30,6 +31,8 @@ from .services import create_accountant_report, issued_invoice_queryset
 from .task_state import accountant_control_dashboard_tasks
 
 FEEDBACK = {
+    "SENT_VERIFIED": "Pošiljanje je uporabnik preveril kot poslano. Izvirni rezultat UNKNOWN ostaja v revizijski sledi.",
+    "RETRY_PREPARED": "Ponovitev je pripravljena. Za pošiljanje uporabite ločeno dejanje Pošlji.",
     "ACCEPTED": "Kontrolni dokument je bil poslan.",
     "CURRENT": "Aktualni kontrolni dokument je že poslan.",
     "UNKNOWN": "Rezultat pošiljanja ni znan – potrebno je preverjanje. Samodejno ponovno pošiljanje ni na voljo.",
@@ -69,13 +72,13 @@ def _attempts(company_id, period):
 
 
 def _blocked(company_id, period):
-    results = set(
-        _attempts(company_id, period)
+    results = {
+        attempt.result for attempt in _attempts(company_id, period)
         .filter(
             result__in=(Attempt.Result.UNKNOWN, Attempt.Result.SUBMISSION_STARTED),
         )
-        .values_list("result", flat=True)
-    )
+        if unresolved(attempt)
+    }
     if Attempt.Result.UNKNOWN in results:
         return "UNKNOWN"
     if Attempt.Result.SUBMISSION_STARTED in results:
@@ -110,13 +113,15 @@ def _active_company(company_id, period, as_of):
 def accountant_control_action_tasks(tasks):
     """Read-only UI projection; unresolved historical attempts override row labels."""
     blocked = {}
-    for company_id, period, result in Attempt.objects.filter(
+    for attempt in Attempt.objects.filter(
         report__period__in=[task.period for task in tasks],
         result__in=(Attempt.Result.UNKNOWN, Attempt.Result.SUBMISSION_STARTED),
-    ).values_list("report__company_id", "report__period", "result"):
-        key = (company_id, period)
+    ).select_related("report"):
+        if not unresolved(attempt):
+            continue
+        key = (attempt.report.company_id, attempt.report.period)
         if blocked.get(key) != "UNKNOWN":
-            blocked[key] = result
+            blocked[key] = attempt.result
     attempt_ids = {
         row.latest_attempt_id
         for task in tasks
@@ -213,12 +218,7 @@ def _choose_report(company_id, period, as_of):
         )
         current = [report for report in reports if report_is_current(report)]
         if any(
-            _attempts(company_id, period)
-            .filter(
-                report_id=report.pk,
-                result=Attempt.Result.ACCEPTED,
-            )
-            .exists()
+            any(has_report_sent_evidence(attempt) for attempt in report.delivery_attempts.all())
             for report in current
         ):
             return None, "CURRENT"
@@ -317,7 +317,7 @@ def deliver_accountant_control_report(
         elif attempt.result != Attempt.Result.PREPARED:
             return ControlActionResult(
                 "CURRENT"
-                if attempt.result == Attempt.Result.ACCEPTED
+                if has_report_sent_evidence(attempt)
                 else attempt.result,
                 report.pk,
                 attempt.pk,

@@ -13,6 +13,7 @@ from .indexation import (
     indexation_detail,
     indexation_list,
 )
+from .report_recovery import accountant_report_recovery, monthly_summary_recovery
 from .setup import first_run_setup
 from .st_delivery import st_delivery, st_delivery_action, st_prepare_delivery
 from .st_invoices import (
@@ -91,6 +92,8 @@ from .views import (
 app_name = "ui"
 
 urlpatterns = [
+    path("porocila/zbirno/obnova/", monthly_summary_recovery, name="monthly_summary_recovery"),
+    path("porocila/racunovodja/obnova/", accountant_report_recovery, name="accountant_report_recovery"),
     path("storno-dobropisi/", corrections.correction_list, name="correction_list"),
     path("storno-dobropisi/<int:company_id>/<int:invoice_id>/dostava/", correction_delivery, name="correction_delivery"),
     path("storno-dobropisi/<int:company_id>/<int:invoice_id>/dostava/pripravi/", correction_prepare_delivery, name="correction_prepare_delivery"),

@@ -4277,7 +4277,14 @@ def _veljavno_dokazilo_zakljucka(cycle):
         and snapshot.get("requires_attention") is False
         and isinstance(snapshot.get("per_company"), list)
         and snapshot.get("issues") == []
-        and snapshot.get("summary_result") == "ACCEPTED"
+        and (
+            snapshot.get("summary_result") == "ACCEPTED"
+            or (
+                snapshot.get("summary_result") == "UNKNOWN"
+                and snapshot.get("summary_resolution") == "SENT_VERIFIED"
+                and _overjena_razresitev_zbirnega_porocila(snapshot)
+            )
+        )
     ):
         return False
     counts = (
@@ -4415,6 +4422,17 @@ def _preveri_uspesno_zakljucno_kontrolo(state, cycle):
         raise ValidationError("Mesečna končna kontrola še ni uspešno zaključena.")
 
 
+def _overjena_razresitev_zbirnega_porocila(snapshot):
+    from delivery.models import MonthlySummaryAttempt
+    from delivery.report_recovery import has_report_sent_evidence
+
+    attempt = MonthlySummaryAttempt.objects.filter(
+        pk=snapshot.get("summary_attempt_id"), cycle_id=snapshot.get("cycle_id"),
+        result="UNKNOWN",
+    ).first()
+    return attempt is not None and has_report_sent_evidence(attempt)
+
+
 def _posnetek_zakljucka(cycle, state, summary_attempt):
     snapshot = {
         "schema_version": 1,
@@ -4444,15 +4462,21 @@ def _posnetek_zakljucka(cycle, state, summary_attempt):
         "summary_recipient": summary_attempt.recipient,
         "summary_subject": summary_attempt.subject,
         "summary_completed_at": summary_attempt.completed_at.isoformat(),
-        "summary_result": "ACCEPTED",
+        "summary_result": summary_attempt.result,
         "summary_result_code": summary_attempt.result_code,
     }
+    if summary_attempt.result == "UNKNOWN":
+        snapshot["summary_resolution"] = "SENT_VERIFIED"
     return json.loads(json.dumps(snapshot, ensure_ascii=False, sort_keys=True))
 
 
 @monthly_backup(BackupSnapshot.Trigger.POST_MONTHLY)
 def zakljuci_mesecni_cikel(cycle):
     from delivery.models import MonthlySummaryAttempt
+    from delivery.report_recovery import (
+        has_report_sent_evidence,
+        require_monthly_current,
+    )
 
     if cycle.pk is None:
         raise ValidationError("Mesečni cikel mora biti shranjen.")
@@ -4478,10 +4502,11 @@ def zakljuci_mesecni_cikel(cycle):
     )
     if (
         summary_attempt is None
-        or summary_attempt.result != MonthlySummaryAttempt.Result.ACCEPTED
+        or not has_report_sent_evidence(summary_attempt)
         or summary_attempt.completed_at is None
     ):
-        raise ValidationError("Najnovejši zbirni poskus mora imeti rezultat ACCEPTED.")
+        raise ValidationError("Najnovejši zbirni poskus mora imeti rezultat ACCEPTED ali revizijsko potrditev SENT_VERIFIED.")
+    require_monthly_current(summary_attempt, state=final_state)
     snapshot = _posnetek_zakljucka(current, final_state, summary_attempt)
 
     with transaction.atomic():
@@ -4501,7 +4526,7 @@ def zakljuci_mesecni_cikel(cycle):
         if (
             latest_attempt is None
             or latest_attempt.pk != summary_attempt.pk
-            or latest_attempt.result != MonthlySummaryAttempt.Result.ACCEPTED
+            or not has_report_sent_evidence(latest_attempt)
         ):
             raise ValidationError("Zbirni poskus se je med zaključevanjem spremenil.")
         fresh.status = MonthlyCycle.Status.ZAKLJUCEN

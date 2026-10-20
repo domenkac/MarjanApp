@@ -56,6 +56,25 @@
     {% if accountant_control_task.companies %}<table class="settings-table"><thead><tr><th>Podjetje</th><th>Kontrolni dokument</th></tr></thead><tbody>
       {% for company in accountant_control_task.companies %}<tr><td><strong>{{ company.label }}</strong></td><td>{{ company.state_label }}
         {% if company.action_blocked_message %}<p class="form-note">{{ company.action_blocked_message }}</p>{% endif %}
+        {% if company.recovery_attempt_id %}
+        <p>Poročilo {{ company.recovery_report_id }} · Poskus {{ company.recovery_attempt_id }} · Zamrznjeni prejemnik: {{ company.recovery_recipient }} · {{ company.recovery_result }}</p>
+        <form method="post" action="{% url 'ui:accountant_report_recovery' %}">{% csrf_token %}
+          <input type="hidden" name="year" value="{{ accountant_control_task.period|date:'Y' }}">
+          <input type="hidden" name="month" value="{{ accountant_control_task.period|date:'n' }}">
+          <input type="hidden" name="company_id" value="{{ company.company_id }}">
+          <input type="hidden" name="report_id" value="{{ company.recovery_report_id }}">
+          <input type="hidden" name="attempt_id" value="{{ company.recovery_attempt_id }}">
+          {% if company.recovery_result == 'SUBMISSION_STARTED' %}
+          <p>Obnova zaščiti aktivnega pošiljatelja. Prekinjen poskus postane UNKNOWN; sporočilo se ne pošlje.</p>
+          <button type="submit" name="decision" value="recover" class="button-secondary compact">Preveri prekinjeno pošiljanje</button>
+          {% else %}
+          <p>Preverite mapo Poslano ali drugo zanesljivo dokazilo. Ponovitev se samo pripravi.</p>
+          <label>Razlog preverjene odločitve <textarea name="reason" required maxlength="2000"></textarea></label>
+          <button type="submit" name="decision" value="sent" class="button-secondary compact">Preverjeno poslano</button>
+          <button type="submit" name="decision" value="not_sent" class="button-secondary compact">Preverjeno ni poslano – pripravi ponovitev</button>
+          {% endif %}
+        </form>
+        {% endif %}
         {% if company.action_label %}<form method="post" action="{% url 'ui:accountant_control_send' %}">
           {% csrf_token %}
           <input type="hidden" name="year" value="{{ accountant_control_task.period|date:'Y' }}">

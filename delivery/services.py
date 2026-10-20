@@ -739,8 +739,15 @@ def prepare_monthly_summary(cycle, configuration) -> MonthlySummaryAttempt:
 
 
 def prepare_monthly_summary_retry(failed_attempt) -> MonthlySummaryAttempt:
+    from .report_recovery import require_frozen_attempt, require_monthly_current
+
     if failed_attempt.pk is None:
         raise ValidationError("Monthly summary attempt must be saved.")
+    source = MonthlySummaryAttempt.objects.get(pk=failed_attempt.pk)
+    _require_active_step_6(source.cycle)
+    if source.result != MonthlySummaryAttempt.Result.CONFIRMED_FAILURE:
+        raise ValidationError("Only the latest confirmed failure can be retried.")
+    require_monthly_current(source)
     with transaction.atomic():
         current = MonthlySummaryAttempt.objects.select_related("cycle").get(
             pk=failed_attempt.pk
@@ -753,6 +760,7 @@ def prepare_monthly_summary_retry(failed_attempt) -> MonthlySummaryAttempt:
         )
         if latest.pk != current.pk or current.result != MonthlySummaryAttempt.Result.CONFIRMED_FAILURE:
             raise ValidationError("Only the latest confirmed failure can be retried.")
+        require_frozen_attempt(source)
         return MonthlySummaryAttempt.objects.create(
             cycle_id=current.cycle_id,
             sequence=current.sequence + 1,
@@ -788,6 +796,22 @@ def _transition_monthly_summary(attempt, *, expected, result, **values):
 
 
 def send_monthly_summary(
+    attempt, smtp_config, credential_ref, *, password_loader=None, smtp_factory=None,
+):
+    from .report_recovery import report_execution_lock, require_outside_transaction
+
+    require_outside_transaction()
+    current = MonthlySummaryAttempt.objects.get(pk=attempt.pk)
+    with report_execution_lock(current) as acquired:
+        if not acquired:
+            raise ValidationError("Monthly summary is already being sent.")
+        return _send_monthly_summary(
+            current, smtp_config, credential_ref,
+            password_loader=password_loader, smtp_factory=smtp_factory,
+        )
+
+
+def _send_monthly_summary(
     attempt,
     smtp_config,
     credential_ref,
@@ -796,9 +820,18 @@ def send_monthly_summary(
     smtp_factory=None,
 ):
     from .credentials import load_password
+    from .report_recovery import require_frozen_attempt, require_monthly_current
     from .transport import SmtpConfig, _default_smtp_factory, send_prepared_email
 
     current = MonthlySummaryAttempt.objects.get(pk=attempt.pk)
+    _require_active_step_6(current.cycle)
+    if current.cycle.summary_attempts.order_by("-sequence").first().pk != current.pk:
+        raise ValidationError("Only the latest monthly summary can be sent.")
+    from .report_recovery import has_report_sent_evidence
+
+    if any(has_report_sent_evidence(item) for item in current.cycle.summary_attempts.all()):
+        raise ValidationError("Monthly summary already has sent evidence.")
+    require_monthly_current(current)
     if not isinstance(smtp_config, SmtpConfig):
         raise ValidationError("A valid SMTP configuration is required.")
     if current.sender != current.recipient:
@@ -810,6 +843,9 @@ def send_monthly_summary(
 
     def mark_started():
         nonlocal started
+        require_frozen_attempt(current)
+        require_monthly_current(current)
+        _require_active_step_6(MonthlyCycle.objects.get(pk=current.cycle_id))
         started = _transition_monthly_summary(
             current,
             expected=MonthlySummaryAttempt.Result.PREPARED,
@@ -1012,12 +1048,35 @@ def _transition_accountant_delivery(attempt, *, expected, result, **values):
 def send_accountant_report(
     attempt, smtp_config, credential_ref, *, password_loader=None, smtp_factory=None,
 ) -> AccountantReportDeliveryAttempt:
+    from .report_recovery import report_execution_lock
+
+    _accountant_outside_transaction()
+    _accountant_persisted(attempt)
+    current = AccountantReportDeliveryAttempt.objects.get(pk=attempt.pk)
+    with report_execution_lock(current) as acquired:
+        if not acquired:
+            raise ValidationError("Accountant report is already being sent.")
+        return _send_accountant_report(
+            current, smtp_config, credential_ref,
+            password_loader=password_loader, smtp_factory=smtp_factory,
+        )
+
+
+def _send_accountant_report(
+    attempt, smtp_config, credential_ref, *, password_loader=None, smtp_factory=None,
+) -> AccountantReportDeliveryAttempt:
     from .credentials import load_password
     from .transport import SmtpConfig, _default_smtp_factory, send_prepared_email
 
     _accountant_outside_transaction()
     _accountant_persisted(attempt)
     current = AccountantReportDeliveryAttempt.objects.get(pk=attempt.pk)
+    if current.report.delivery_attempts.order_by("-sequence").first().pk != current.pk:
+        raise ValidationError("Only the latest accountant attempt can be sent.")
+    from .report_recovery import has_report_sent_evidence
+
+    if any(has_report_sent_evidence(item) for item in current.report.delivery_attempts.all()):
+        raise ValidationError("Accountant report already has sent evidence.")
     if not isinstance(smtp_config, SmtpConfig):
         raise ValidationError("A valid SMTP configuration is required.")
     if smtp_config.username != current.sender:
@@ -1027,6 +1086,14 @@ def send_accountant_report(
 
     def mark_started():
         nonlocal started
+        from accounting_export.workflow import _blocked, report_is_current
+
+        from .report_recovery import require_frozen_attempt
+
+        require_frozen_attempt(current)
+        _accountant_attachment(current.report, current)
+        if _blocked(current.report.company_id, current.report.period) or not report_is_current(current.report):
+            raise ValidationError("Accountant delivery evidence is blocked or stale.")
         started = _transition_accountant_delivery(
             current, expected=AccountantReportDeliveryAttempt.Result.PREPARED,
             result=AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED,

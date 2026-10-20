@@ -6,6 +6,7 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import IntegrityError, transaction
 
+from archive.configuration import resolve_archive_roots
 from archive.models import ArchivedFile
 from archive.services import ArchiveRoots
 from contracts.models import RecipientContact
@@ -96,7 +97,7 @@ def _attempt(invoice, result, *, message=""):
 def _success_attempt(data, settings, tmp_path):
     invoice = _step_6(data, settings, tmp_path)
     _attempt(invoice, DeliveryAttempt.Result.ACCEPTED)
-    roots = ArchiveRoots((tmp_path / "local").resolve(), (tmp_path / "icloud").resolve())
+    roots = resolve_archive_roots()
     assert arhiviraj_poslane_racune_mesecnega_cikla(data["cycle"], roots)["complete"]
     return invoice
 
@@ -368,11 +369,11 @@ def test_real_transport_rejects_database_transaction(ready_company, configuratio
     attempt = prepare_monthly_summary(ready_company["cycle"], configuration)
     config = resolve_monthly_summary_smtp_config(configuration)
     reference = resolve_monthly_summary_credential_ref(configuration)
-    with transaction.atomic():
-        result = send_monthly_summary(
+    with transaction.atomic(), pytest.raises(ValidationError, match="outside a DB transaction"):
+        send_monthly_summary(
             attempt, config, reference,
             password_loader=lambda ref: "secret",
             smtp_factory=lambda config, context: pytest.fail("SMTP factory called"),
         )
-    assert result.result == MonthlySummaryAttempt.Result.CONFIRMED_FAILURE
-    assert "outside a database transaction" in result.message
+    attempt.refresh_from_db()
+    assert attempt.result == MonthlySummaryAttempt.Result.PREPARED
