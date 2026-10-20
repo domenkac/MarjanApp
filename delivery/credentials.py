@@ -1,6 +1,7 @@
 from dataclasses import dataclass
 
 import keyring
+from django.conf import settings
 from django.db import connection
 
 
@@ -27,6 +28,8 @@ class CredentialError(Exception):
 
 
 def load_password(ref: KeyringCredentialRef) -> str:
+    if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+        raise CredentialError("TEST_DELIVERY_DISABLED", "Keychain is disabled in desktop TEST.")
     if connection.in_atomic_block:
         raise RuntimeError("Keyring lookup must run outside a database transaction.")
     try:

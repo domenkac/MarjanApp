@@ -64,6 +64,15 @@ def resolve_archive_locations() -> ArchiveLocations:
 
 
 def validate_archive_locations(local_root, icloud_root, dropbox_root):
+    if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+        from desktop.profile import DesktopError, require_test_archive_paths
+
+        try:
+            require_test_archive_paths((local_root, icloud_root, dropbox_root))
+        except (ValueError, DesktopError):
+            raise ArchiveConfigurationError(
+                "TEST dovoljuje samo zasebne sintetične lokacije arhiva."
+            ) from None
     if not all(str(value).strip() for value in (local_root, icloud_root, dropbox_root)):
         raise ArchiveConfigurationError("Vse tri poti so obvezne.")
     try:

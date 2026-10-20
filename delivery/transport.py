@@ -9,6 +9,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from django.conf import settings
 from django.db import connection
 
 from .credentials import CredentialError, KeyringCredentialRef, load_password
@@ -98,6 +99,8 @@ def _safe(value, password: str) -> str:
 
 
 def _open(config, password, smtp_factory):
+    if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+        raise CredentialError("TEST_DELIVERY_DISABLED", "SMTP is disabled in desktop TEST.")
     _outside_transaction()
     context = ssl.create_default_context()
     smtp = smtp_factory(config, context)
@@ -165,6 +168,8 @@ def test_smtp_connection(
     password_loader=load_password,
     smtp_factory: SmtpFactory = _default_smtp_factory,
 ) -> SmtpResult:
+    if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+        return SmtpResult(False, "TEST_DELIVERY_DISABLED", "SMTP is disabled in desktop TEST.")
     smtp = None
     password = ""
     try:
@@ -186,6 +191,8 @@ def send_prepared_email(
     password_loader=load_password,
     smtp_factory: SmtpFactory = _default_smtp_factory,
 ) -> SmtpResult:
+    if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+        return SmtpResult(False, "TEST_DELIVERY_DISABLED", "SMTP is disabled in desktop TEST.")
     payload = prepared.message.as_bytes(
         policy=prepared.message.policy.clone(linesep="\r\n")
     )

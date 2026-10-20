@@ -37,6 +37,12 @@ class ArchiveRoots:
     icloud_root: Path
 
     def __post_init__(self):
+        from django.conf import settings
+
+        if getattr(settings, "MARJAN_DESKTOP_TEST", False):
+            from desktop.profile import require_test_archive_paths
+
+            require_test_archive_paths((self.local_root, self.icloud_root))
         local = Path(self.local_root)
         icloud = Path(self.icloud_root)
         if not local.is_absolute() or not icloud.is_absolute():
