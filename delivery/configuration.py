@@ -1,5 +1,13 @@
 from django.conf import settings
 from django.core.exceptions import ValidationError
+from django.db import models, transaction
+
+from core.services import (
+    audit_field_changes,
+    credential_reference_audit_value,
+    financial_changes,
+    validate_edit_source,
+)
 
 from .credentials import KeyringCredentialRef
 from .models import MonthlySummaryConfiguration
@@ -8,6 +16,36 @@ from .transport import SmtpConfig, SmtpSecurity
 
 class SmtpConfigurationError(Exception):
     pass
+
+
+MONTHLY_SUMMARY_AUDIT_FIELDS = ("email", "keychain_credential_key")
+
+
+@transaction.atomic
+def save_monthly_summary_configuration(configuration, *, source_fingerprint="", razlog=""):
+    """Create once; edit the persisted identity and its audit atomically."""
+    if configuration.pk not in (None, 1):
+        raise ValidationError("Nastavitve zbirnega poročila morajo uporabiti zapis 1.")
+    configuration.pk = 1
+    previous = MonthlySummaryConfiguration.objects.select_for_update().filter(pk=1).first()
+    if previous is None:
+        if source_fingerprint not in ("", "new"):
+            raise ValidationError("Zapis ne obstaja več. Osvežite obrazec.")
+        configuration.full_clean()
+        models.Model.save(configuration, force_insert=True)
+        return configuration
+    validate_edit_source(previous, source_fingerprint)
+    configuration.full_clean()
+    changes = financial_changes(previous, configuration, MONTHLY_SUMMARY_AUDIT_FIELDS, razlog)
+    if changes:
+        for name in MONTHLY_SUMMARY_AUDIT_FIELDS:
+            setattr(previous, name, getattr(configuration, name))
+        models.Model.save(previous, update_fields=(*MONTHLY_SUMMARY_AUDIT_FIELDS, "updated_at"))
+        audit_field_changes(configuration, changes, razlog, value_formatter=lambda name, value: (
+            credential_reference_audit_value(value) if name == "keychain_credential_key" else str(value)
+        ))
+    configuration.refresh_from_db()
+    return configuration
 
 
 def _setting(name):

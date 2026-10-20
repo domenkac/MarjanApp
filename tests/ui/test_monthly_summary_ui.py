@@ -5,6 +5,7 @@ from django.core.exceptions import ValidationError
 from django.urls import reverse
 from django.utils import timezone
 
+from core.services import record_edit_fingerprint
 from delivery.credentials import KeyringCredentialRef
 from delivery.models import MonthlySummaryAttempt, MonthlySummaryConfiguration
 from delivery.services import _monthly_summary_body, _monthly_summary_snapshot
@@ -145,7 +146,11 @@ def test_settings_post_creates_and_updates_singleton_with_prg(client):
     assert MonthlySummaryConfiguration.objects.get(pk=1).email == "first@example.com"
 
     response = client.post(
-        url, {"email": "second@example.com", "keychain_credential_key": "second-key"}
+        url, {
+            "email": "second@example.com", "keychain_credential_key": "second-key",
+            "razlog": "Menjava predala",
+            "edit_fingerprint": record_edit_fingerprint(MonthlySummaryConfiguration.objects.get(pk=1)),
+        }
     )
     assert response.status_code == 302
     assert MonthlySummaryConfiguration.objects.count() == 1

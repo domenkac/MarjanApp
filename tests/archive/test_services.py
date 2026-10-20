@@ -20,7 +20,7 @@ from core.models import AuditLogEntry
 from delivery.models import DeliveryAttempt
 from delivery.services import UNKNOWN_RESOLUTION_FIELD, UNKNOWN_RESOLUTION_SENT_VERIFIED
 from invoicing.models import Invoice
-from rendering.services import render_pdf
+from rendering.services import render_pdf, stanje_koncnega_pdf
 from tests.rendering.test_contexts import izdani_racun
 
 pytestmark = pytest.mark.django_db(transaction=True)
@@ -83,6 +83,57 @@ def test_archive_happy_path_is_idempotent_and_immutable(sent_invoice, roots):
     )
     assert before_invoice == Invoice.objects.values().get(pk=invoice.pk)
     assert before_attempt == DeliveryAttempt.objects.values().get(pk=attempt.pk)
+
+
+def test_configuration_edits_preserve_issued_invoice_assets_and_archive_identity(sent_invoice, roots, tmp_path):
+    from django.core.files.uploadedfile import SimpleUploadedFile
+
+    from archive.configuration import verify_and_save_archive_roots
+    from companies.services import save_company_edit, veljavna_potrditev_vzorca
+    from core.services import record_edit_fingerprint
+    from delivery.configuration import save_monthly_summary_configuration
+    from delivery.models import MonthlySummaryConfiguration
+    from invoicing.models import InvoiceLine
+    from tests.image_data import slika_bytes
+
+    invoice, _, pdf_bytes = sent_invoice
+    assert archive_pdf(invoice, roots).success
+    archived = ArchivedFile.objects.get(invoice=invoice)
+    historical = ArchivedFile.objects.filter(pk=archived.pk).values().get()
+    frozen = Invoice.objects.filter(pk=invoice.pk).values().get()
+    lines = list(InvoiceLine.objects.filter(invoice=invoice).values())
+    company = invoice.company
+    company.refresh_from_db()
+    token = record_edit_fingerprint(company)
+    old_logo = company.logotip.path
+    old_logo_bytes = Path(old_logo).read_bytes()
+    company.email_racunovodja = "new-accountant@example.com"
+    company.email_posiljatelj = "new-sender@example.com"
+    company.keychain_kljuc_posiljatelja = "private-new-reference"
+    company.logotip = SimpleUploadedFile("new.png", slika_bytes(), content_type="image/png")
+    save_company_edit(company, source_fingerprint=token, razlog="Menjava nastavitev")
+    assert veljavna_potrditev_vzorca(company).stanje == "stale"
+    summary = MonthlySummaryConfiguration.objects.create(email="owner@example.com", keychain_credential_key="key")
+    token = record_edit_fingerprint(summary)
+    summary.email = "new-owner@example.com"
+    save_monthly_summary_configuration(summary, source_fingerprint=token, razlog="Menjava predala")
+    replacements = [tmp_path.parent / f"{tmp_path.name}-{name}" for name in (
+        "new-local", "new-icloud", "new-dropbox",
+    )]
+    for root in replacements:
+        root.mkdir()
+    verify_and_save_archive_roots(*replacements, razlog="Menjava lokacij")
+    result = archive_pdf(invoice, ArchiveRoots(*replacements[:2]))
+    assert result.state == ArchiveState.METADATA_CONFLICT
+    assert ArchivedFile.objects.filter(pk=archived.pk).values().get() == historical
+    assert Invoice.objects.filter(pk=invoice.pk).values().get() == frozen
+    assert list(InvoiceLine.objects.filter(invoice=invoice).values()) == lines
+    assert Path(archived.local_path).read_bytes() == Path(archived.icloud_path).read_bytes() == pdf_bytes
+    pdf_state = stanje_koncnega_pdf(invoice)
+    assert pdf_state["state"] == "READY"
+    assert pdf_state["result"].pdf_bytes == pdf_bytes
+    assert Path(old_logo).read_bytes() == old_logo_bytes
+    assert all(not list(root.iterdir()) for root in replacements)
 
 
 def test_resolved_unknown_is_accepted(sent_invoice, roots):

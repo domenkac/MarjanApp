@@ -108,6 +108,13 @@ class MonthlySummaryConfiguration(models.Model):
     def save(self, *args, **kwargs):
         if self.pk not in (None, 1):
             raise ValidationError("Monthly summary configuration must use pk=1.")
+        edit = self.__dict__.get("_configuration_edit")
+        if edit is not None:
+            from .configuration import save_monthly_summary_configuration
+
+            return save_monthly_summary_configuration(
+                self, source_fingerprint=edit[0], razlog=edit[1],
+            )
         self.pk = 1
         self.full_clean()
         return super().save(*args, **kwargs)

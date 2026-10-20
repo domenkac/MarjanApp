@@ -649,8 +649,7 @@ def nastavitve_zbirno_porocilo(request):
         request.POST or None,
         instance=configuration or MonthlySummaryConfiguration(pk=1),
     )
-    if request.method == "POST" and form.is_valid():
-        form.save()
+    if request.method == "POST" and form.is_valid() and _save_financial_form(form):
         response = redirect("ui:nastavitve_zbirno_porocilo")
         response["Location"] += "?shranjeno=1"
         return response
@@ -714,18 +713,27 @@ def nastavitve_arhiv(request):
         if configuration
         else None
     )
-    form = ArchiveConfigurationForm(request.POST or None, initial=initial)
-    success = False
+    form = ArchiveConfigurationForm(request.POST or None, initial=initial, configuration=configuration)
+    success = request.GET.get("shranjeno") == "1"
     if request.method == "POST" and form.is_valid():
         try:
             configuration = verify_and_save_archive_roots(
                 form.cleaned_data["local_root"], form.cleaned_data["icloud_root"],
-                form.cleaned_data["dropbox_root"]
+                form.cleaned_data["dropbox_root"],
+                razlog=form.cleaned_data.get("razlog", ""),
+                source_fingerprint=form.cleaned_data.get("edit_fingerprint", ""),
             )
         except ArchiveConfigurationError as error:
             form.add_error(None, str(error))
+        except ValidationError as error:
+            for field, messages in getattr(error, "message_dict", {None: error.messages}).items():
+                form.add_error(field if field in form.fields else None, messages)
+        except DatabaseError:
+            form.add_error(None, "Spremembe ni bilo mogoče shraniti. Osvežite obrazec in poskusite znova.")
         else:
-            success = True
+            response = redirect("ui:nastavitve_arhiv")
+            response["Location"] += "?shranjeno=1"
+            return response
     latest_backup = BackupSnapshot.objects.first()
     return render(
         request,

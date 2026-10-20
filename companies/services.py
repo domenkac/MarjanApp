@@ -28,6 +28,7 @@ from core.services import (
     StanjeRazlog,
     StanjeRezultat,
     audit_field_changes,
+    credential_reference_audit_value,
     financial_changes,
     save_business_edit,
     validate_edit_source,
@@ -36,6 +37,9 @@ from core.services import (
 COMPANY_FINANCIAL_FIELDS = (
     "naziv", "davcna_stevilka", "maticna_stevilka", "naslov", "drzava_koda",
     "trr", "ddv_zavezanec", "rok_placila_dni_privzeto",
+)
+COMPANY_AUDIT_FIELDS = COMPANY_FINANCIAL_FIELDS + (
+    "email_racunovodja", "email_posiljatelj", "keychain_kljuc_posiljatelja", "logotip",
 )
 
 
@@ -60,18 +64,50 @@ def save_signatory_edit(signatory, *, source_fingerprint, razlog=""):
 def save_company_edit(company, *, source_fingerprint, razlog=""):
     previous = Company.objects.select_for_update().get(pk=company.pk)
     validate_edit_source(previous, source_fingerprint)
-    editable = set(COMPANY_FINANCIAL_FIELDS) | {
-        "logotip", "email_racunovodja", "email_posiljatelj", "keychain_kljuc_posiljatelja",
-    }
+    editable = set(COMPANY_AUDIT_FIELDS)
     for field in company._meta.concrete_fields:
         if field.name not in editable and getattr(company, field.attname) != getattr(previous, field.attname):
             raise ValidationError("Za to spremembo uporabite namensko storitev podjetja.")
     exclude = {"logotip"} if company.logotip.name == previous.logotip.name and company.logotip._committed else set()
     company.full_clean(exclude=exclude)
-    changes = financial_changes(previous, company, COMPANY_FINANCIAL_FIELDS, razlog)
-    models.Model.save(company)
-    company.refresh_from_db()
-    audit_field_changes(company, changes, razlog)
+    changes = financial_changes(previous, company, COMPANY_AUDIT_FIELDS, razlog)
+    if not changes:
+        return company
+    upload = company.logotip if not company.logotip._committed else None
+    upload_name = upload.name if upload is not None else None
+    new_logo_checksum = ""
+    if "logotip" in changes:
+        digest = sha256()
+        position = company.logotip.tell()
+        for chunk in company.logotip.chunks():
+            digest.update(chunk)
+        company.logotip.seek(position)
+        new_logo_checksum = digest.hexdigest()
+
+    def safe_value(name, value):
+        if name == "keychain_kljuc_posiljatelja":
+            return credential_reference_audit_value(value)
+        if name == "logotip":
+            return json.dumps({
+                "asset": value.name,
+                "sha256": previous.logotip_checksum if value.instance is previous else new_logo_checksum,
+            }, sort_keys=True)
+        return str(value)
+
+    try:
+        if "logotip" in changes:
+            # Confirmation calculates the persisted checksum for the new asset.
+            company.logotip_checksum = ""
+        models.Model.save(company)
+        company.refresh_from_db()
+        audit_field_changes(company, changes, razlog, value_formatter=safe_value)
+    except Exception:
+        if upload is not None and upload._committed:
+            upload.storage.delete(upload.name)
+            upload.name, upload._committed = upload_name, False
+            company.logotip = upload
+        company.logotip_checksum = previous.logotip_checksum
+        raise
     return company
 
 

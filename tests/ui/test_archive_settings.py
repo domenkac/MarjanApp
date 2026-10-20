@@ -27,6 +27,7 @@ def test_post_verifies_all_three_roots_and_shows_timestamp(client, tmp_path):
     response = client.post(
         "/nastavitve/arhiv/",
         {"local_root": local, "icloud_root": icloud, "dropbox_root": dropbox},
+        follow=True,
     )
     assert response.status_code == 200
     assert "Vse tri lokacije so preverjene in shranjene." in response.content.decode()

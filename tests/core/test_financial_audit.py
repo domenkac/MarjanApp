@@ -232,17 +232,20 @@ def test_concurrent_edits_have_one_winner_and_one_conflict(edit_case):
 
 
 @pytest.mark.django_db
-def test_contact_and_keychain_changes_never_enter_financial_audit():
+def test_contact_and_keychain_changes_require_reason_and_safe_audit():
     company = make_hierarchy().unit.property.company
     form = CompanyForm(form_data(
-        company, CompanyForm, reason="", email_posiljatelj="new@example.com",
+        company, CompanyForm, reason="Menjava predala", email_posiljatelj="new@example.com",
         keychain_kljuc_posiljatelja="secret-reference",
     ), instance=company)
     assert form.is_valid(), form.errors
     form.save()
     company.refresh_from_db()
     assert company.email_posiljatelj == "new@example.com"
-    assert not audits(company).exists()
+    assert set(audits(company).values_list("polje", flat=True)) == {
+        "email_posiljatelj", "keychain_kljuc_posiljatelja",
+    }
+    assert "secret-reference" not in audits(company).get(polje="keychain_kljuc_posiljatelja").nova_vrednost
 
 
 @pytest.mark.django_db

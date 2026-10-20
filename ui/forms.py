@@ -9,7 +9,7 @@ from archive.configuration import ArchiveConfigurationError, validate_archive_lo
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
 from catalogs.services import VAT_FINANCIAL_FIELDS
 from companies.models import Company, Signatory
-from companies.services import COMPANY_FINANCIAL_FIELDS
+from companies.services import COMPANY_AUDIT_FIELDS
 from contracts.models import Lease, LeaseItem, Property, RecipientContact, Tenant, Unit
 from contracts.renewals import (
     LEASE_FINANCIAL_FIELDS,
@@ -22,6 +22,7 @@ from core.services import (
     record_edit_fingerprint,
     validate_edit_source,
 )
+from delivery.configuration import MONTHLY_SUMMARY_AUDIT_FIELDS
 from delivery.models import MonthlySummaryConfiguration
 
 
@@ -67,20 +68,12 @@ class AccountantArbitraryDownloadForm(AccountantExportPeriodForm):
     )
 
 
-class MonthlySummaryConfigurationForm(forms.ModelForm):
-    class Meta:
-        model = MonthlySummaryConfiguration
-        fields = ("email", "keychain_credential_key")
-        labels = {  # noqa: RUF012
-            "email": "E-naslov za zbirno poročilo",
-            "keychain_credential_key": "Ključ poverilnice v Keychainu",
-        }
-        error_messages = {  # noqa: RUF012
-            "email": {"invalid": "Vnesite veljaven e-poštni naslov."},
-        }
-
-
 class ArchiveConfigurationForm(forms.Form):
+    edit_fingerprint = forms.CharField(required=False, widget=forms.HiddenInput)
+    razlog = forms.CharField(
+        required=False, label="Razlog spremembe", widget=forms.Textarea(attrs={"rows": 3}),
+        help_text="Obvezen pri spremembi shranjenih lokacij arhiva.",
+    )
     local_root = forms.CharField(
         label="Lokalni arhiv",
         help_text="Vnesite absolutno pot do obstoječe mape.",
@@ -95,6 +88,11 @@ class ArchiveConfigurationForm(forms.Form):
         help_text="Vnesite absolutno pot do obstoječe mape.",
     )
 
+    def __init__(self, *args, configuration=None, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.configuration = configuration
+        self.initial["edit_fingerprint"] = record_edit_fingerprint(configuration) if configuration else "new"
+
     def clean(self):
         cleaned = super().clean()
         if not all(name in cleaned for name in ("local_root", "icloud_root", "dropbox_root")):
@@ -106,6 +104,12 @@ class ArchiveConfigurationForm(forms.Form):
         cleaned["local_root"] = str(roots.local_root)
         cleaned["icloud_root"] = str(roots.icloud_root)
         cleaned["dropbox_root"] = str(roots.dropbox_root)
+        if self.configuration is not None:
+            validate_edit_source(self.configuration, cleaned.get("edit_fingerprint", ""))
+            if any(cleaned[name] != getattr(self.configuration, name) for name in (
+                "local_root", "icloud_root", "dropbox_root",
+            )) and not cleaned.get("razlog", "").strip():
+                self.add_error("razlog", "Razlog spremembe je obvezen.")
         return cleaned
 
 
@@ -163,9 +167,13 @@ class FinancialEditForm(forms.ModelForm):
     financial_fields = ()
     edit_attribute = "_financial_edit"
 
+    @property
+    def _editing_existing(self):
+        return bool(self.instance.pk)
+
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        if self.instance.pk:
+        if self._editing_existing:
             self.initial["edit_fingerprint"] = record_edit_fingerprint(self.instance)
         else:
             self.fields.pop("razlog")
@@ -173,14 +181,14 @@ class FinancialEditForm(forms.ModelForm):
 
     def clean(self):
         cleaned = super().clean()
-        if self.instance.pk:
+        if self._editing_existing:
             previous = type(self.instance).objects.get(pk=self.instance.pk)
             validate_edit_source(previous, cleaned.get("edit_fingerprint", ""))
         return cleaned
 
     def _post_clean(self):
         super()._post_clean()
-        if self.instance.pk and not self.errors:
+        if self._editing_existing and not self.errors:
             previous = type(self.instance).objects.get(pk=self.instance.pk)
             try:
                 financial_changes(previous, self.instance, self.financial_fields, self.cleaned_data.get("razlog", ""))
@@ -189,13 +197,50 @@ class FinancialEditForm(forms.ModelForm):
 
     def save(self, commit=True):
         record = super().save(commit=False)
-        if record.pk:
+        if self._editing_existing:
             setattr(record, self.edit_attribute, (
                 self.cleaned_data["edit_fingerprint"], self.cleaned_data.get("razlog", ""),
             ))
         if commit:
             record.save()
             self._save_m2m()
+        return record
+
+
+class MonthlySummaryConfigurationForm(FinancialEditForm):
+    financial_fields = MONTHLY_SUMMARY_AUDIT_FIELDS
+
+    @property
+    def _editing_existing(self):
+        # This singleton has a primary key before its first database insert.
+        return bool(self.instance.pk) and not self.instance._state.adding
+
+    class Meta:
+        model = MonthlySummaryConfiguration
+        fields = MONTHLY_SUMMARY_AUDIT_FIELDS
+        labels = {  # noqa: RUF012
+            "email": "E-naslov za zbirno poročilo",
+            "keychain_credential_key": "Ključ poverilnice v Keychainu",
+        }
+        error_messages = {  # noqa: RUF012
+            "email": {"invalid": "Vnesite veljaven e-poštni naslov."},
+        }
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if self.instance._state.adding:
+            self.fields["edit_fingerprint"] = forms.CharField(required=False, widget=forms.HiddenInput)
+            self.initial["edit_fingerprint"] = "new"
+        else:
+            self.fields["razlog"].help_text = "Obvezen pri spremembi e-naslova ali ključa poverilnice."
+
+    def save(self, commit=True):
+        record = forms.ModelForm.save(self, commit=False)
+        record._configuration_edit = (
+            self.cleaned_data.get("edit_fingerprint", ""), self.cleaned_data.get("razlog", ""),
+        )
+        if commit:
+            record.save()
         return record
 
 
@@ -575,8 +620,13 @@ class _KeepExistingFileMixin:
 
 
 class CompanyForm(_KeepExistingFileMixin, FinancialEditForm):
-    financial_fields = COMPANY_FINANCIAL_FIELDS
+    financial_fields = COMPANY_AUDIT_FIELDS
     file_field_name = "logotip"
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        if "razlog" in self.fields:
+            self.fields["razlog"].help_text = "Obvezen pri spremembi podatkov podjetja, e-naslovov, ključa poverilnice ali logotipa."
 
     class Meta:
         model = Company

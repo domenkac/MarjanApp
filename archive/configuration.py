@@ -4,8 +4,16 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile
 
 from django.conf import settings
-from django.db import connection
+from django.core.exceptions import ValidationError
+from django.db import connection, transaction
 from django.utils import timezone
+
+from core.services import (
+    audit_field_changes,
+    financial_changes,
+    record_edit_fingerprint,
+    validate_edit_source,
+)
 
 from .models import ArchiveConfiguration
 
@@ -153,29 +161,38 @@ def _verify_root(root: Path, label: str) -> None:
 
 
 def verify_and_save_archive_roots(
-    local_root, icloud_root, dropbox_root
+    local_root, icloud_root, dropbox_root, *, razlog="", source_fingerprint=None,
 ) -> ArchiveConfiguration:
     if connection.in_atomic_block or not connection.get_autocommit():
         raise ArchiveConfigurationError(
             "Preverjanje lokacij ne sme potekati v transakciji baze."
         )
     roots = validate_archive_locations(local_root, icloud_root, dropbox_root)
+    original = ArchiveConfiguration.objects.filter(pk=1).first()
+    if source_fingerprint is None:
+        source_fingerprint = record_edit_fingerprint(original) if original else "new"
     _verify_root(roots.local_root, "Lokalni arhiv")
     _verify_root(roots.icloud_root, "iCloud arhiv")
     _verify_root(roots.dropbox_root, "Dropbox mapa")
-    configuration, _ = ArchiveConfiguration.objects.update_or_create(
-        pk=1,
-        defaults={
-            "local_root": str(roots.local_root),
-            "icloud_root": str(roots.icloud_root),
-            "dropbox_root": str(roots.dropbox_root),
-            "verified_at": timezone.now(),
-            "verification_evidence": {
-                "local_root": str(roots.local_root),
-                "icloud_root": str(roots.icloud_root),
-                "dropbox_root": str(roots.dropbox_root),
-                "operations": ["write", "read", "delete"],
+    with transaction.atomic():
+        previous = ArchiveConfiguration.objects.select_for_update().filter(pk=1).first()
+        configuration = ArchiveConfiguration(
+            pk=1, local_root=str(roots.local_root), icloud_root=str(roots.icloud_root),
+            dropbox_root=str(roots.dropbox_root), verified_at=timezone.now(),
+            verification_evidence={
+                "local_root": str(roots.local_root), "icloud_root": str(roots.icloud_root),
+                "dropbox_root": str(roots.dropbox_root), "operations": ["write", "read", "delete"],
             },
-        },
-    )
+        )
+        changes = {}
+        if previous is not None:
+            validate_edit_source(previous, source_fingerprint)
+            changes = financial_changes(
+                previous, configuration, ("local_root", "icloud_root", "dropbox_root"), razlog,
+            )
+            configuration.created_at = previous.created_at
+        elif source_fingerprint not in ("", "new"):
+            raise ValidationError("Zapis ne obstaja več. Osvežite obrazec.")
+        configuration.save(force_insert=previous is None, force_update=previous is not None)
+        audit_field_changes(configuration, changes, razlog)
     return configuration

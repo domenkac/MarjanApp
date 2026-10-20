@@ -7,6 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models, transaction
+from django.utils.crypto import salted_hmac
 
 from .models import AuditLogEntry
 
@@ -50,13 +51,22 @@ def financial_changes(previous, record, fields, reason):
     return changes
 
 
-def audit_field_changes(record, previous_values, reason):
+def credential_reference_audit_value(value):
+    """Keep even secret-bearing credential references out of audit records."""
+    return "hmac-sha256:" + salted_hmac(
+        "configuration-audit-reference-v1", str(value), algorithm="sha256",
+    ).hexdigest()
+
+
+def audit_field_changes(record, previous_values, reason, *, value_formatter=None):
     for name, old in previous_values.items():
         new = getattr(record, record._meta.get_field(name).attname)
         if old != new:
+            old_value = value_formatter(name, old) if value_formatter else str(old)
+            new_value = value_formatter(name, new) if value_formatter else str(new)
             entry = AuditLogEntry(
                 content_type=ContentType.objects.get_for_model(record), object_id=record.pk,
-                polje=name, stara_vrednost=str(old), nova_vrednost=str(new),
+                polje=name, stara_vrednost=old_value, nova_vrednost=new_value,
                 razlog=reason.strip(),
             )
             entry.full_clean()
