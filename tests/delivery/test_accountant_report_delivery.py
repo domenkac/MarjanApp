@@ -15,6 +15,7 @@ from accounting_export import archive, csv_renderer
 from accounting_export.models import AccountantReport, AccountantReportPdfArtifact
 from archive.models import ArchivedFile
 from companies.models import Company
+from delivery.configuration import resolve_keyring_credential_ref
 from delivery.models import AccountantReportDeliveryAttempt as Attempt
 from delivery.models import DeliveryAttempt
 from delivery.services import (
@@ -27,16 +28,24 @@ from delivery.transport import SmtpConfig, SmtpSecurity
 from invoicing.models import Invoice, MonthlyCycle
 from tests.accounting_export.test_csv_renderer import report
 from tests.financial_fixtures import update_financial_fixture
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
-def persisted(report):
+def persisted(report, settings):
+    settings.MARJAN_SMTP_HOST = "smtp.example.com"
+    settings.MARJAN_SMTP_PORT = 587
+    settings.MARJAN_SMTP_SECURITY = "STARTTLS"
+    settings.MARJAN_SMTP_TIMEOUT_SECONDS = 10
+    settings.MARJAN_KEYRING_SERVICE = "synthetic"
     company = Company.objects.create(
         naziv="Live name", davcna_stevilka="15012557",
         email_posiljatelj="sender@example.com", email_racunovodja="accountant@example.com",
+        keychain_kljuc_posiljatelja="synthetic-key",
     )
+    approve_smtp(company.pk)
     return AccountantReport.objects.create(
         company=company, period=date(2026, 7, 1), generated_at=timezone.now(),
         schema_version=1, snapshot=report.snapshot,
@@ -288,7 +297,7 @@ def test_real_transport_result_and_domain_isolation(attempt, tmp_path, outcome, 
         assert not connection.in_atomic_block
         return "actual-password"
     result = send_accountant_report(
-        attempt, _config(), object(), password_loader=password_loader,
+        attempt, _config(), resolve_keyring_credential_ref(attempt.report.company), password_loader=password_loader,
         smtp_factory=lambda *_: Smtp(attempt, outcome),
     )
     assert result.result == state and result.completed_at is not None
@@ -413,7 +422,7 @@ def test_submission_callback_race_never_sends_data(attempt):
 
     with pytest.raises(ValidationError):
         send_accountant_report(
-            attempt, _config(), object(), password_loader=lambda _: "actual-password",
+            attempt, _config(), resolve_keyring_credential_ref(attempt.report.company), password_loader=lambda _: "actual-password",
             smtp_factory=lambda *_: RacingSmtp(attempt, "accepted"),
         )
     attempt.refresh_from_db()

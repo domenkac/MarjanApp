@@ -16,6 +16,7 @@ from django.db import close_old_connections, connection, models
 
 from companies.models import NumberSequence
 from core.models import AuditLogEntry
+from delivery.configuration import resolve_keyring_credential_ref
 from delivery.models import DeliveryAttempt
 from delivery.services import send_pdf_email
 from invoicing.models import Invoice
@@ -31,17 +32,24 @@ from invoicing.services import (
 from tests.delivery.test_delivery_services import FakeSmtp, smtp_config
 from tests.invoicing.test_korekcije import izdan_np
 from tests.invoicing.test_priprava_np import pogodba
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
 def correction_factory(pogodba, settings, tmp_path, monkeypatch):
+    settings.MARJAN_SMTP_HOST = "smtp.example.com"
+    settings.MARJAN_SMTP_PORT = 587
+    settings.MARJAN_SMTP_SECURITY = "STARTTLS"
+    settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
+    settings.MARJAN_KEYRING_SERVICE = "marjan"
     settings.RENDERING_ROOT = tmp_path / "rendered"
     for target in ("socket.create_connection", "smtplib.SMTP", "smtplib.SMTP_SSL",
                    "keyring.get_password", "keyring.set_password"):
         monkeypatch.setattr(target, lambda *a, **k: pytest.fail("Real external access forbidden"))
     original_np = izdan_np(pogodba)
+    approve_smtp(original_np.company_id)
 
     def create(kind="STORNO", source="NP"):
         original = original_np
@@ -94,7 +102,7 @@ def prepare(invoice):
 def send(attempt, smtp_config, fake=None):
     from delivery.corrections import send_correction_email
     return send_correction_email(attempt, smtp_config=replace(smtp_config, username=attempt.sender),
-                                 credential_ref=object(), password_loader=lambda ref: "top-secret",
+                                 credential_ref=resolve_keyring_credential_ref(attempt.invoice.company), password_loader=lambda ref: "top-secret",
                                  smtp_factory=lambda *a: fake or FakeSmtp())
 
 

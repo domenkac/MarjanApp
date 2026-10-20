@@ -111,6 +111,35 @@ Odobritev te vaje potrjuje obnovitveno kopijo. Produkcijski preklop ima ločeno 
 
 **Zaradi napake e-pošte nikoli ne izdajte drugega računa.** Ponovno pošiljanje uporablja isti izdani račun in preverjeni PDF.
 
+### Potrditev trenutne SMTP povezave
+
+Pred pošiljanjem mora imeti vsako podjetje uspešen, shranjen test povezave in prijave.
+V **Nastavitve > Podjetje** uporabite **Preveri SMTP povezavo** za vseh pet
+izdajateljev z njihovimi lastnimi identitetami in poverilnicami. Zbirno mesečno
+poročilo ima ločeno potrditev v **Nastavitve > Zbirno mesečno poročilo**.
+Test ne pošlje sporočila. Zaslon prikazuje veljavnost trenutne potrditve in čas
+zadnjega uspešnega testa; sam prikaz nastavitev ne potrdi povezave.
+
+Potrditev velja za točno določeno podjetje oziroma zbirno poročilo, pošiljatelja,
+gostitelja, vrata, varnost, časovno omejitev, storitev Keychain in referenco
+poverilnice. Po spremembi nastavitev opravite nov test. Sprememba pošiljatelja ali
+reference trajno razveljavi staro potrditev tudi ob vrnitvi na prejšnjo vrednost.
+Začetek novega testa prekliče prejšnjo odobritev. Neuspešen ali prekinjen test ter
+neuspešen zapis rezultata testa pošiljanja ne odobrijo. Dokler nov test ni uspešno
+shranjen, je pošiljanje blokirano; že pripravljeni poskus ostane `PREPARED`.
+
+**Po vsaki menjavi gesla ali app-passworda v Keychainu obvezno ponovite test.**
+Menjave gesla pod nespremenjeno referenco ni mogoče zaznati iz neskrivnih
+nastavitev. Geslo se ne shrani v dokazilo, bazo ali revizijsko sled.
+
+Ročno potrjevanje zgodovinskega `UNKNOWN` kot poslanega ali neposlanega ne zahteva
+novega SMTP testa. Potrditev neposlanega pripravi ponovitev; dejansko pošiljanje
+ponovitve zahteva veljavno trenutno SMTP potrditev. `UNKNOWN` se ne pošlje samodejno.
+
+V namiznem profilu **TEST** sta SMTP in Keychain onemogočena. Ta profil ne more
+ustvariti produkcijske SMTP potrditve ali dokončati produkcijske pripravljenosti
+za izdajo. Potrditve opravite v ustreznem produkcijskem okolju na ciljnem Macu.
+
 | Rezultat | Pomen in varen ukrep |
 |---|---|
 | `ACCEPTED` | SMTP strežnik je sprejel sporočilo. To ni dokaz, da ga je prejemnik prebral ali da ni poznejše zavrnitve. Ne ponavljajte pošiljanja zaradi same odsotnosti odgovora. |

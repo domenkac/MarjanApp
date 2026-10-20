@@ -1,0 +1,13 @@
+<div role="status">
+  {% if smtp_verification.state == "disabled" %}
+  <p>SMTP in Keychain sta v namiznem profilu TEST onemogočena. Potrditve SMTP ni mogoče opraviti.</p>
+  {% elif smtp_verification.verified %}
+  <p>Trenutna SMTP konfiguracija je potrjena.</p>
+  {% elif smtp_verification.state == "missing" %}
+  <p>Potrditev SMTP povezave manjka. Izvedite Preveri SMTP povezavo.</p>
+  {% else %}
+  <p>Potrditev SMTP povezave je zastarela ali zadnji test ni uspel. Izvedite Preveri SMTP povezavo.</p>
+  {% endif %}
+  {% if smtp_verification.last_success_at %}<p>Zadnja uspešna potrditev: {{ smtp_verification.last_success_at|date:"d. m. Y H:i:s" }}</p>{% endif %}
+  <p>Po menjavi gesla v Keychainu vedno ponovite test povezave.</p>
+</div>

@@ -2,6 +2,21 @@ from django.core.exceptions import ValidationError
 from django.db import models
 
 
+class SmtpVerification(models.Model):
+    """A test starts unapproved; only its authenticated result may approve it."""
+
+    company = models.ForeignKey("companies.Company", null=True, on_delete=models.PROTECT)
+    sender = models.EmailField()
+    fingerprint = models.CharField(max_length=64)
+    started_at = models.DateTimeField(auto_now_add=True)
+    verified_at = models.DateTimeField(null=True)
+    invalidated_at = models.DateTimeField(null=True)
+    result_code = models.CharField(max_length=64, default="SMTP_TEST_STARTED")
+
+    class Meta:
+        indexes = [models.Index(fields=["company", "-id"], name="smtp_scope_latest_idx")]  # noqa: RUF012
+
+
 class DeliveryAttempt(models.Model):
     class Result(models.TextChoices):
         PREPARED = "PREPARED", "Prepared"

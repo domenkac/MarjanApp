@@ -41,10 +41,16 @@ from delivery.transport import (
 )
 from invoicing.models import Invoice, InvoiceLine, MonthlyCycle
 from tests.business_fixtures import update_business_records
+from tests.smtp_helpers import approve_smtp
 
 
 @pytest.fixture
-def issued_invoice(transactional_db):
+def issued_invoice(transactional_db, settings):
+    settings.MARJAN_SMTP_HOST = "smtp.example.com"
+    settings.MARJAN_SMTP_PORT = 587
+    settings.MARJAN_SMTP_SECURITY = "STARTTLS"
+    settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
+    settings.MARJAN_KEYRING_SERVICE = "marjan"
     company = Company.objects.create(
         naziv="Alfa d.o.o.",
         davcna_stevilka="15012557",
@@ -55,7 +61,7 @@ def issued_invoice(transactional_db):
         logotip="logo.png",
         email_racunovodja="accountant@example.com",
         email_posiljatelj="sender@example.com",
-        keychain_kljuc_posiljatelja="keychain-reference",
+        keychain_kljuc_posiljatelja="smtp-user",
     )
     property_ = Property.objects.create(
         company=company, naziv="Stavba", naslov="Glavna 1"
@@ -129,6 +135,7 @@ def issued_invoice(transactional_db):
         leto=0,
         zadnja_stevilka=1,
     )
+    approve_smtp(company.pk)
     return invoice
 
 
@@ -149,13 +156,18 @@ def prepared_email_data(issued_invoice, settings, tmp_path):
 
 
 @pytest.fixture
-def smtp_config():
+def smtp_config(settings):
+    settings.MARJAN_SMTP_HOST = "smtp.example.com"
+    settings.MARJAN_SMTP_PORT = 587
+    settings.MARJAN_SMTP_SECURITY = "STARTTLS"
+    settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
+    settings.MARJAN_KEYRING_SERVICE = "marjan"
     return SmtpConfig(
         host="smtp.example.com",
         port=587,
         security=SmtpSecurity.STARTTLS,
         timeout_seconds=12.5,
-        username="smtp-user",
+        username="sender@example.com",
     )
 
 

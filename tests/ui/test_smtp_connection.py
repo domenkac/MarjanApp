@@ -1,12 +1,21 @@
 import pytest
-from django.db import connection
+from django.db import DatabaseError, connection
+from django.test import Client
 from django.urls import reverse
 
 from companies.models import Company
+from core.models import AuditLogEntry
 from delivery.credentials import KeyringCredentialRef
-from delivery.models import DeliveryAttempt
+from delivery.models import (
+    DeliveryAttempt,
+    MonthlySummaryConfiguration,
+    SmtpVerification,
+)
 from delivery.transport import SmtpConfig, SmtpResult, SmtpSecurity
+from delivery.verification import verification_status
 from invoicing.models import Invoice, MonthlyCycle
+
+pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
@@ -145,3 +154,42 @@ def test_connection_test_is_post_only(client, company, monkeypatch):
         lambda *args, **kwargs: pytest.fail("connection test called"),
     )
     assert client.get(reverse("ui:test_smtp_connection", args=[company.pk])).status_code == 405
+
+
+@pytest.mark.parametrize("monthly", [False, True])
+def test_persistent_status_and_csrf(client, company, monkeypatch, monthly):
+    if monthly:
+        MonthlySummaryConfiguration.objects.create(email="owner@example.com", keychain_credential_key="owner")
+    scope = None if monthly else company.pk
+    action = reverse("ui:test_monthly_summary_smtp_connection") if monthly else reverse("ui:test_smtp_connection", args=[company.pk])
+    page = reverse("ui:nastavitve_zbirno_porocilo") if monthly else reverse("ui:podjetje_detail", args=[company.pk])
+    calls = []
+    monkeypatch.setattr("ui.views.check_smtp_connection", lambda *_: calls.append("test") or SmtpResult(True, "SMTP_CONNECTION_OK"))
+    assert "Potrditev SMTP povezave manjka" in client.get(page).content.decode()
+    assert not calls and not SmtpVerification.objects.exists()
+    assert Client(enforce_csrf_checks=True).post(action).status_code == 403
+    assert not calls and not SmtpVerification.objects.exists()
+    assert client.post(action).status_code == 200
+    assert verification_status(scope).verified
+    assert "Zadnja uspešna potrditev" in client.get(page).content.decode()
+    assert calls == ["test"]
+    assert client.get(action).status_code == 405
+    assert calls == ["test"] and SmtpVerification.objects.count() == 1
+
+
+def test_wrong_issuer_does_not_test_or_record(client, company, monkeypatch):
+    monkeypatch.setattr("ui.views.check_smtp_connection", lambda *_: pytest.fail("SMTP"))
+    assert client.post(reverse("ui:test_smtp_connection", args=[company.pk + 1000])).status_code == 404
+    assert not SmtpVerification.objects.exists()
+
+
+def test_evidence_write_failure_is_sanitized_and_unapproved(client, company, monkeypatch):
+    monkeypatch.setattr("ui.views.check_smtp_connection", lambda *_: SmtpResult(True, "SMTP_CONNECTION_OK"))
+    def fail(*_, **__):
+        raise DatabaseError("private provider details")
+    monkeypatch.setattr(AuditLogEntry.objects, "create", fail)
+    response = client.post(reverse("ui:test_smtp_connection", args=[company.pk]))
+    assert response.status_code == 502
+    assert "Potrditve SMTP ni mogoče shraniti" in response.content.decode()
+    assert "private provider details" not in response.content.decode()
+    assert not verification_status(company.pk).verified

@@ -17,6 +17,7 @@ from archive.models import ArchivedFile, BackupSnapshot
 from companies.models import NumberSequence
 from contracts.models import RecipientContact, Tenant
 from core.models import AuditLogEntry
+from delivery.configuration import resolve_keyring_credential_ref
 from delivery.models import DeliveryAttempt
 from delivery.services import (
     build_pdf_email,
@@ -35,6 +36,7 @@ from delivery.st_delivery import (
 )
 from tests.delivery.test_delivery_services import FakeSmtp, issued_invoice, smtp_config
 from tests.rendering.test_st_pdf import confirmed, ready, setup_data
+from tests.smtp_helpers import approve_smtp
 
 
 @pytest.fixture
@@ -71,7 +73,7 @@ def send(attempt, smtp_config, fake=None):
     return send_pdf_email(
         attempt, subject="Račun ST", body="V prilogi je račun.",
         smtp_config=replace(smtp_config, username=attempt.sender),
-        credential_ref=object(), password_loader=lambda ref: "top-secret",
+        credential_ref=resolve_keyring_credential_ref(attempt.invoice.company), password_loader=lambda ref: "top-secret",
         smtp_factory=lambda *a: fake or FakeSmtp(),
     )
 
@@ -183,6 +185,7 @@ def test_configured_sender_domain_case_keeps_exact_smtp_identity(st_invoice, smt
     models.QuerySet.update(type(st_invoice.company).objects.filter(pk=st_invoice.company_id), email_posiljatelj="Sender@EXAMPLE.com")
     attempt = prepare(st_invoice)
     assert attempt.sender == "Sender@EXAMPLE.com"
+    approve_smtp(st_invoice.company_id)
     assert send(attempt, smtp_config).result == "ACCEPTED"
 
 
@@ -343,6 +346,7 @@ def test_corrupt_pdf_blocks_retry_preparation(st_invoice, smtp_config, settings,
 def test_real_confirmed_st_pdf_uses_same_delivery_pipeline(confirmed, smtp_config):
     from rendering.services import render_pdf
 
+    approve_smtp(confirmed.company_id, config=smtp_config)
     artifact = render_pdf(confirmed)
     attempt = prepare(confirmed)
     fake = FakeSmtp()
@@ -361,6 +365,11 @@ django.setup()
 from django.conf import settings
 from django.db import connection
 connection.settings_dict['NAME'] = sys.argv[1]
+settings.MARJAN_SMTP_HOST = 'smtp.example.com'
+settings.MARJAN_SMTP_PORT = 587
+settings.MARJAN_SMTP_SECURITY = 'STARTTLS'
+settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
+settings.MARJAN_KEYRING_SERVICE = 'marjan'
 settings.RENDERING_ROOT = __import__('pathlib').Path(sys.argv[2])
 from delivery.models import DeliveryAttempt
 from delivery.transport import SmtpConfig, SmtpSecurity

@@ -188,6 +188,7 @@ def send_prepared_email(
     credential_ref: KeyringCredentialRef,
     *,
     on_submission_started: Callable[[], None],
+    verification_check: Callable[[], None] | None = None,
     password_loader=load_password,
     smtp_factory: SmtpFactory = _default_smtp_factory,
 ) -> SmtpResult:
@@ -201,7 +202,11 @@ def send_prepared_email(
     submission_started = False
     final_result = None
     try:
+        if verification_check:
+            verification_check()
         password = password_loader(credential_ref)
+        if verification_check:
+            verification_check()
         smtp = _open(config, password, smtp_factory)
 
         code, reply = smtp.mail(prepared.envelope_sender)
@@ -217,6 +222,8 @@ def send_prepared_email(
                     f"{recipient}: {code} {_safe(reply, password)}",
                 )
 
+        if verification_check:
+            verification_check()
         on_submission_started()
         submission_started = True
         code, reply = smtp.data(payload)
@@ -236,7 +243,11 @@ def send_prepared_email(
             f"{exc.smtp_code} {_safe(exc.smtp_error, password)}",
             True,
         )
-    except Exception as exc:  # noqa: BLE001 - unknown after DATA is business state
+    except Exception as exc:
+        from .verification import SmtpVerificationRequired
+
+        if isinstance(exc, SmtpVerificationRequired) and not submission_started:
+            raise
         if submission_started:
             return SmtpResult(
                 False,

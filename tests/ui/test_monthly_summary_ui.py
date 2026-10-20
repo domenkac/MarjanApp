@@ -11,7 +11,7 @@ from delivery.services import _monthly_summary_body, _monthly_summary_snapshot
 from delivery.transport import SmtpConfig, SmtpResult, SmtpSecurity
 from invoicing.models import MonthlyCycle
 
-pytestmark = pytest.mark.django_db
+pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture(autouse=True)

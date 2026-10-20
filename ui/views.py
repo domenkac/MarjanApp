@@ -91,7 +91,9 @@ from delivery.services import (
     resolve_unknown_user_confirmed_not_sent_and_prepare_retry,
     send_monthly_summary,
 )
+from delivery.transport import SmtpResult
 from delivery.transport import test_smtp_connection as check_smtp_connection
+from delivery.verification import verification_status, verify_connection
 from invoicing.models import Invoice, MonthlyBatch, MonthlyCycle
 from invoicing.services import (
     MesecniCikelNapaka,
@@ -634,6 +636,7 @@ def _monthly_summary_settings_context(*, form=None, success=False, action_errors
     return _settings_context(
         form=form or MonthlySummaryConfigurationForm(instance=configuration),
         configuration=configuration,
+        smtp_verification=verification_status(None),
         success=success,
         action_errors=action_errors,
     )
@@ -660,12 +663,11 @@ def nastavitve_zbirno_porocilo(request):
     )
 
 
+@transaction.non_atomic_requests
 @require_POST
 def test_monthly_summary_smtp_connection(request):
     try:
-        configuration = resolve_monthly_summary_configuration()
-        config = resolve_monthly_summary_smtp_config(configuration)
-        credential_ref = resolve_monthly_summary_credential_ref(configuration)
+        result = verify_connection(None, tester=check_smtp_connection)
     except SmtpConfigurationError:
         return render(
             request,
@@ -675,7 +677,8 @@ def test_monthly_summary_smtp_connection(request):
             ),
             status=400,
         )
-    result = check_smtp_connection(config, credential_ref)
+    except DatabaseError:
+        result = SmtpResult(False, "SMTP_EVIDENCE_WRITE_FAILED")
     return render(
         request,
         "ui/monthly_summary_settings.html",
@@ -938,10 +941,14 @@ def _company_detail_context(
         action_errors=action_errors,
         smtp_config=smtp_config,
         smtp_configuration_error=smtp_configuration_error,
+        smtp_verification=verification_status(company.pk),
     )
 
 
 _SMTP_RESULT_MESSAGES = {
+    "TEST_DELIVERY_DISABLED": "SMTP in Keychain sta v namiznem profilu TEST onemogočena.",
+    "SMTP_CONFIGURATION_CHANGED": "Nastavitve SMTP so se med testom spremenile. Ponovite test povezave.",
+    "SMTP_EVIDENCE_WRITE_FAILED": "Potrditve SMTP ni mogoče shraniti. Pošiljanje ostaja blokirano; ponovite test povezave.",
     "KEYCHAIN_CREDENTIAL_MISSING": "Geslo SMTP ni shranjeno v Keychainu.",
     "KEYCHAIN_ERROR": "Dostop do Keychaina ni uspel.",
     "SMTP_AUTH_FAILED": "Prijava v SMTP ni uspela.",
@@ -951,12 +958,12 @@ _SMTP_RESULT_MESSAGES = {
 }
 
 
+@transaction.non_atomic_requests
 @require_POST
 def test_smtp_connection(request, company_id):
     company = get_object_or_404(Company, pk=company_id)
     try:
-        config = resolve_smtp_config(company)
-        credential_ref = resolve_keyring_credential_ref(company)
+        result = verify_connection(company.pk, tester=check_smtp_connection)
     except SmtpConfigurationError as error:
         return render(
             request,
@@ -964,8 +971,9 @@ def test_smtp_connection(request, company_id):
             _company_detail_context(company, action_errors=[str(error)]),
             status=400,
         )
+    except DatabaseError:
+        result = SmtpResult(False, "SMTP_EVIDENCE_WRITE_FAILED")
 
-    result = check_smtp_connection(config, credential_ref)
     return render(
         request,
         "ui/podjetje_detail.html",

@@ -45,6 +45,7 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,
 )
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -56,13 +57,16 @@ def configuration(settings):
     settings.MARJAN_SMTP_SECURITY = "STARTTLS"
     settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
     settings.MARJAN_KEYRING_SERVICE = "marjan-smtp"
-    return MonthlySummaryConfiguration.objects.create(
+    configuration = MonthlySummaryConfiguration.objects.create(
         email="owner@example.com",
         keychain_credential_key="monthly-summary",
     )
+    approve_smtp(None)
+    return configuration
 
 
 def _step_6(data, settings, tmp_path):
+    approve_smtp(data["company"].pk)
     settings.RENDERING_ROOT = tmp_path / "rendered"
     _freeze_ready_package(data)
     izdaj_zamrznjeni_mesecni_paket(data["cycle"])
@@ -318,7 +322,7 @@ def test_send_reuses_transport_and_changes_only_summary(
 
     monkeypatch.setattr("delivery.transport.send_prepared_email", fake_transport)
     smtp_config = resolve_monthly_summary_smtp_config(configuration)
-    sent = send_monthly_summary(attempt, smtp_config, object())
+    sent = send_monthly_summary(attempt, smtp_config, resolve_monthly_summary_credential_ref(configuration))
 
     assert sent.result == expected
     assert "secret" not in sent.message

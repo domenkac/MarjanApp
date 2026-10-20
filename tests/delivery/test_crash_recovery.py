@@ -39,6 +39,11 @@ django.setup()
 from django.conf import settings
 from django.db import connection
 connection.settings_dict['NAME'] = sys.argv[1]
+settings.MARJAN_SMTP_HOST = 'smtp.example.com'
+settings.MARJAN_SMTP_PORT = 587
+settings.MARJAN_SMTP_SECURITY = 'STARTTLS'
+settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
+settings.MARJAN_KEYRING_SERVICE = 'marjan'
 settings.RENDERING_ROOT = __import__('pathlib').Path(sys.argv[2])
 from delivery.models import DeliveryAttempt
 from delivery.transport import SmtpConfig, SmtpSecurity
@@ -53,7 +58,7 @@ def active(*args):
 fake = FakeSmtp({'mail' if mode == 'before_data' else 'data':
                  active if mode == 'active' else crash})
 config = SmtpConfig(host='smtp.example.com', port=587,
-    security=SmtpSecurity.STARTTLS, timeout_seconds=12.5, username='smtp-user')
+    security=SmtpSecurity.STARTTLS, timeout_seconds=12.5, username='sender@example.com')
 _send(DeliveryAttempt.objects.get(pk=sys.argv[3]), config, fake)
 """
 

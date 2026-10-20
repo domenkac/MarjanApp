@@ -21,6 +21,7 @@ from delivery.services import (
     prepare_accountant_report_delivery_retry,
     send_accountant_report,
 )
+from delivery.verification import SmtpVerificationRequired, require_verified
 
 from .archive import (
     archive_accountant_report_pdf,
@@ -31,6 +32,7 @@ from .services import create_accountant_report, issued_invoice_queryset
 from .task_state import accountant_control_dashboard_tasks
 
 FEEDBACK = {
+    "SMTP_VERIFICATION_REQUIRED": "SMTP povezava ni potrjena. V Nastavitve > Podjetje izvedite Preveri SMTP povezavo.",
     "SENT_VERIFIED": "Pošiljanje je uporabnik preveril kot poslano. Izvirni rezultat UNKNOWN ostaja v revizijski sledi.",
     "RETRY_PREPARED": "Ponovitev je pripravljena. Za pošiljanje uporabite ločeno dejanje Pošlji.",
     "ACCEPTED": "Kontrolni dokument je bil poslan.",
@@ -337,6 +339,11 @@ def deliver_accountant_control_report(
         return ControlActionResult(code, report.pk, attempt.pk)
 
     try:
+        require_verified(company_id, config, credential, attempt.sender)
+    except SmtpVerificationRequired:
+        return ControlActionResult("SMTP_VERIFICATION_REQUIRED", report.pk, attempt.pk)
+
+    try:
         from delivery.credentials import load_password
 
         current_company = Company.objects.get(pk=company_id)
@@ -366,6 +373,8 @@ def deliver_accountant_control_report(
             smtp_factory=smtp_factory,
         )
         return ControlActionResult(sent.result, report.pk, attempt.pk)
+    except SmtpVerificationRequired:
+        return ControlActionResult("SMTP_VERIFICATION_REQUIRED", report.pk, attempt.pk)
     except (ValidationError, DatabaseError):
         # A competing transition is authoritative; never repair or overwrite it.
         code = _blocked(company_id, period) or "ACTION_FAILED"

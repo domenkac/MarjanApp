@@ -17,6 +17,7 @@ from tests.accounting_export.test_report_snapshot import (
     company as company,  # noqa: PLC0414
 )
 from tests.financial_fixtures import update_financial_fixture
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 PERIOD = date(2026, 9, 1)
@@ -38,6 +39,7 @@ def setup(company, tmp_path, settings, monkeypatch):
     settings.MARJAN_SMTP_SECURITY = "STARTTLS"
     settings.MARJAN_SMTP_TIMEOUT_SECONDS = 10
     settings.MARJAN_KEYRING_SERVICE = "test-service"
+    approve_smtp(company.pk)
     monkeypatch.setattr(archive, "render_accountant_report_pdf", lambda _: b"%PDF-test")
     return company
 
@@ -422,6 +424,9 @@ def test_same_sender_uses_current_credential_reference(setup, tmp_path):
         return "test-password"
 
     calls = []
+    assert run(setup, calls, password_loader=password).code == "SMTP_VERIFICATION_REQUIRED"
+    assert not keys and not calls
+    approve_smtp(setup.pk)
     assert run(setup, calls, password_loader=password).code == "ACCEPTED"
     assert len(keys) == 1 and keys[0].username == "new-key"
     assert Attempt.objects.get().pk == attempt.pk

@@ -18,6 +18,7 @@ from tests.delivery.test_correction_delivery import (
     correction_factory,
     pogodba,
 )
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
@@ -41,6 +42,7 @@ def test_http_review_prepare_send_archive_end_to_end(client, correction_factory,
     settings.MARJAN_SMTP_SECURITY = "STARTTLS"
     settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5
     settings.MARJAN_KEYRING_SERVICE = "synthetic"
+    approve_smtp(invoice.company_id)
     fake = FakeSmtp()
     monkeypatch.setattr("delivery.credentials.load_password", lambda ref: "top-secret")
     monkeypatch.setattr("delivery.transport._default_smtp_factory", lambda *a: fake)

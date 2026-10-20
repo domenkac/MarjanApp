@@ -632,6 +632,7 @@ def odloci_o_fizicnem_izbrisu(zapis, *, izrecna_potrditev=False) -> IzbrisOdloci
         )
 
     from contracts.models import Property
+    from delivery.models import SmtpVerification
     from invoicing.models import Invoice
 
     razlogi = []
@@ -650,6 +651,16 @@ def odloci_o_fizicnem_izbrisu(zapis, *, izrecna_potrditev=False) -> IzbrisOdloci
 
     povezava(Signatory, "PODREJENI_ZAPISI", company_id=svezi.pk)
     povezava(Property, "PODREJENI_ZAPISI", company_id=svezi.pk)
+    stevilo = SmtpVerification.objects.filter(company_id=svezi.pk).count()
+    if stevilo:
+        razlogi.append(
+            IzbrisRazlog(
+                "POSLOVNA_ZGODOVINA",
+                "Ohranjena zgodovina preverjanj SMTP povezave preprečuje fizični izbris.",
+                "SmtpVerification",
+                stevilo,
+            )
+        )
     povezava(Invoice, "POVEZAN_RACUN", company_id=svezi.pk)
     racuni = Invoice.objects.filter(company_id=svezi.pk)
     stevilo = racuni.filter(stevilka__isnull=False).count()

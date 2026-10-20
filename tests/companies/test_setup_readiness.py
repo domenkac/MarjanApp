@@ -45,6 +45,7 @@ from tests.setup_helpers import (
     preview_sample,
     verified_archive_configuration,
 )
+from tests.smtp_helpers import approve_smtp
 from tests.ui import test_company_confirmations
 
 setup_data = test_company_confirmations.confirmation_ui_data
@@ -69,6 +70,7 @@ def five_issuers(setup_data, settings):
         explicit=True,
     )
     others = add_setup_issuers(setup_data.company, setup_data.lease)
+    approve_smtp(setup_data.company.pk)
     verified_archive_configuration()
     return setup_data, others
 

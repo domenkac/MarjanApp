@@ -166,10 +166,18 @@ def setup_readiness(*, today=None, company=None, asset_evidence=None):
         try:
             resolve_smtp_config(issuer)
             resolve_keyring_credential_ref(issuer)
+            from delivery.verification import require_verified
+
+            require_verified(
+                issuer.pk, resolve_smtp_config(issuer),
+                resolve_keyring_credential_ref(issuer), issuer.email_posiljatelj,
+            )
         except SmtpConfigurationError:
             issues.append(
                 ("delivery", "Nastavitve dostave SMTP in Keychain niso popolne.")
             )
+        except ValidationError as error:
+            issues.append(("delivery", " ".join(error.messages)))
         ddv = veljavna_potrditev_ddv(issuer)
         sample = veljavna_potrditev_vzorca(issuer, require_preview=True)
         for state, field, label in (

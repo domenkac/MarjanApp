@@ -10,6 +10,7 @@ from django.test import Client
 from django.urls import reverse
 
 from contracts.models import Tenant
+from delivery.configuration import resolve_keyring_credential_ref
 from delivery.models import DeliveryAttempt
 from delivery.services import mark_submission_started
 from tests.delivery.test_delivery_services import FakeSmtp, issued_invoice, smtp_config
@@ -133,7 +134,7 @@ def test_send_with_atomic_requests_enabled_runs_outside_transaction(client, st_i
 
     with patch.dict(connection.settings_dict, ATOMIC_REQUESTS=True), patch(
         "ui.st_delivery.resolve_smtp_config", return_value=replace(smtp_config, username=attempt.sender),
-    ), patch("ui.st_delivery.resolve_keyring_credential_ref", return_value=object()), patch(
+    ), patch("ui.st_delivery.resolve_keyring_credential_ref", return_value=resolve_keyring_credential_ref(st_invoice.company)), patch(
         "delivery.credentials.load_password", side_effect=password,
     ), patch("delivery.transport._default_smtp_factory", return_value=fake):
         assert action(client, st_invoice, attempt, "send").status_code == 302

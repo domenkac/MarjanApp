@@ -49,6 +49,7 @@ from tests.invoicing.test_preflight import (
     ready_company as ready_company,  # noqa: PLC0414
 )
 from tests.setup_helpers import approve_sample, prepare_initial_setup
+from tests.smtp_helpers import approve_smtp
 
 pytestmark = pytest.mark.django_db(transaction=True)
 PERIOD = date(2030, 11, 1)
@@ -131,6 +132,7 @@ def flow(ready_company, client, settings, tmp_path, monkeypatch, external_bounda
     MonthlySummaryConfiguration.objects.create(
         email="owner@example.com", keychain_credential_key="owner-test"
     )
+    approve_smtp(None)
     companies = [data["company"], beta]
     leases = [data["lease"], Lease.objects.get(unit__property__company=beta)]
     for index, (company, lease) in enumerate(zip(companies, leases, strict=True)):
@@ -138,6 +140,7 @@ def flow(ready_company, client, settings, tmp_path, monkeypatch, external_bounda
         company.email_posiljatelj = f"issuer-{index}@example.com"
         company.email_racunovodja = f"accountant-{index}@example.com"
         save_financial_fixture(company)
+        approve_smtp(company.pk)
         lease.tenant.identificiran_za_ddv = True
         save_business_record(lease.tenant)
         RecipientContact.objects.create(

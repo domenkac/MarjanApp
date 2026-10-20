@@ -17,8 +17,13 @@ from django.utils import timezone
 
 from core.models import AuditLogEntry
 from delivery import report_recovery as recovery
-from delivery.models import AccountantReportDeliveryAttempt, MonthlySummaryAttempt
+from delivery.models import (
+    AccountantReportDeliveryAttempt,
+    MonthlySummaryAttempt,
+    SmtpVerification,
+)
 from delivery.services import prepare_monthly_summary
+from delivery.verification import SmtpVerificationRequired, current_identity
 from tests.accounting_export.test_workflow import (
     AS_OF,
     PERIOD,
@@ -87,6 +92,7 @@ def test_recovery_is_audited_repeat_safe_and_respects_active_owner(case):
 
 def test_sent_preserves_unknown_and_rejects_second_or_opposite_decision(case, tmp_path):
     attempt, scope, _, sent, not_sent = case
+    SmtpVerification.objects.all().delete()
     unknown(attempt)
     before = type(attempt).objects.values().get(pk=attempt.pk)
     sent(attempt, reason="Verified in provider sent folder", **scope)
@@ -101,6 +107,7 @@ def test_sent_preserves_unknown_and_rejects_second_or_opposite_decision(case, tm
 
 def test_not_sent_prepares_one_frozen_retry_without_submission(case, tmp_path):
     attempt, scope, _, sent, not_sent = case
+    SmtpVerification.objects.all().delete()
     unknown(attempt)
     before = deepcopy(type(attempt).objects.values().get(pk=attempt.pk))
     retry = not_sent(attempt, reason="Provider confirms no submission", local_root=tmp_path, **scope)
@@ -114,6 +121,10 @@ def test_not_sent_prepares_one_frozen_retry_without_submission(case, tmp_path):
     with pytest.raises(ValidationError):
         sent(attempt, reason="Opposite", **scope)
     assert type(attempt).objects.count() == 2
+    with pytest.raises(SmtpVerificationRequired):
+        send(retry, [], smtp_factory=lambda *_: pytest.fail("SMTP without verification"))
+    retry.refresh_from_db()
+    assert retry.result == "PREPARED"
 
 
 @pytest.mark.parametrize("decision", ["sent", "not_sent"])
@@ -150,9 +161,8 @@ def send(attempt, calls, smtp_factory=None):
     from delivery.transport import SmtpConfig, SmtpSecurity
 
     operation = send_monthly_summary if isinstance(attempt, MonthlySummaryAttempt) else send_accountant_report
-    config = SmtpConfig(host="smtp.example.com", port=587, security=SmtpSecurity.STARTTLS,
-                        timeout_seconds=10, username=attempt.sender)
-    return operation(attempt, config, object(), password_loader=lambda _: "test-password",
+    config, reference = current_identity(None if isinstance(attempt, MonthlySummaryAttempt) else attempt.report.company_id)
+    return operation(attempt, config, reference, password_loader=lambda _: "test-password",
                      smtp_factory=smtp_factory or (lambda *_: Smtp(calls)))
 
 
@@ -257,6 +267,11 @@ from delivery.models import MonthlySummaryAttempt, AccountantReportDeliveryAttem
 from tests.delivery.test_report_recovery import send
 from tests.accounting_export.test_workflow import Smtp
 model = MonthlySummaryAttempt if sys.argv[4] == 'monthly' else AccountantReportDeliveryAttempt
+settings.MARJAN_SMTP_HOST = 'smtp.example.com'
+settings.MARJAN_SMTP_PORT = 587
+settings.MARJAN_SMTP_SECURITY = 'STARTTLS'
+settings.MARJAN_SMTP_TIMEOUT_SECONDS = 12.5 if sys.argv[4] == 'monthly' else 10
+settings.MARJAN_KEYRING_SERVICE = 'marjan-smtp' if sys.argv[4] == 'monthly' else 'test-service'
 mode = sys.argv[6]
 transition_name = '_transition_monthly_summary' if sys.argv[4] == 'monthly' else '_transition_accountant_delivery'
 original = getattr(services, transition_name)
@@ -363,9 +378,8 @@ def test_frozen_content_changed_during_credentials_blocks_data(case):
     def password(_):
         type(attempt).objects.filter(pk=attempt.pk).update(body="tampered body")
         return "test-password"
-    config = SmtpConfig(host="smtp.example.com", port=587, security=SmtpSecurity.STARTTLS,
-                        timeout_seconds=10, username=attempt.sender)
-    result = operation(attempt, config, object(), password_loader=password, smtp_factory=lambda *_: Smtp(calls))
+    config, reference = current_identity(None if isinstance(attempt, MonthlySummaryAttempt) else attempt.report.company_id)
+    result = operation(attempt, config, reference, password_loader=password, smtp_factory=lambda *_: Smtp(calls))
     assert result.result == "CONFIRMED_FAILURE"
     assert not calls
 

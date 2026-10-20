@@ -581,17 +581,26 @@ def _send_pdf_email(
         validate_st_send(current, smtp_config)
     prepared = build_pdf_email(current, subject=subject, body=body)
 
+    from .verification import require_verified
+
+    def verification_check():
+        require_verified(current.invoice.company_id, smtp_config, credential_ref, current.sender)
+
+    verification_check()
     started = current
 
     def mark_started():
         nonlocal started
-        started = mark_submission_started(current)
+        with transaction.atomic():
+            verification_check()
+            started = mark_submission_started(current)
 
     result = send_prepared_email(
         prepared,
         smtp_config,
         credential_ref,
         on_submission_started=mark_started,
+        verification_check=verification_check,
         password_loader=password_loader or load_password,
         smtp_factory=smtp_factory or _default_smtp_factory,
     )
@@ -839,6 +848,12 @@ def _send_monthly_summary(
     if smtp_config.username != current.sender:
         raise ValidationError("SMTP username must match the monthly summary sender.")
     prepared = build_monthly_summary_email(current)
+    from .verification import require_verified
+
+    def verification_check():
+        require_verified(None, smtp_config, credential_ref, current.sender)
+
+    verification_check()
     started = current
 
     def mark_started():
@@ -846,18 +861,21 @@ def _send_monthly_summary(
         require_frozen_attempt(current)
         require_monthly_current(current)
         _require_active_step_6(MonthlyCycle.objects.get(pk=current.cycle_id))
-        started = _transition_monthly_summary(
-            current,
-            expected=MonthlySummaryAttempt.Result.PREPARED,
-            result=MonthlySummaryAttempt.Result.SUBMISSION_STARTED,
-            submission_started_at=timezone.now(),
-        )
+        with transaction.atomic():
+            verification_check()
+            started = _transition_monthly_summary(
+                current,
+                expected=MonthlySummaryAttempt.Result.PREPARED,
+                result=MonthlySummaryAttempt.Result.SUBMISSION_STARTED,
+                submission_started_at=timezone.now(),
+            )
 
     result = send_prepared_email(
         prepared,
         smtp_config,
         credential_ref,
         on_submission_started=mark_started,
+        verification_check=verification_check,
         password_loader=password_loader or load_password,
         smtp_factory=smtp_factory or _default_smtp_factory,
     )
@@ -1082,6 +1100,12 @@ def _send_accountant_report(
     if smtp_config.username != current.sender:
         raise ValidationError("SMTP username must match the frozen accountant delivery sender.")
     prepared = build_accountant_report_email(current)
+    from .verification import require_verified
+
+    def verification_check():
+        require_verified(current.report.company_id, smtp_config, credential_ref, current.sender)
+
+    verification_check()
     started = current
 
     def mark_started():
@@ -1094,14 +1118,17 @@ def _send_accountant_report(
         _accountant_attachment(current.report, current)
         if _blocked(current.report.company_id, current.report.period) or not report_is_current(current.report):
             raise ValidationError("Accountant delivery evidence is blocked or stale.")
-        started = _transition_accountant_delivery(
-            current, expected=AccountantReportDeliveryAttempt.Result.PREPARED,
-            result=AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED,
-            submission_started_at=timezone.now(),
-        )
+        with transaction.atomic():
+            verification_check()
+            started = _transition_accountant_delivery(
+                current, expected=AccountantReportDeliveryAttempt.Result.PREPARED,
+                result=AccountantReportDeliveryAttempt.Result.SUBMISSION_STARTED,
+                submission_started_at=timezone.now(),
+            )
 
     result = send_prepared_email(
         prepared, smtp_config, credential_ref, on_submission_started=mark_started,
+        verification_check=verification_check,
         password_loader=password_loader or load_password,
         smtp_factory=smtp_factory or _default_smtp_factory,
     )

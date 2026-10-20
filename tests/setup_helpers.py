@@ -22,6 +22,7 @@ from contracts.models import Lease, LeaseItem, Property, Unit
 from core.validators import preveri_davcno_stevilko
 from rendering.services import render_sample_pdf
 from tests.financial_fixtures import update_financial_fixture
+from tests.smtp_helpers import approve_smtp
 
 
 def preview_sample(company, lease):
@@ -90,6 +91,7 @@ def add_setup_issuers(company, lease, *, count=4):
             naziv=f"Izdajatelj {index + 2}", davcna_stevilka=tax, aktivno=True
         )
         issuer = Company.objects.create(**values)
+        approve_smtp(issuer.pk)
         signatory = Signatory.objects.filter(company=company).first()
         Signatory.objects.create(
             company=issuer,
@@ -181,6 +183,7 @@ def prepare_initial_setup(company, lease):
         explicit=True,
     )
     others = add_setup_issuers(company, lease)
+    approve_smtp(company.pk)
     if not ArchiveConfiguration.objects.exists():
         verified_archive_configuration()
     complete_initial_setup()
