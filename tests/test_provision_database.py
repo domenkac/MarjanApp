@@ -9,6 +9,7 @@ from contextlib import closing
 from pathlib import Path
 
 import pytest
+from django.db.migrations.loader import MigrationLoader
 
 REPOSITORY = Path(__file__).resolve().parents[1]
 SUCCESS = "New installation database provisioned and verified:"
@@ -49,7 +50,10 @@ def test_new_install_migrations_readiness_and_issuance(tmp_path):
         assert db.execute("PRAGMA integrity_check").fetchall() == [("ok",)]
         assert db.execute("PRAGMA foreign_key_check").fetchall() == []
         migrations = db.execute("SELECT app, name FROM django_migrations").fetchall()
-        assert len(migrations) == 50
+        # Load every installed app's graph, including Django's contenttypes.
+        expected_migrations = set(MigrationLoader(None).graph.nodes)
+        assert set(migrations) == expected_migrations
+        assert len(migrations) == len(expected_migrations)
         tables = db.execute(
             "SELECT name FROM sqlite_master WHERE type='table' AND name NOT IN "
             "('django_migrations', 'django_content_type', 'sqlite_sequence')"
@@ -68,12 +72,17 @@ def guard(event, args):
             raise RuntimeError('Unexpected database')
 sys.addaudithook(guard)
 django.setup()
+from django.db import connection
+from django.db.migrations.executor import MigrationExecutor
 from django.test import Client
 from django.test.utils import setup_test_environment
 from django.core.exceptions import ValidationError
 from django.utils import timezone
 from companies.readiness import initial_setup_completed, complete_initial_setup
 from companies.services import dodeli_naslednjo_stevilko
+executor = MigrationExecutor(connection)
+executor.loader.check_consistent_history(connection)
+assert not executor.migration_plan(executor.loader.graph.leaf_nodes())
 setup_test_environment()
 client = Client(HTTP_HOST='127.0.0.1')
 response = client.get('/', follow=True)
