@@ -1,9 +1,7 @@
 """Operational standalone ST archival through the existing two-copy archive."""
 
 from dataclasses import dataclass
-from pathlib import Path
 
-from django.conf import settings
 from django.core.exceptions import ObjectDoesNotExist
 from django.db import DatabaseError, connection
 
@@ -12,8 +10,8 @@ from invoicing.models import Invoice
 from rendering.services import stanje_koncnega_pdf
 
 from . import services
-from .configuration import ArchiveConfigurationError, resolve_archive_roots
-from .models import ArchiveConfiguration, ArchivedFile
+from .configuration import ArchiveConfigurationError, operational_archive_roots
+from .models import ArchivedFile
 
 _MESSAGES = {
     "NOT_ELIGIBLE": "Račun še ni upravičen do arhiviranja. Potrebna sta poslan samostojni ST in veljavno dokazilo dostave.",
@@ -58,24 +56,7 @@ def _invoice(invoice, company_id):
 
 
 def _configured_roots():
-    roots = resolve_archive_roots()
-    configuration = ArchiveConfiguration.objects.get(pk=1)
-    paths = [roots.local_root, roots.icloud_root]
-    for value in (settings.MEDIA_ROOT, settings.RENDERING_ROOT, configuration.dropbox_root):
-        if value:
-            path = Path(value)
-            if not path.is_absolute():
-                raise ArchiveConfigurationError("Invalid configured path.")
-            paths.append(path.resolve())
-    for index, path in enumerate(paths):
-        for other in paths[index + 1:]:
-            # Existing media/rendering arrangements are outside this operation's scope.
-            if index < 2 and (path.is_relative_to(other) or other.is_relative_to(path)):
-                raise ArchiveConfigurationError("Archive locations overlap.")
-    database = Path(connection.settings_dict["NAME"]).resolve()
-    if any(database.is_relative_to(root) for root in paths[:2]):
-        raise ArchiveConfigurationError("Archive location contains the database.")
-    return roots
+    return operational_archive_roots()
 
 
 def _inspect(invoice, company_id):
@@ -128,7 +109,7 @@ def archive_st_invoice(invoice, *, company_id):
         current, roots, state = _inspect(invoice, company_id)
         if not state.can_archive:
             return state
-        result = services.archive_pdf(current, roots, require_existing_roots=True)
+        result = services.archive_pdf(current, roots)
         return _status(
             result.state,
             can_archive=not result.success and result.state not in {

@@ -54,6 +54,32 @@ def resolve_archive_roots():
     return _roots(configuration.local_root, configuration.icloud_root)
 
 
+def operational_archive_roots():
+    """Validate the saved operational paths without creating or probing files."""
+    roots = resolve_archive_roots()
+    configuration = ArchiveConfiguration.objects.get(pk=1)
+    paths = [roots.local_root, roots.icloud_root]
+    for saved, resolved in zip(
+        (configuration.local_root, configuration.icloud_root), paths
+    ):
+        if Path(saved) != resolved:
+            raise ArchiveConfigurationError("Configured archive root was redirected.")
+    for value in (settings.MEDIA_ROOT, settings.RENDERING_ROOT, configuration.dropbox_root):
+        if value:
+            path = Path(value)
+            if not path.is_absolute():
+                raise ArchiveConfigurationError("Invalid configured path.")
+            paths.append(path.resolve())
+    for index, path in enumerate(paths[:2]):
+        for other in paths[index + 1:]:
+            if path.is_relative_to(other) or other.is_relative_to(path):
+                raise ArchiveConfigurationError("Archive locations overlap.")
+    database = Path(connection.settings_dict["NAME"]).resolve()
+    if any(database.is_relative_to(root) or root.is_relative_to(database) for root in paths[:2]):
+        raise ArchiveConfigurationError("Archive location overlaps the database.")
+    return roots
+
+
 def resolve_archive_locations() -> ArchiveLocations:
     configuration = ArchiveConfiguration.objects.filter(pk=1).first()
     if configuration is None:

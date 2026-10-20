@@ -1,10 +1,12 @@
 import hashlib
 import os
 import re
+import stat
+from contextlib import contextmanager
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
-from tempfile import NamedTemporaryFile
+from uuid import uuid4
 
 from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.db import connection, transaction
@@ -128,44 +130,112 @@ def _result(state, message, archived=None, *, paths=("", ""), checksum=""):
     )
 
 
-def _hash_file(path: Path) -> str:
+def _hash_file(path: Path, *, directory_fd=None) -> str:
     digest = hashlib.sha256()
-    with path.open("rb") as source:
+    source = (
+        path.open("rb") if directory_fd is None else os.fdopen(
+            os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=directory_fd), "rb"
+        )
+    )
+    with source:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
 
 
-def _publish(path: Path, data: bytes, checksum: str) -> None:
-    if path.exists():
-        if _hash_file(path) != checksum:
-            raise ArchiveConflict(f"Existing archive file has wrong checksum: {path}")
-        return
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = None
+def _root_identity(root: Path):
+    identity = root.stat()
+    if root.resolve(strict=True) != root or not stat.S_ISDIR(identity.st_mode):
+        raise ArchiveConflict("Configured archive root is not a safe directory.")
+    return identity.st_dev, identity.st_ino
+
+
+def _check_root(root, identity):
+    if _root_identity(root) != identity:
+        raise ArchiveConflict("Configured archive root changed during archival.")
+
+
+@contextmanager
+def _archive_parent(path, root, identity):
+    """Create descendants only; anchor POSIX operations to directory descriptors."""
+    relative = path.relative_to(root)
+    _check_root(root, identity)
+    directory_fd = None
     try:
-        with NamedTemporaryFile(
-            dir=path.parent, prefix=f".{path.name}.", delete=False
-        ) as output:
-            temporary = Path(output.name)
-            output.write(data)
-            output.flush()
-            os.fsync(output.fileno())
-        try:
-            os.link(temporary, path)
-        except FileExistsError:
-            if _hash_file(path) != checksum:
-                raise ArchiveConflict(
-                    f"Existing archive file has wrong checksum: {path}"
-                )
+        if os.name == "posix":
+            flags = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+            directory_fd = os.open(root, flags)
+            opened = os.fstat(directory_fd)
+            if (opened.st_dev, opened.st_ino) != identity:
+                raise ArchiveConflict("Configured archive root changed during archival.")
+            for component in relative.parts[:-1]:
+                try:
+                    os.mkdir(component, dir_fd=directory_fd)
+                except FileExistsError:
+                    pass
+                child_fd = os.open(component, flags, dir_fd=directory_fd)
+                os.close(directory_fd)
+                directory_fd = child_fd
+        else:
+            parent = root
+            for component in relative.parts[:-1]:
+                _check_root(root, identity)
+                if parent.resolve(strict=True) != parent or not parent.is_dir():
+                    raise ArchiveConflict("Archive directory was redirected.")
+                parent /= component
+                # Never use parents=True: a missing root must stay missing.
+                parent.mkdir(exist_ok=True)
+                if parent.resolve(strict=True) != parent or not parent.is_dir():
+                    raise ArchiveConflict("Archive directory was redirected.")
+        _check_root(root, identity)
+        if path.resolve(strict=False) != path:
+            raise ArchiveConflict("Archive target was redirected.")
+        yield directory_fd
+        _check_root(root, identity)
+        if path.resolve(strict=True) != path:
+            raise ArchiveConflict("Archive target was redirected.")
     finally:
-        if temporary is not None:
+        if directory_fd is not None:
+            os.close(directory_fd)
+
+
+def _publish(path: Path, data: bytes, checksum: str, root: Path, identity) -> None:
+    with _archive_parent(path, root, identity) as directory_fd:
+        try:
+            existing = _hash_file(path, directory_fd=directory_fd)
+        except FileNotFoundError:
+            pass
+        else:
+            if existing != checksum:
+                raise ArchiveConflict(f"Existing archive file has wrong checksum: {path}")
+            return
+        temporary = path.with_name(f".{path.name}.{uuid4().hex}")
+        at = {} if directory_fd is None else {"dir_fd": directory_fd}
+        temp_name = temporary if directory_fd is None else temporary.name
+        target_name = path if directory_fd is None else path.name
+        descriptor = os.open(temp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600, **at)
+        try:
+            with os.fdopen(descriptor, "wb") as output:
+                output.write(data)
+                output.flush()
+                os.fsync(output.fileno())
+            _check_root(root, identity)
             try:
-                temporary.unlink(missing_ok=True)
+                link_at = {} if directory_fd is None else {
+                    "src_dir_fd": directory_fd, "dst_dir_fd": directory_fd,
+                    "follow_symlinks": False,
+                }
+                os.link(temp_name, target_name, **link_at)
+            except FileExistsError:
+                if _hash_file(path, directory_fd=directory_fd) != checksum:
+                    raise ArchiveConflict(f"Existing archive file has wrong checksum: {path}")
+        finally:
+            try:
+                os.unlink(temp_name, **at)
             except OSError:
                 pass
-    if _hash_file(path) != checksum:
-        raise ArchiveConflict(f"Published archive file has wrong checksum: {path}")
+        if _hash_file(path, directory_fd=directory_fd) != checksum:
+            raise ArchiveConflict(f"Published archive file has wrong checksum: {path}")
 
 
 def _delivery_evidence(invoice: Invoice) -> DeliveryAttempt:
@@ -208,9 +278,10 @@ def _verified_source(invoice: Invoice) -> tuple[Invoice, bytes, DeliveryAttempt]
     return invoice, result.pdf_bytes, attempt
 
 
-def archive_pdf(
-    invoice: Invoice, roots: ArchiveRoots, *, require_existing_roots: bool = False
-) -> ArchiveResult:
+def archive_pdf(invoice: Invoice, roots: ArchiveRoots) -> ArchiveResult:
+    """Archive only to the saved safe roots; missing roots are never created."""
+    from .configuration import ArchiveConfigurationError, operational_archive_roots
+
     archived = None
     paths = ("", "")
     checksum = ""
@@ -220,11 +291,11 @@ def archive_pdf(
                 "Archive operation cannot run inside a DB transaction."
             )
         invoice, source, attempt = _verified_source(invoice)
-        if invoice.document_type in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
-            from .st_invoices import _configured_roots
-
-            if roots != _configured_roots():
-                raise ArchiveConflict("Correction archive roots differ from configured roots.")
+        if roots != operational_archive_roots():
+            raise ArchiveConflict("Archive roots differ from configured roots.")
+        identities = {
+            root: _root_identity(root) for root in (roots.local_root, roots.icloud_root)
+        }
         checksum = invoice.checksum
         paths = archive_paths(invoice, roots)
         identity = {
@@ -255,13 +326,12 @@ def archive_pdf(
             ("iCloud", paths[1], roots.icloud_root),
         ):
             try:
-                # ST must not recreate a missing mount or configured root.
-                if require_existing_roots and not root.is_dir():
-                    raise OSError("Configured archive root is unavailable.")
-                _publish(path, source, checksum)
+                _publish(path, source, checksum, root, identities[root])
             except (OSError, ArchiveConflict) as error:
                 errors.append(f"{label}: {error}")
-        verification = verify_archived_file(archived)
+        for root, root_identity in identities.items():
+            _check_root(root, root_identity)
+        verification = verify_archived_file(archived, roots=roots)
         if not verification.success:
             return _result(
                 verification.state,
@@ -272,6 +342,10 @@ def archive_pdf(
             )
         if attempt.pdf_checksum != checksum:
             raise ArchiveConflict("Delivery checksum changed during archival.")
+        if roots != operational_archive_roots():
+            raise ArchiveConflict("Archive configuration changed during archival.")
+        for root, root_identity in identities.items():
+            _check_root(root, root_identity)
         with transaction.atomic():
             updated = ArchivedFile.objects.filter(
                 pk=archived.pk, status__in=ArchivedFile.Status.values, **identity
@@ -288,10 +362,10 @@ def archive_pdf(
             paths=paths,
             checksum=checksum,
         )
-    except (ArchiveConflict, OSError) as error:
+    except (ArchiveConflict, ArchiveConfigurationError, OSError, ValueError, RuntimeError) as error:
         return _result(
             ArchiveState.METADATA_CONFLICT
-            if isinstance(error, ArchiveConflict)
+            if isinstance(error, (ValueError, RuntimeError))
             else ArchiveState.FAILED,
             str(error),
             archived,

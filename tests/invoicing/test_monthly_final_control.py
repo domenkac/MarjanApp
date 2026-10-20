@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from archive.configuration import resolve_archive_roots
 from archive.models import ArchivedFile
 from archive.services import ArchiveRoots
 from delivery.execution import delivery_execution_lock
@@ -29,13 +30,15 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,
 )
+from tests.setup_helpers import verified_archive_configuration
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
-def roots(tmp_path):
-    return ArchiveRoots((tmp_path / "local").resolve(), (tmp_path / "icloud").resolve())
+def roots(ready_company):
+    verified_archive_configuration()
+    return resolve_archive_roots()
 
 
 def _open_step_6(data, settings, tmp_path):

@@ -4,6 +4,7 @@ from pathlib import Path
 import pytest
 from django.db import connection
 
+from archive.configuration import resolve_archive_roots
 from archive.models import ArchivedFile
 from archive.services import ArchiveRoots, ArchiveState
 from companies.services import potrdi_ddv_nastavitve
@@ -30,14 +31,19 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,
 )
-from tests.setup_helpers import approve_sample, prepare_initial_setup
+from tests.setup_helpers import (
+    approve_sample,
+    prepare_initial_setup,
+    verified_archive_configuration,
+)
 
 pytestmark = pytest.mark.django_db(transaction=True)
 
 
 @pytest.fixture
-def roots(tmp_path):
-    return ArchiveRoots((tmp_path / "local").resolve(), (tmp_path / "icloud").resolve())
+def roots(ready_company):
+    verified_archive_configuration()
+    return resolve_archive_roots()
 
 
 def _open_step_6(data, settings, tmp_path):
@@ -66,6 +72,31 @@ def _mark_sent(invoice):
     Invoice.objects.filter(pk=invoice.pk).update(status=Invoice.Status.POSLAN)
     invoice.refresh_from_db()
     return attempt
+
+
+@pytest.mark.parametrize("missing", [("local",), ("icloud",), ("local", "icloud")])
+def test_missing_configured_roots_never_create_replacement_archive(
+    ready_company, settings, tmp_path, roots, missing
+):
+    data = ready_company
+    _freeze_ready_package(data)
+    invoice = _open_step_6(data, settings, tmp_path)[0]
+    attempt = _mark_sent(invoice)
+    before_invoice = Invoice.objects.values().get(pk=invoice.pk)
+    before_attempt = DeliveryAttempt.objects.values().get(pk=attempt.pk)
+    for side in missing:
+        getattr(roots, f"{side}_root").rmdir()
+
+    summary = arhiviraj_poslane_racune_mesecnega_cikla(data["cycle"], roots)
+
+    assert not summary["complete"]
+    assert summary["verified_count"] == 0
+    assert summary["per_invoice"][0]["archive_state"] != StanjeMesecnegaArhiva.ARCHIVE_VERIFIED
+    assert not ArchivedFile.objects.filter(status=ArchivedFile.Status.VERIFIED).exists()
+    for side in missing:
+        assert not getattr(roots, f"{side}_root").exists()
+    assert Invoice.objects.values().get(pk=invoice.pk) == before_invoice
+    assert DeliveryAttempt.objects.values().get(pk=attempt.pk) == before_attempt
 
 
 def test_one_sent_invoice_archives_without_completing_cycle(

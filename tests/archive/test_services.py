@@ -7,6 +7,7 @@ from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import connection
 
+from archive.configuration import resolve_archive_roots
 from archive.models import ArchivedFile
 from archive.services import (
     ArchiveRoots,
@@ -44,8 +45,9 @@ def sent_invoice(izdani_racun, settings, tmp_path):
 
 
 @pytest.fixture
-def roots(tmp_path):
-    return ArchiveRoots((tmp_path / "local").resolve(), (tmp_path / "icloud").resolve())
+def roots(sent_invoice):
+    # Issuance setup already probes and saves these isolated synthetic roots.
+    return resolve_archive_roots()
 
 
 def test_archive_happy_path_is_idempotent_and_immutable(sent_invoice, roots):
@@ -157,7 +159,7 @@ def test_invalid_delivery_evidence_writes_nothing(sent_invoice, roots, case):
     result = archive_pdf(invoice, roots)
     assert not result.success
     assert not ArchivedFile.objects.exists()
-    assert not roots.local_root.exists() and not roots.icloud_root.exists()
+    assert not list(roots.local_root.iterdir()) and not list(roots.icloud_root.iterdir())
 
 
 @pytest.mark.parametrize("case", ["missing", "corrupt", "checksum", "number"])
@@ -181,17 +183,19 @@ def test_one_failed_destination_is_retained_and_retry_resumes(
     sent_invoice, roots, monkeypatch, failed_side
 ):
     invoice, _, source = sent_invoice
-    original = Path.mkdir
+    from archive import services
+
+    original = services._publish
     failed_root = getattr(roots, f"{failed_side}_root")
     good_root = roots.icloud_root if failed_side == "local" else roots.local_root
 
-    def mkdir(path, *args, **kwargs):
+    def publish(path, *args, **kwargs):
         if path.is_relative_to(failed_root):
             raise OSError(f"{failed_side} unavailable")
         return original(path, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(Path, "mkdir", mkdir)
+        patch.setattr(services, "_publish", publish)
         failed = archive_pdf(invoice, roots)
     good = good_root / Path(failed.local_path).relative_to(roots.local_root)
     mtime = good.stat().st_mtime_ns
@@ -297,7 +301,7 @@ def test_unsafe_components_cannot_escape(sent_invoice, roots, company, number):
     )
     assert not archive_pdf(invoice, roots).success
     assert not ArchivedFile.objects.exists()
-    assert not roots.local_root.exists() and not roots.icloud_root.exists()
+    assert not list(roots.local_root.iterdir()) and not list(roots.icloud_root.iterdir())
 
 
 def test_company_archive_component_uses_immutable_issuer_identity(sent_invoice):

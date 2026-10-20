@@ -189,9 +189,10 @@ def test_missing_configured_root_is_not_silently_recreated(sent_st, side):
     result = archive(sent_st)
     assert not result.verified
     assert not missing.exists()
-    record = ArchivedFile.objects.get()
-    good = Path(record.icloud_path if side == "local" else record.local_path)
-    assert good.is_file() and record.status == "IN_PROGRESS"
+    # Both roots must exist before any new operational archive is started.
+    assert not ArchivedFile.objects.exists()
+    good_root = Path(config.icloud_root if side == "local" else config.local_root)
+    assert not list(good_root.iterdir())
     missing.mkdir()
     assert archive(sent_st).verified
 

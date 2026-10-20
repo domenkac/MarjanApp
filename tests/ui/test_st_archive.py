@@ -120,9 +120,9 @@ def test_atomic_requests_excludes_archive_live_get_and_manual_backup(client, sen
     monkeypatch.setitem(connection.settings_dict, "ATOMIC_REQUESTS", True)
     original_hash, original_copy = services._hash_file, backup._copy_database
 
-    def hash_outside_transaction(*args):
+    def hash_outside_transaction(*args, **kwargs):
         assert not connection.in_atomic_block
-        return original_hash(*args)
+        return original_hash(*args, **kwargs)
 
     def copy_outside_transaction(*args):
         assert not connection.in_atomic_block

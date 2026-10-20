@@ -578,6 +578,58 @@ def test_two_company_complete_success(flow):
     _finish(flow)
 
 
+def test_archive_failure_isolates_company_and_retry_preserves_valid_copies(flow, monkeypatch):
+    from archive import services as archive_services
+
+    _start_and_issue(flow)
+    _post(flow, "send_delivery")
+    beta = flow["invoices"][1]
+    beta_path = archive_services.archive_paths(
+        beta, archive_services.ArchiveRoots(*flow["roots"][:2])
+    )[1]
+    original = archive_services._publish
+    evidence = (
+        list(Invoice.objects.order_by("pk").values()),
+        list(InvoiceLine.objects.order_by("pk").values()),
+        list(DeliveryAttempt.objects.order_by("pk").values()),
+    )
+    sends = len(flow["calls"])
+
+    def unavailable(path, *args):
+        if path == beta_path:
+            raise OSError("Synthetic iCloud failure for Beta")
+        return original(path, *args)
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(archive_services, "_publish", unavailable)
+        _post(flow, "archive_sent_invoices")
+
+    alpha_record = ArchivedFile.objects.get(invoice=flow["invoices"][0])
+    beta_record = ArchivedFile.objects.get(invoice=beta)
+    assert alpha_record.status == "VERIFIED" and beta_record.status == "IN_PROGRESS"
+    assert not beta_path.exists()
+    state = services.stanje_arhiviranja_mesecnega_cikla(flow["cycle"])
+    assert not state["complete"] and state["verified_count"] == 1
+    retained = {
+        path: (Path(path).read_bytes(), Path(path).stat().st_mtime_ns)
+        for path in (alpha_record.local_path, alpha_record.icloud_path, beta_record.local_path)
+    }
+    _post(flow, "archive_sent_invoices")
+
+    assert services.stanje_arhiviranja_mesecnega_cikla(flow["cycle"])["complete"]
+    assert ArchivedFile.objects.get(invoice=beta).pk == beta_record.pk
+    assert ArchivedFile.objects.count() == 2
+    for path, original_copy in retained.items():
+        assert (Path(path).read_bytes(), Path(path).stat().st_mtime_ns) == original_copy
+    assert beta_path.read_bytes() == _rendered(flow, beta).read_bytes()
+    assert len(flow["calls"]) == sends
+    assert evidence == (
+        list(Invoice.objects.order_by("pk").values()),
+        list(InvoiceLine.objects.order_by("pk").values()),
+        list(DeliveryAttempt.objects.order_by("pk").values()),
+    )
+
+
 def test_two_company_confirmed_failure_safe_recovery(flow):
     _start_and_issue(flow)
     beta = flow["companies"][1]

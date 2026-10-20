@@ -49,7 +49,7 @@ def _operate(invoice, company_id, *, write):
         current, roots, state = _inspect(invoice, company_id)
         if not write or not state.can_archive:
             return state
-        result = services.archive_pdf(current, roots, require_existing_roots=True)
+        result = services.archive_pdf(current, roots)
         return _status(result.state, can_archive=not result.success and result.state in {
             "IN_PROGRESS", "BOTH_MISSING", "LOCAL_MISSING", "ICLOUD_MISSING", "FAILED",
         }, retry=not result.success)
