@@ -8,7 +8,7 @@ from datetime import date, timedelta
 from decimal import ROUND_HALF_UP, Decimal
 
 from django.contrib.contenttypes.models import ContentType
-from django.core.exceptions import ValidationError
+from django.core.exceptions import ObjectDoesNotExist, ValidationError
 from django.core.serializers.json import DjangoJSONEncoder
 from django.db import models, transaction
 from django.db.models import Q
@@ -880,12 +880,29 @@ def _current_review_observation(row):
         return "INVALID"
 
 
-def adjustment_approval_blockers(row):
+def negative_authorization_reason_valid(reason):
+    """Require an explanation, rather than whitespace or a confirmation marker."""
+    return (
+        isinstance(reason, str)
+        and len(reason.strip()) >= 10
+        and sum(sum(char.isalpha() for char in word) >= 2 for word in reason.split()) >= 2
+    )
+
+
+def adjustment_approval_blockers(row, *, authorize_negative=False):
     """Recheck current sources without modifying immutable evidence or observations."""
-    blockers = [reason["message"] for reason in row.unresolved_reasons]
-    if row.evidence_state != "VERIFIED":
+    negative = row.znesek_poracuna is not None and row.znesek_poracuna < 0
+    manual = authorize_negative and negative
+    expected_state = "MANUAL_REVIEW" if manual else "VERIFIED"
+    blockers = [reason["message"] for reason in row.unresolved_reasons
+                if not (manual and reason["code"] == "NEGATIVE_ADJUSTMENT")]
+    if authorize_negative and not negative:
+        blockers.append("Ročna odobritev zahteva negativen poračun.")
+    if row.status == "ZAVRNJEN":
+        blockers.append("Poračun je že zavrnjen.")
+    if row.evidence_state != expected_state:
         blockers.append(f"{row.get_evidence_state_display()}: potrditev ni dovoljena.")
-    if row.znesek_poracuna is None or row.znesek_poracuna <= 0:
+    if row.znesek_poracuna is None or row.znesek_poracuna == 0 or (negative and not manual):
         blockers.append("Potrditev zahteva preverjen pozitiven poračun.")
     if (
         row.original_invoice.company_id
@@ -901,10 +918,11 @@ def adjustment_approval_blockers(row):
         if (
             candidate.calculation_evidence != row.calculation_evidence
             or candidate.last_observation_fingerprint != row.last_observation_fingerprint
-            or candidate.evidence_state != "VERIFIED"
+            or candidate.evidence_state != expected_state
         ):
             blockers.append("Dokazila so zastarela ali niso več preverjena. Potrebna je uskladitev.")
-        blockers.extend(reason["message"] for reason in candidate.unresolved_reasons)
+        blockers.extend(reason["message"] for reason in candidate.unresolved_reasons
+                        if not (manual and reason["code"] == "NEGATIVE_ADJUSTMENT"))
     except (ValidationError, KeyError, TypeError, ValueError) as exc:
         blockers.append("Dokazila niso veljavna: " + (
             "; ".join(exc.messages) if isinstance(exc, ValidationError) else "nepopoln posnetek"
@@ -929,12 +947,14 @@ def adjustment_decision_audit(row):
 def decide_adjustment(company_id, adjustment_id, token, action, *, reason=""):
     """SQLite IMMEDIATE serializes decisions; status and audit commit together."""
     row = review_adjustments(company_id).get(pk=adjustment_id)
-    if action not in {"approve", "reject"} or not isinstance(reason, str):
+    if action not in {"approve", "authorize_negative", "reject"} or not isinstance(reason, str):
         raise ValidationError("Neveljavna odločitev poračuna.")
     reason = reason.strip()
     if action == "reject" and not reason:
         raise ValidationError("Razlog zavrnitve je obvezen.")
-    status = "POTRJEN" if action == "approve" else "ZAVRNJEN"
+    if action == "authorize_negative" and not negative_authorization_reason_valid(reason):
+        raise ValidationError("Razlog ročne odobritve mora vsebovati vsaj 10 znakov in dve besedi z vsaj dvema črkama.")
+    status = "ZAVRNJEN" if action == "reject" else "POTRJEN"
     current_token = adjustment_review_token(row)
     if row.status != "PREDLAGAN":
         audit = adjustment_decision_audit(row)
@@ -942,6 +962,7 @@ def decide_adjustment(company_id, adjustment_id, token, action, *, reason=""):
         if (
             row.status == status
             and payload.get("event") == "INDEXATION_ADJUSTMENT_DECISION"
+            and payload.get("action") == action
             and payload.get("reason") == reason
             and payload.get("decided_token") == current_token
             and token in {payload.get("review_token"), current_token}
@@ -952,8 +973,8 @@ def decide_adjustment(company_id, adjustment_id, token, action, *, reason=""):
         raise ValidationError("Pregled je zastarel. Ponovno odprite poračun.")
     if row.vkljucen_v_racun_id:
         raise ValidationError("Poračun je že povezan z računom.")
-    if action == "approve":
-        blockers = adjustment_approval_blockers(row)
+    if action in {"approve", "authorize_negative"}:
+        blockers = adjustment_approval_blockers(row, authorize_negative=action == "authorize_negative")
         if blockers:
             raise ValidationError(blockers)
     previous = {"status": row.status, "razlog_zavrnitve": row.razlog_zavrnitve}
@@ -993,6 +1014,28 @@ def unresolved_warnings(company_id):
     )
     warnings = []
     for row in rows:
+        if (row.status == "POTRJEN" and row.znesek_poracuna is not None
+                and row.znesek_poracuna < 0):
+            from invoicing.adjustments import evidence, validate_consumed
+
+            try:
+                if row.vkljucen_v_racun_id:
+                    reservation = row.reservation
+                    audit = adjustment_decision_audit(row)
+                    decision = json.loads(audit.razlog) if audit else {}
+                    if (decision.get("action") != "authorize_negative"
+                            or not negative_authorization_reason_valid(decision.get("reason"))
+                            or reservation.evidence.get("approval_audit_id") != (audit.pk if audit else None)
+                            or reservation.evidence.get("approval_token") != decision.get("decided_token")):
+                        raise ValidationError("Manjka dokazilo ročne odobritve.")
+                    invoice = row.vkljucen_v_racun
+                    validate_consumed(invoice, list(invoice.invoiceline_set.all()), review=reservation.review)
+                else:
+                    evidence(row)
+            except (ValidationError, ObjectDoesNotExist, KeyError, TypeError, ValueError):
+                pass
+            else:
+                continue
         lease = (
             row.calculation_evidence.get("lease", {}).get("reference")
             or row.indexation_event.lease_item.lease.oznaka_pogodbe

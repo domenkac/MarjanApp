@@ -12,9 +12,15 @@
 {% for warning in adjustment_warnings %}<p role="alert">{{ warning }}</p>{% endfor %}
 {% if row.status == 'PREDLAGAN' %}
 {% if not blockers %}
+{% if row.znesek_poracuna < 0 %}
+<form method="post">{% csrf_token %}<input type="hidden" name="token" value="{{ token }}"><p><label for="authorization_reason">Razlog ročne odobritve negativnega poračuna (vsaj 10 znakov in dve besedi z vsaj dvema črkama)</label> <textarea id="authorization_reason" name="reason" required minlength="10">{{ reason }}</textarea></p><button class="button-primary" name="action" value="authorize_negative">Ročno odobri negativni poračun</button></form>
+{% else %}
 <form method="post">{% csrf_token %}<input type="hidden" name="token" value="{{ token }}"><button class="button-primary" name="action" value="approve">Potrdi poračun</button></form>
+{% endif %}
 {% endif %}
 <form method="post">{% csrf_token %}<input type="hidden" name="token" value="{{ token }}"><p><label for="reason">Obvezen razlog zavrnitve</label> <textarea id="reason" name="reason" required>{{ reason }}</textarea></p><button name="action" value="reject">Zavrni poračun</button></form>
 {% endif %}
 <p>Potrditev ali zavrnitev ne spremeni dokazil in zgodovinskih računov. Zavrnitev ne razreši blokad.</p>
+<h2>Revizijska zgodovina</h2>
+<ul>{% for entry in audit_history %}<li>{{ entry.created_at|date:"d. m. Y H:i:s" }} · {{ entry.event }}{% if entry.reason %}: {{ entry.reason }}{% endif %}{% for warning in entry.warnings %}<p>{{ warning.message }}</p>{% endfor %}</li>{% endfor %}</ul>
 {% endblock %}

@@ -23,6 +23,7 @@ from django.db.migrations.executor import MigrationExecutor
 
 from companies.models import NumberSequence
 from companies.services import potrdi_ddv_nastavitve
+from contracts.adjustments import unresolved_warnings
 from contracts.indexation import confirm_batch, create_batch
 from contracts.models import IndexationEvent, Lease, PoracunIndeksacije
 from core.models import AuditLogEntry
@@ -64,8 +65,15 @@ def setup_adjustments(data, *, new="110.00", decision="approve", months=(2, 3)):
     rows = detect(event)
     for row in rows:
         if decision:
-            review_decision(row, decision, "Zavrnjeno" if decision == "reject" else "")
+            review_decision(row, decision, "Preverjena pogodba in zgodovinski obračun." if decision == "authorize_negative" else "Zavrnjeno" if decision == "reject" else "")
     return rows, sources, event
+
+
+@pytest.fixture(params=["110.00", "90.00"], ids=["positive", "negative"])
+def approved_adjustments(request):
+    def setup(data):
+        return setup_adjustments(data, new=request.param, decision="authorize_negative" if request.param == "90.00" else "approve")
+    return setup
 
 
 def refresh_sample(data, approve_sample):
@@ -90,13 +98,15 @@ def audit_count(row, event):
 
 @pytest.mark.parametrize("path", ["direct", "monthly"])
 def test_two_periods_consumed_once_with_stored_vat_and_artifacts(
-    ready_company, potrdi_septembrski_vzorec, path, settings, tmp_path,
+    ready_company, potrdi_septembrski_vzorec, path, settings, tmp_path, approved_adjustments,
 ):
     data = ready_company
-    rows, sources, event = setup_adjustments(data)
+    rows, sources, event = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     original_artifact = tmp_path / "historical.pdf"
     original_artifact.write_bytes(b"immutable historical PDF")
+    original_archive = tmp_path / "historical-archive.pdf"
+    original_archive.write_bytes(original_artifact.read_bytes())
     Invoice.objects.filter(pk__in=[line.invoice_id for line in sources]).update(
         rendered_pdf_path="historical.pdf", checksum="historical-pdf-checksum",
         rendered_eslog_path="historical.xml", rendered_eslog_checksum="historical-xml-checksum",
@@ -123,16 +133,17 @@ def test_two_periods_consumed_once_with_stored_vat_and_artifacts(
         )[0]
         review.batch.refresh_from_db()
         assert review.batch.calculation_snapshot == frozen
-    assert invoice.osnova_skupaj == Decimal("130.00")
-    assert invoice.ddv_skupaj == Decimal("28.60")
-    assert invoice.skupaj_z_ddv == Decimal("158.60")
+    net = event.nova_vrednost + sum(row.znesek_poracuna for row in rows)
+    assert invoice.osnova_skupaj == net
+    assert invoice.ddv_skupaj == net * Decimal("0.22")
+    assert invoice.skupaj_z_ddv == net * Decimal("1.22")
     assert invoice.invoiceline_set.filter(adjustment__isnull=False).count() == 2
     for row, source in zip(rows, sources, strict=True):
         row.refresh_from_db()
         line = invoice.invoiceline_set.get(adjustment=row)
         assert row.vkljucen_v_racun_id == invoice.pk
         assert line.ddv_stopnja == source.ddv_stopnja
-        assert line.ddv_znesek == Decimal("2.20")
+        assert line.ddv_znesek == row.znesek_poracuna * Decimal("0.22")
         assert f"#{source.pk}" in line.opis and source.invoice.stevilka in line.opis
         assert audit_count(row, "RESERVED") == audit_count(row, "CONSUMED") == 1
     pdf = pripravi_pdf_context(invoice)
@@ -140,22 +151,25 @@ def test_two_periods_consumed_once_with_stored_vat_and_artifacts(
     assert len(pdf.vrstice) == len(eslog.vrstice) == 3
     xml = render_eslog(invoice)
     validiraj_eslog(xml)
-    assert b"158.60" in xml and b"Pora" in xml
+    assert str(invoice.skupaj_z_ddv).encode() in xml and b"Pora" in xml
+    assert not Invoice.objects.filter(document_type__in=["STORNO", "DOBROPIS"]).exists()
     # Retry remains valid even if today's event/source context later changes.
     IndexationEvent.objects.filter(pk=event.pk).update(indeks_vrednost=Decimal("111.000"))
     assert retry().pk == invoice.pk
+    assert unresolved_warnings(data["company"].pk) == []
     assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"]) + 1
     assert list(Invoice.objects.filter(pk__in=[line.invoice_id for line in sources]).values()) == originals
     assert list(InvoiceLine.objects.filter(pk__in=[line.pk for line in sources]).values()) == source_lines
     assert original_artifact.read_bytes() == b"immutable historical PDF"
+    assert original_archive.read_bytes() == b"immutable historical PDF"
 
 
 @pytest.mark.parametrize("path", ["direct", "monthly"])
 def test_number_and_consumption_rollback_and_restart(
-    ready_company, potrdi_septembrski_vzorec, monkeypatch, path,
+    ready_company, potrdi_septembrski_vzorec, monkeypatch, path, approved_adjustments,
 ):
     data = ready_company
-    rows, _, _ = setup_adjustments(data)
+    rows, _, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     if path == "direct":
         invoice = draft(data)
@@ -184,10 +198,10 @@ def test_number_and_consumption_rollback_and_restart(
 
 @pytest.mark.parametrize("owner", ["direct", "monthly"])
 def test_competing_draft_and_frozen_candidate_cannot_claim(
-    ready_company, potrdi_septembrski_vzorec, owner,
+    ready_company, potrdi_septembrski_vzorec, owner, approved_adjustments,
 ):
     data = ready_company
-    setup_adjustments(data)
+    approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     candidate = _calculate(data)[0]
     services.premakni_mesecni_cikel(data["cycle"], MonthlyCycle.Korak.PAKETNI_PREGLED)
@@ -212,9 +226,9 @@ def test_competing_draft_and_frozen_candidate_cannot_claim(
 
 
 @pytest.mark.django_db(transaction=True)
-def test_real_concurrent_direct_and_monthly_claims(ready_company, potrdi_septembrski_vzorec):
+def test_real_concurrent_direct_and_monthly_claims(ready_company, potrdi_septembrski_vzorec, approved_adjustments):
     data = ready_company
-    setup_adjustments(data)
+    approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     candidate = _calculate(data)[0]
     services.premakni_mesecni_cikel(data["cycle"], MonthlyCycle.Korak.PAKETNI_PREGLED)
@@ -252,10 +266,10 @@ def test_real_concurrent_direct_and_monthly_claims(ready_company, potrdi_septemb
 @pytest.mark.parametrize("mutation", ["source", "vat", "recipient", "approval", "line", "reservation"])
 @pytest.mark.parametrize("path", ["direct", "monthly"])
 def test_changed_evidence_or_reservation_blocks_before_numbering(
-    ready_company, potrdi_septembrski_vzorec, mutation, path,
+    ready_company, potrdi_septembrski_vzorec, mutation, path, approved_adjustments,
 ):
     data = ready_company
-    rows, sources, _ = setup_adjustments(data)
+    rows, sources, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     if path == "direct":
         invoice = draft(data)
@@ -387,7 +401,9 @@ def test_legacy_frozen_payloads_unchanged(ready_company, version, issued):
     assert review.batch.calculation_snapshot == snapshot
 
 
-def test_late_batch_approval_only_with_complete_verified_sources(ready_company):
+@pytest.mark.parametrize("index", ["110.000", "90.000"])
+@pytest.mark.parametrize("problem", [None, "net", "period", "vat"])
+def test_late_batch_approval_only_with_complete_verified_sources(ready_company, index, problem):
     data = ready_company
     item, lease = data["item"], data["lease"]
     lease.ima_klavzulo_indeksacije = True
@@ -397,26 +413,41 @@ def test_late_batch_approval_only_with_complete_verified_sources(ready_company):
     item.datum_osnove_indeksacije = date(2026, 1, 1)
     save_financial_fixture(item)
     for month in (2, 3):
-        line = issued_line(item, month=month, net="100.00")
+        line = issued_line(item, month=month, net="95.00" if problem == "net" else "100.00", proportional=problem == "period")
         InvoiceLine.objects.filter(pk=line.pk).update(
             ddv_rezim_sifra=data["regime"].sifra,
             ddv_rekap_skupina=data["regime"].rekapitulacijska_skupina,
         )
+        if problem == "vat":
+            InvoiceLine.objects.filter(pk=line.pk).update(ddv_stopnja=Decimal("9.50"))
     before = list(Invoice.objects.values()), list(InvoiceLine.objects.values())
-    batch = create_batch(data["company"].pk, 2025, Decimal("110.000"))
+    batch = create_batch(data["company"].pk, 2025, Decimal(index))
+    if problem:
+        assert not batch.decisions.get().proposal["eligible"]
+        with pytest.raises(ValidationError, match="Blokirana"):
+            confirm_batch(batch.company_id, batch.pk, batch.revision)
+        assert not PoracunIndeksacije.objects.exists()
+        assert before == (list(Invoice.objects.values()), list(InvoiceLine.objects.values()))
+        return
     assert batch.decisions.get().proposal["eligible"]
     confirm_batch(batch.company_id, batch.pk, batch.revision)
     assert PoracunIndeksacije.objects.count() == 2
-    assert not PoracunIndeksacije.objects.exclude(evidence_state="VERIFIED").exists()
+    state = "MANUAL_REVIEW" if index == "90.000" else "VERIFIED"
+    assert not PoracunIndeksacije.objects.exclude(evidence_state=state).exists()
+    if index == "90.000":
+        for row in PoracunIndeksacije.objects.all():
+            assert row.znesek_poracuna == Decimal("-10.00")
+            review_decision(row, "authorize_negative", "Preverjena pogodba in zgodovinski obračun.")
     assert before == (list(Invoice.objects.values()), list(InvoiceLine.objects.values()))
 
 
 @pytest.mark.parametrize("path", ["direct", "monthly"])
+@pytest.mark.parametrize("new", ["110.00", "90.00"])
 def test_approval_after_draft_or_freeze_cannot_be_silently_omitted(
-    ready_company, potrdi_septembrski_vzorec, path,
+    ready_company, potrdi_septembrski_vzorec, path, new,
 ):
     data = ready_company
-    rows, _, _ = setup_adjustments(data, decision=None)
+    rows, _, _ = setup_adjustments(data, new=new, decision=None)
     refresh_sample(data, potrdi_septembrski_vzorec)
     if path == "direct":
         invoice = draft(data)
@@ -428,7 +459,7 @@ def test_approval_after_draft_or_freeze_cannot_be_silently_omitted(
             review.batch_id, review.lease_id, review.candidate_fingerprint,
         )
     for row in rows:
-        review_decision(row, "approve")
+        review_decision(row, "authorize_negative" if new == "90.00" else "approve", "Preverjena pogodba in zgodovinski obračun." if new == "90.00" else "")
     with pytest.raises(ValidationError, match="Manjka potrjen poračun"):
         issue()
     assert NumberSequence.objects.get(company=data["company"], tip="NP").zadnja_stevilka == initial_np_last(data["company"])
@@ -468,10 +499,10 @@ def test_adjustment_only_draft_is_blocked(ready_company, potrdi_septembrski_vzor
 @pytest.mark.parametrize("path", ["direct", "monthly"])
 @pytest.mark.django_db(transaction=True)
 def test_real_concurrent_issuance_is_idempotent(
-    ready_company, potrdi_septembrski_vzorec, path,
+    ready_company, potrdi_septembrski_vzorec, path, approved_adjustments,
 ):
     data = ready_company
-    rows, _, _ = setup_adjustments(data)
+    rows, _, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     if path == "direct":
         invoice = draft(data)
@@ -498,9 +529,9 @@ def test_real_concurrent_issuance_is_idempotent(
     assert all(audit_count(row, "CONSUMED") == 1 for row in rows)
 
 
-def test_competing_frozen_candidates_roll_back_all_claims(ready_company, potrdi_septembrski_vzorec):
+def test_competing_frozen_candidates_roll_back_all_claims(ready_company, potrdi_septembrski_vzorec, approved_adjustments):
     data = ready_company
-    setup_adjustments(data)
+    approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     candidate = _calculate(data)[0]
     snapshot = data["batch"].calculation_snapshot
@@ -607,9 +638,9 @@ def test_first_actual_use_is_tracked_for_no_change_and_prorated_rent(
     assert "PRVA_INDEKSACIJA" not in {item.koda for item in next_candidate.izjeme}
 
 
-def test_reservation_and_audit_roll_back_together(ready_company, potrdi_septembrski_vzorec, monkeypatch):
+def test_reservation_and_audit_roll_back_together(ready_company, potrdi_septembrski_vzorec, monkeypatch, approved_adjustments):
     data = ready_company
-    rows, _, _ = setup_adjustments(data)
+    rows, _, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     original_count = Invoice.objects.count()
 
@@ -682,10 +713,10 @@ def test_late_approval_of_completed_monthly_source_requires_exact_materializatio
 
 @pytest.mark.parametrize("through_deletion", [False, True])
 def test_cancel_reserved_draft_releases_claims_and_preserves_approval(
-    ready_company, potrdi_septembrski_vzorec, through_deletion,
+    ready_company, potrdi_septembrski_vzorec, through_deletion, approved_adjustments,
 ):
     data = ready_company
-    rows, _, _ = setup_adjustments(data)
+    rows, _, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     invoice = draft(data)
     invoice_id = invoice.pk
@@ -721,10 +752,10 @@ def test_cancel_reserved_draft_releases_claims_and_preserves_approval(
 
 @pytest.mark.parametrize("failure", ["release_audit", "deletion_audit"])
 def test_cancellation_audit_failure_rolls_back_every_change(
-    ready_company, potrdi_septembrski_vzorec, monkeypatch, failure,
+    ready_company, potrdi_septembrski_vzorec, monkeypatch, failure, approved_adjustments,
 ):
     data = ready_company
-    setup_adjustments(data)
+    approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     invoice = draft(data)
     tables = (Invoice, InvoiceLine, AdjustmentReservation, PoracunIndeksacije, AuditLogEntry)
@@ -766,10 +797,10 @@ def test_reserved_draft_deletion_requires_explicit_reason(
 
 @pytest.mark.parametrize("state", ["issued", "changed_status", "consumed", "frozen"])
 def test_cancellation_never_releases_issued_consumed_or_frozen_owners(
-    ready_company, potrdi_septembrski_vzorec, state,
+    ready_company, potrdi_septembrski_vzorec, state, approved_adjustments,
 ):
     data = ready_company
-    rows, _, _ = setup_adjustments(data)
+    rows, _, _ = approved_adjustments(data)
     refresh_sample(data, potrdi_septembrski_vzorec)
     if state == "frozen":
         _, review = _freeze_ready_package(data)

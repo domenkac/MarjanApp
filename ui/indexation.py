@@ -1,3 +1,4 @@
+import json
 from decimal import Decimal
 
 from django import forms
@@ -22,6 +23,7 @@ from contracts.indexation import (
     save_review,
 )
 from contracts.models import IndexationBatch, Lease, PoracunIndeksacije
+from core.models import AuditLogEntry
 
 
 class CompanyChoiceField(forms.ModelChoiceField):
@@ -184,7 +186,9 @@ def _review_display(row):
             if row.znesek_poracuna is not None else None
         ),
         "vat": row.calculation_evidence.get("source_line", {}),
-        "blockers": adjustment_approval_blockers(row),
+        "blockers": adjustment_approval_blockers(
+            row, authorize_negative=row.znesek_poracuna is not None and row.znesek_poracuna < 0,
+        ),
     }
 
 
@@ -243,9 +247,31 @@ def adjustment_detail(request, company_id, adjustment_id):
                 adjustment_id=adjustment_id,
             )
         row = get_object_or_404(review_adjustments(company_id), pk=adjustment_id)
+    history = []
+    for audit in AuditLogEntry.objects.filter(
+        content_type__app_label="contracts", content_type__model="poracunindeksacije",
+        object_id=row.pk,
+    ).order_by("pk"):
+        try:
+            payload = json.loads(audit.razlog)
+        except (ValueError, TypeError):
+            payload = {"reason": audit.razlog}
+        event = {
+            "INDEXATION_EVIDENCE_OBSERVATION": "Preverjanje zgodovinskih dokazil",
+            "INDEXATION_ADJUSTMENT_DECISION": {
+                "authorize_negative": "Ročna odobritev negativnega poračuna",
+                "approve": "Potrditev poračuna", "reject": "Zavrnitev poračuna",
+            }.get(payload.get("action"), "Odločitev"),
+            "INDEXATION_ADJUSTMENT_RESERVED": "Rezervacija za naslednji račun",
+            "INDEXATION_ADJUSTMENT_RELEASED": "Sprostitev rezervacije",
+            "INDEXATION_ADJUSTMENT_CONSUMED": "Vključitev v izdani račun",
+        }.get(payload.get("event"), "Revizijski zapis")
+        history.append({"created_at": audit.created_at, "event": event,
+                        "reason": payload.get("reason"), "warnings": payload.get("reasons", [])})
     return render(request, "ui/adjustment_detail.html", {
         **_review_display(row), "token": adjustment_review_token(row), "error": error,
         "reason": reason, "decision_audit": adjustment_decision_audit(row),
+        "audit_history": history,
         "adjustment_warnings": unresolved_warnings(company_id),
         "active_section": "pogodbe", "active_page": "pogodbe",
     })

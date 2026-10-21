@@ -154,11 +154,18 @@ def _late_block(item, effective_date, new_rent, index_value):
             nova_vrednost=new_rent, indeks_vrednost=index_value,
         )
         sources = list(_sources(event, month))
+        observations = [_build(event, line, month, {}) for line in sources]
         if {line.invoice_id for line in sources} != affected_ids or any(
-            _build(event, line, month, {}).evidence_state != "VERIFIED"
-            for line in sources
+            candidate.evidence_state != "VERIFIED" and not (
+                candidate.evidence_state == "MANUAL_REVIEW"
+                and candidate.znesek_poracuna < 0
+                and {reason["code"] for reason in candidate.unresolved_reasons} == {"NEGATIVE_ADJUSTMENT"}
+            )
+            for candidate in observations
         ):
             return "Izdan račun v prizadetem obdobju: T2-C zahteva popolna preverjena dokazila; pozna indeksacija je blokirana."
+        # A negative-only observation may be queued, but still needs a separate
+        # audited manual authorization before it can reach any future invoice.
     return ""
 
 

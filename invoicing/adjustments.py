@@ -7,12 +7,14 @@ from decimal import Decimal
 from django.contrib.contenttypes.models import ContentType
 from django.core.exceptions import ValidationError
 from django.db import connection, models, transaction
+from django.db.models import Q
 from django.utils import timezone
 
 from contracts.adjustments import (
     adjustment_approval_blockers,
     adjustment_decision_audit,
     adjustment_review_token,
+    negative_authorization_reason_valid,
     review_adjustments,
 )
 from contracts.models import IndexationEvent
@@ -33,15 +35,17 @@ def _require_transaction():
 
 def outstanding(lease_id, period_start):
     return review_adjustments().filter(
+        Q(evidence_state="VERIFIED", znesek_poracuna__gt=0)
+        | Q(evidence_state="MANUAL_REVIEW", znesek_poracuna__lt=0),
         indexation_event__lease_item__lease_id=lease_id,
         status="POTRJEN", vkljucen_v_racun__isnull=True,
-        evidence_state="VERIFIED", znesek_poracuna__gt=0,
         prizadeto_obdobje_do__lt=period_start,
     ).order_by("prizadeto_obdobje_od", "pk")
 
 
 def evidence(row):
-    blockers = adjustment_approval_blockers(row)
+    negative = row.znesek_poracuna is not None and row.znesek_poracuna < 0
+    blockers = adjustment_approval_blockers(row, authorize_negative=negative)
     if row.status != "POTRJEN":
         blockers.append("Poračun ni potrjen.")
     audit = adjustment_decision_audit(row)
@@ -51,7 +55,8 @@ def evidence(row):
         decision = {}
     if (
         decision.get("event") != "INDEXATION_ADJUSTMENT_DECISION"
-        or decision.get("action") != "approve"
+        or decision.get("action") != ("authorize_negative" if negative else "approve")
+        or (negative and not negative_authorization_reason_valid(decision.get("reason")))
         or decision.get("decided_token") != adjustment_review_token(row)
     ):
         blockers.append("Potrditev poračuna ni več skladna z dokazili.")
@@ -257,6 +262,9 @@ def validate_before_numbering(invoice, lines, *, review=None):
         raise ValidationError("Vrstica poračuna nima skladne identitete.")
     if not regular:
         raise ValidationError("Samostojen račun za poračun ni dovoljen.")
+    if (any(line.adjustment_id and line.osnova < 0 for line in lines)
+            and sum((line.skupaj for line in lines), Decimal("0.00")) <= 0):
+        raise ValidationError("Negativni poračun zahteva pozitiven skupni znesek NP računa; potrebna je računovodska odločitev.")
     validate_indexed_rent(invoice, lines)
     rows = list(outstanding(invoice.lease_id, invoice.obdobje_od))
     snapshots = [evidence(row) for row in rows]
@@ -288,6 +296,13 @@ def validate_before_numbering(invoice, lines, *, review=None):
         if any(getattr(invoice, field) != value for field, value in source.items()
                if field.startswith("prejemnik_")):
             raise ValidationError("Prejemnik poračuna se ne ujema z računom.")
+        if any(getattr(invoice, field) != value for field, value in source.items()
+               if field in {
+                   "izdajatelj_naziv", "izdajatelj_naslov", "izdajatelj_drzava_koda",
+                   "izdajatelj_identificiran_za_ddv", "izdajatelj_davcna_stevilka",
+                   "izdajatelj_maticna_stevilka",
+               } and value not in (None, "")):
+            raise ValidationError("Izdajatelj poračuna se ne ujema z računom.")
     return reservations
 
 
