@@ -15,6 +15,7 @@ from archive.configuration import (
 )
 from archive.models import ArchiveConfiguration, ArchivedFile
 from companies import readiness
+from companies.issuance_assets import prepare_issuance_assets
 from companies.models import (
     Company,
     CompanySampleConfirmation,
@@ -24,7 +25,6 @@ from companies.models import (
     SamplePdfPreview,
 )
 from companies.services import (
-    dodeli_naslednjo_stevilko,
     potrdi_ddv_nastavitve,
     potrdi_vzorec_podjetja,
     veljavna_potrditev_vzorca,
@@ -45,6 +45,7 @@ from tests.setup_helpers import (
     preview_sample,
     verified_archive_configuration,
 )
+from tests.setup_helpers import allocate_verified_number as dodeli_naslednjo_stevilko
 from tests.smtp_helpers import approve_smtp
 from tests.ui import test_company_confirmations
 
@@ -234,6 +235,7 @@ def test_ui_resume_restart_and_repeated_finish_recompute_current_data(
     assert client.post(url, {"action": "restart"}).status_code == 302
     assert SetupNavigation.objects.get().step == "company"
     assert InitialSetupCompletion.objects.count() == 1
+    data.company.refresh_from_db()
     data.company.trr = "invalid"
     save_financial_fixture(data.company)
     response = client.post(url, {"action": "finish"})
@@ -270,10 +272,14 @@ def test_allocation_and_completion_really_roll_back(five_issuers):
     data, _ = five_issuers
     with pytest.raises(RuntimeError), transaction.atomic():
         readiness.complete_initial_setup()
-        assert dodeli_naslednjo_stevilko(data.company, "NP", date(2026, 10, 1)) == 43
         raise RuntimeError("rollback")
     assert not InitialSetupCompletion.objects.exists()
     assert not AuditLogEntry.objects.filter(polje="initial_setup").exists()
+    readiness.complete_initial_setup()
+    assets = prepare_issuance_assets(data.company, date(2026, 10, 1))
+    with pytest.raises(RuntimeError), transaction.atomic():
+        assert dodeli_naslednjo_stevilko(data.company, "NP", date(2026, 10, 1), asset_evidence=assets) == 43
+        raise RuntimeError("rollback")
     assert (
         NumberSequence.objects.get(company=data.company, tip="NP").zadnja_stevilka == 42
     )
@@ -354,14 +360,14 @@ def test_actual_allocation_rechecks_after_outer_validation(five_issuers, monkeyp
     readiness.complete_initial_setup()
     allocate = dodeli_naslednjo_stevilko
 
-    def change_then_allocate(company, tip, issue_date):
+    def change_then_allocate(company, tip, issue_date, **kwargs):
         update_financial_fixture(Company.objects.filter(pk=company.pk), naziv="Spremenjeno med izdajo")
-        return allocate(company, tip, issue_date)
+        return allocate(company, tip, issue_date, **kwargs)
 
     monkeypatch.setattr(
         "invoicing.services.dodeli_naslednjo_stevilko", change_then_allocate
     )
-    with pytest.raises(ValidationError, match="Potrditev vzorca"):
+    with pytest.raises(ValidationError, match="zastarelo"):
         issue_np(data)
     assert Invoice.objects.get().stevilka is None
     assert (

@@ -198,3 +198,14 @@ def initial_np_last(company):
 
 def first_np_number(company):
     return f"NP-{initial_np_last(company) + 1:05d}"
+
+
+def allocate_verified_number(company, tip, datum_izdaje, *, asset_evidence=None):
+    """Exercise the domain allocator with real asset verification before its lock."""
+    from companies.issuance_assets import prepare_issuance_assets
+
+    if asset_evidence is None:
+        asset_evidence = prepare_issuance_assets(company, datum_izdaje)
+    return services.dodeli_naslednjo_stevilko(
+        company, tip, datum_izdaje, asset_evidence=asset_evidence,
+    )

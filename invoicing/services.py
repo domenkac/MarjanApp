@@ -18,11 +18,17 @@ from django.utils import timezone
 
 from archive.models import BackupSnapshot
 from catalogs.models import ESLOG_KODE_DDV, ServiceCatalogItem, VatRegime
+from companies.issuance_assets import (
+    prepare_issuance_assets,
+    record_values,
+    require_outside_transaction,
+    validate_issuance_assets,
+)
 from companies.models import Company, NumberSequence
 from companies.services import (
+    _kanonicni_fingerprint,
     dodeli_naslednjo_stevilko,
     izberi_veljavnega_podpisnika,
-    shrani_nespremenljiv_asset,
     veljavna_potrditev_ddv,
     veljavna_potrditev_vzorca,
     veljavni_podpisniki_na_dan,
@@ -1328,6 +1334,14 @@ def pripravi_osnutek_np(
     return PripravaOsnutka(invoice)
 
 
+def _np_issuance_fingerprint(invoice):
+    return _kanonicni_fingerprint({
+        "invoice": record_values(invoice),
+        "lines": list(invoice.invoiceline_set.order_by("pk").values()),
+        "lease": Lease.objects.values().get(pk=invoice.lease_id),
+    })
+
+
 @transaction.atomic
 def _potrdi_osnutek_np(
     osnutek: Invoice,
@@ -1337,6 +1351,8 @@ def _potrdi_osnutek_np(
     logo_pot: str,
     podpis_vir: str,
     podpis_pot: str,
+    asset_evidence,
+    source_fingerprint: str,
 ) -> Invoice:
     existing = Invoice.objects.get(pk=osnutek.pk)
     if (existing.document_type == Invoice.DocumentType.NP and existing.stevilka
@@ -1344,6 +1360,12 @@ def _potrdi_osnutek_np(
         adjustment_services.validate_consumed(existing, list(existing.invoiceline_set.all()))
         return existing
     invoice = preveri_uredljiv_osnutek(osnutek)
+    if _np_issuance_fingerprint(invoice) != source_fingerprint:
+        raise ValidationError("NP osnutek se je med preverjanjem spremenil.")
+    if validate_issuance_assets(invoice.company, invoice.datum_izdaje, asset_evidence) != {
+        logo_vir: logo_pot, podpis_vir: podpis_pot,
+    }:
+        raise ValidationError("Reference NP assetov niso skladne z dokazilom.")
     if invoice.document_type != Invoice.DocumentType.NP:
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
     if invoice.lease_id is None:
@@ -1407,7 +1429,8 @@ def _potrdi_osnutek_np(
     invoice.izdajatelj_podpisnik_slika_pot = podpis_pot
     invoice.pdf_template_version = settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(
-        invoice.company, NumberSequence.Tip.NP, invoice.datum_izdaje
+        invoice.company, NumberSequence.Tip.NP, invoice.datum_izdaje,
+        asset_evidence=asset_evidence,
     )
     invoice.stevilka = f"NP-{zaporedna:05d}"
     invoice.status = Invoice.Status.IZBRAN_ZA_POSILJANJE
@@ -1432,6 +1455,7 @@ def _potrdi_osnutek_np(
 
 
 def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
+    require_outside_transaction()
     existing = Invoice.objects.get(pk=osnutek.pk)
     if existing.document_type != Invoice.DocumentType.NP:
         raise ValueError("Potrditi je mogoče samo NP osnutek.")
@@ -1456,8 +1480,10 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
     )
     logo_vir = invoice.company.logotip.name
     podpis_vir = podpisnik.podpis_slika.name
-    logo_pot = shrani_nespremenljiv_asset(logo_vir)
-    podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
+    source_fingerprint = _np_issuance_fingerprint(invoice)
+    assets = prepare_issuance_assets(invoice.company, invoice.datum_izdaje)
+    logo_pot = assets[logo_vir]
+    podpis_pot = assets[podpis_vir]
     return _potrdi_osnutek_np(
         osnutek,
         podpisnik_id=podpisnik.pk,
@@ -1465,6 +1491,8 @@ def potrdi_osnutek_np(osnutek: Invoice) -> Invoice:
         logo_pot=logo_pot,
         podpis_vir=podpis_vir,
         podpis_pot=podpis_pot,
+        asset_evidence=assets,
+        source_fingerprint=source_fingerprint,
     )
 
 
@@ -1624,15 +1652,18 @@ def _potrdi_korekcijski_osnutek(
     logo_pot: str,
     podpis_vir: str,
     podpis_pot: str,
-    expected_fingerprint: str | None = None,
-    asset_evidence: dict | None = None,
+    expected_fingerprint: str,
+    asset_evidence,
 ) -> Invoice:
     invoice = preveri_uredljiv_osnutek(osnutek)
-    if expected_fingerprint is not None:
-        from .correction_review import correction_fingerprint
+    if validate_issuance_assets(invoice.company, invoice.datum_izdaje, asset_evidence) != {
+        logo_vir: logo_pot, podpis_vir: podpis_pot,
+    }:
+        raise ValidationError("Reference korekcijskih assetov niso skladne z dokazilom.")
+    from .correction_review import correction_fingerprint
 
-        if correction_fingerprint(invoice) != expected_fingerprint:
-            raise ValueError("Pregled korekcijskega osnutka je zastarel.")
+    if correction_fingerprint(invoice) != expected_fingerprint:
+        raise ValueError("Pregled korekcijskega osnutka je zastarel.")
     if (
         invoice.document_type
         not in (
@@ -1660,7 +1691,7 @@ def _potrdi_korekcijski_osnutek(
                 or invoice.rendered_eslog_checksum or invoice.dostavni_kontakti_snapshot
                 or invoice.rok_placila is not None or invoice.pdf_template_version):
             raise ValidationError("Osnutek korekcije ST vsebuje nepodprte izdane podatke.")
-        if asset_evidence != {logo_vir: logo_pot, podpis_vir: podpis_pot}:
+        if asset_evidence.references != {logo_vir: logo_pot, podpis_vir: podpis_pot}:
             raise ValidationError("Manjkajo predhodno preverjeni asseti korekcije ST.")
     else:
         invoice.eslog_konfiguracija_snapshot = _razresi_eslog_snapshot(invoice)
@@ -1723,7 +1754,7 @@ def _potrdi_korekcijski_osnutek(
     invoice.izdajatelj_podpisnik_slika_pot = podpis_pot
     invoice.pdf_template_version = settings.ST_PDF_TEMPLATE_VERSION if standalone_st else settings.PDF_TEMPLATE_VERSION
     zaporedna = dodeli_naslednjo_stevilko(
-        invoice.company, tip, invoice.datum_izdaje, **({"asset_evidence": asset_evidence} if standalone_st else {}),
+        invoice.company, tip, invoice.datum_izdaje, asset_evidence=asset_evidence,
     )
     if tip == Invoice.DocumentType.NP:
         invoice.stevilka = f"NP-{zaporedna:05d}"
@@ -1755,6 +1786,9 @@ def _potrdi_korekcijski_osnutek(
 def potrdi_korekcijski_osnutek(
     osnutek: Invoice, *, expected_fingerprint: str | None = None,
 ) -> Invoice:
+    require_outside_transaction()
+    from .correction_review import correction_fingerprint
+
     invoice = preveri_uredljiv_osnutek(osnutek)
     if invoice.document_type not in (Invoice.DocumentType.STORNO, Invoice.DocumentType.DOBROPIS):
         raise ValueError("Račun ni korekcijski osnutek.")
@@ -1766,7 +1800,9 @@ def potrdi_korekcijski_osnutek(
     from .corrections import standalone_original
 
     original = _preveri_izvirnik_korekcije(invoice.povezan_racun)
-    asset_evidence = None
+    fingerprint = correction_fingerprint(invoice)
+    if expected_fingerprint is not None and expected_fingerprint != fingerprint:
+        raise ValidationError("Pregled korekcijskega osnutka je zastarel.")
     if standalone_original(original):
         from .st_confirmation import _assets, _outside_transaction
 
@@ -1775,8 +1811,9 @@ def potrdi_korekcijski_osnutek(
         logo_pot = asset_evidence[logo_vir]
         podpis_pot = asset_evidence[podpis_vir]
     else:
-        logo_pot = shrani_nespremenljiv_asset(logo_vir)
-        podpis_pot = shrani_nespremenljiv_asset(podpis_vir)
+        asset_evidence = prepare_issuance_assets(invoice.company, invoice.datum_izdaje)
+        logo_pot = asset_evidence[logo_vir]
+        podpis_pot = asset_evidence[podpis_vir]
     return _potrdi_korekcijski_osnutek(
         osnutek,
         podpisnik_id=podpisnik.pk,
@@ -1784,7 +1821,7 @@ def potrdi_korekcijski_osnutek(
         logo_pot=logo_pot,
         podpis_vir=podpis_vir,
         podpis_pot=podpis_pot,
-        expected_fingerprint=expected_fingerprint,
+        expected_fingerprint=fingerprint,
         asset_evidence=asset_evidence,
     )
 
@@ -3381,7 +3418,30 @@ def stanje_zamrznjenega_mesecnega_kandidata(
     return {"state": state, "invoice": invoice, "error": error}
 
 
+def _materialization_fingerprint(batch, review):
+    return _kanonicni_fingerprint({
+        "batch": record_values(batch),
+        "review": record_values(review),
+        "cycle": record_values(batch.cycle),
+    })
+
+
 def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidate_fingerprint):
+    require_outside_transaction()
+    batch, _, review, prepared, fields = _nalozi_podatke_materializacije(
+        batch_id, lease_id, candidate_fingerprint,
+    )
+    state, _, error = _obstojece_stanje_materializacije(batch, review, prepared, fields)
+    if state == "CONFLICT":
+        raise ValidationError(error)
+    fingerprint = _materialization_fingerprint(batch, review)
+    assets = None
+    if review.selected and state == "PENDING":
+        frozen_paths = (fields["izdajatelj_logotip_slika_pot"], fields["izdajatelj_podpisnik_slika_pot"])
+        try:
+            assets = prepare_issuance_assets(batch.company, prepared["issue_date"], frozen_paths=frozen_paths)
+        except (OSError, ValueError) as error:
+            raise ValidationError("Zamrznjeni asset ni dostopen ali ni veljaven.") from error
     with transaction.atomic():
         batch, _candidate, review, prepared, fields = (
             _nalozi_podatke_materializacije(
@@ -3399,14 +3459,22 @@ def materializiraj_zamrznjenega_mesecnega_kandidata(batch_id, lease_id, candidat
                     invoice, list(invoice.invoiceline_set.all()), review=review,
                 )
             return invoice, True
+        if _materialization_fingerprint(batch, review) != fingerprint:
+            raise ValidationError("Zamrznjeni kandidat se je med preverjanjem spremenil.")
         if review.selected:
+            validate_issuance_assets(
+                batch.company, prepared["issue_date"], assets,
+                frozen_paths=(fields["izdajatelj_logotip_slika_pot"], fields["izdajatelj_podpisnik_slika_pot"]),
+            )
             require_confirmed_renewal(lease_id, prepared["period_end"])
             reservations = adjustment_services.validate_before_numbering(
                 Invoice(**fields),
                 [InvoiceLine(lease_id=lease_id, **line) for line in prepared["lines"]],
                 review=review,
             )
-            zaporedna = dodeli_naslednjo_stevilko(batch.company, NumberSequence.Tip.NP, prepared["issue_date"])
+            zaporedna = dodeli_naslednjo_stevilko(
+                batch.company, NumberSequence.Tip.NP, prepared["issue_date"], asset_evidence=assets,
+            )
             fields["stevilka"] = f"NP-{zaporedna:05d}"
         else:
             fields["stevilka"] = None

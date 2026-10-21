@@ -520,9 +520,12 @@ def shrani_nespremenljiv_asset(pot: str) -> str:
 
 @transaction.atomic
 def dodeli_naslednjo_stevilko(company, tip, datum_izdaje, *, asset_evidence=None):
+    from .issuance_assets import validate_issuance_assets
     from .readiness import require_issuance_readiness
 
-    require_issuance_readiness(company, datum_izdaje, tip=tip, asset_evidence=asset_evidence)
+    # No implicit storage fallback, even for standalone domain callers.
+    references = validate_issuance_assets(company, datum_izdaje, asset_evidence)
+    require_issuance_readiness(company, datum_izdaje, tip=tip, asset_evidence=references)
     leto = datum_izdaje.year if tip == NumberSequence.Tip.ST else 0
     zaporedje, _ = NumberSequence.objects.get_or_create(
         company=company,

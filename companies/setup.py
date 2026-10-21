@@ -29,7 +29,7 @@ def issuer_setup_issues(company, today, *, asset_evidence=None):
             )
 
     def asset_exists(name):
-        # ST supplies assets verified before acquiring the numbering lock.
+        # Number allocation supplies references from sealed preflight evidence.
         return name in asset_evidence if asset_evidence is not None else _asset_exists(name)
 
     if not asset_exists(company.logotip.name):

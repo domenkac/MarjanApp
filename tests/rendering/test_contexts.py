@@ -195,7 +195,7 @@ def test_mesecni_pdf_context_brez_obveznega_snapshota_fail_closed(
 
 
 @pytest.fixture
-def izdani_racun(db, tmp_path, settings):
+def izdani_racun(transactional_db, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
     (tmp_path / "logo.png").write_bytes(VALID_PNG_LOGO)
     (tmp_path / "podpis.png").write_bytes(VALID_PNG_PODPIS)

@@ -16,13 +16,13 @@ from django.utils import timezone
 
 from companies.models import InitialSetupCompletion, NumberSequence
 from companies.readiness import complete_initial_setup, initial_setup_completed
-from companies.services import dodeli_naslednjo_stevilko
 from core.models import AuditLogEntry
 from invoicing.models import Invoice
 from tests.companies.test_setup_readiness import (
     five_issuers as five_issuers,  # noqa: PLC0414
 )
 from tests.financial_fixtures import save_financial_fixture
+from tests.setup_helpers import allocate_verified_number as dodeli_naslednjo_stevilko
 from tests.ui.test_setup import URL, select_chain
 from tests.ui.test_setup import setup_data as setup_data  # noqa: PLC0414
 from ui.models import SetupNavigation

@@ -27,7 +27,7 @@ PNG = base64.b64decode(
 
 
 @pytest.fixture
-def confirmation_ui_data(db, settings, tmp_path):
+def confirmation_ui_data(transactional_db, settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     settings.RENDERING_ROOT = tmp_path / "rendered"
     (tmp_path / "logo.png").write_bytes(PNG)

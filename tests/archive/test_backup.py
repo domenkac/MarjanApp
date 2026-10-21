@@ -632,7 +632,8 @@ def test_backup_warning_does_not_bypass_incomplete_initial_setup(
     assert response.status_code == 302
     assert response.url == "/zacetna-nastavitev/"
     for tip in ("NP", "ST"):
-        with pytest.raises(ValidationError, match="Začetna nastavitev"):
+        # An unconfigured installation cannot supply trusted asset preflight.
+        with pytest.raises(ValidationError, match="dokazilo assetov"):
             dodeli_naslednjo_stevilko(company, tip, date(2026, 10, 8))
     assert MonthlyCycle.objects.values().get(pk=cycle.pk) == before
     assert not InitialSetupCompletion.objects.exists()

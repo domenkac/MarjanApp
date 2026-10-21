@@ -494,7 +494,7 @@ def test_change_between_asset_preparation_and_lock_is_rejected(ready):
 
 def test_st_cannot_enter_np_or_correction_confirmation(ready):
     invoice = draft(ready)
-    with patch("invoicing.services.shrani_nespremenljiv_asset", side_effect=AssertionError):
+    with patch("companies.issuance_assets.shrani_nespremenljiv_asset", side_effect=AssertionError):
         for service in (potrdi_osnutek_np, potrdi_korekcijski_osnutek):
             with pytest.raises(ValueError):
                 service(invoice)

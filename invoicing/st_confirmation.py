@@ -14,12 +14,12 @@ from django.core.exceptions import ValidationError
 from django.db import connection, transaction
 
 from catalogs.models import VatRegime
+from companies.issuance_assets import prepare_issuance_assets, validate_issuance_assets
 from companies.models import NumberSequence
 from companies.services import (
     _kanonicni_fingerprint,
     dodeli_naslednjo_stevilko,
     izberi_veljavnega_podpisnika,
-    shrani_nespremenljiv_asset,
 )
 from contracts.models import Tenant
 from contracts.vat_eligibility import preveri_upravicenost_prejemnika
@@ -214,16 +214,7 @@ def _outside_transaction():
 
 
 def _assets(invoice, signatory):
-    evidence = {}
-    for path, checksum in (
-        (invoice.company.logotip.name, invoice.company.logotip_checksum),
-        (signatory.podpis_slika.name, signatory.podpis_checksum),
-    ):
-        immutable = shrani_nespremenljiv_asset(path)
-        if not checksum or immutable != f"nespremenljivi-asseti/{checksum}":
-            raise ValidationError("Vsebina logotipa ali podpisa se ne ujema s preverjenim vzorcem.")
-        evidence[path] = immutable
-    return evidence
+    return prepare_issuance_assets(invoice.company, invoice.datum_izdaje)
 
 
 def preglej_osnutek_st(
@@ -240,9 +231,10 @@ def preglej_osnutek_st(
     with transaction.atomic():
         if _state(osnutek)[1] != fingerprint:
             raise ValidationError("Pregled ST je zastarel.")
+        validate_issuance_assets(invoice.company, invoice.datum_izdaje, assets)
         return AuditLogEntry.objects.create(
             content_type=ContentType.objects.get_for_model(Invoice), object_id=invoice.pk,
-            polje=_REVIEW_FIELD, nova_vrednost=json.dumps({"fingerprint": fingerprint, "assets": assets}),
+            polje=_REVIEW_FIELD, nova_vrednost=json.dumps({"fingerprint": fingerprint, "assets": assets.references}),
             razlog="Izrecen posamični pregled shranjenega ST osnutka.",
         )
 
@@ -295,12 +287,13 @@ def potrdi_osnutek_st(osnutek: Invoice, *, pregled: AuditLogEntry | None = None)
     reread revalidates the review, snapshots and every production readiness gate.
     """
     _outside_transaction()
-    invoice, signatory, _, assets, _ = _review(osnutek, pregled)
-    if _assets(invoice, signatory) != assets:
+    invoice, signatory, _, reviewed, _ = _review(osnutek, pregled)
+    assets = _assets(invoice, signatory)
+    if assets.references != reviewed:
         raise ValidationError("Asseti pregleda ST so zastareli.")
     with transaction.atomic():
         invoice, signatory, final, reviewed_assets, references = _review(osnutek, pregled)
-        if reviewed_assets != assets:
+        if reviewed_assets != assets.references:
             raise ValidationError("Pregled ST je zastarel.")
         invoice.izdajatelj_logotip_slika_pot = assets[invoice.company.logotip.name]
         invoice.izdajatelj_podpisnik_slika_pot = assets[signatory.podpis_slika.name]

@@ -61,7 +61,7 @@ PNG = base64.b64decode(
 
 
 @pytest.fixture
-def ready_company(db, settings, tmp_path):
+def ready_company(transactional_db, settings, tmp_path):
     settings.MEDIA_ROOT = tmp_path
     (tmp_path / "logo.png").write_bytes(PNG)
     (tmp_path / "signature.png").write_bytes(PNG)
@@ -1884,8 +1884,11 @@ def test_line_creation_failure_rolls_back_invoice_and_number(
 
 def test_direct_materialization_rejects_blocked_stale_batch(ready_company):
     data = ready_company
-    _company, stale_batch = _add_ready_company(data)
     prepare_initial_setup(data["company"], data["lease"])
+    _company, stale_batch = _add_ready_company(data)
+    from tests.smtp_helpers import approve_smtp
+
+    approve_smtp(_company.pk)
     candidates = _calculate(data)
     data["cycle"].trenutni_korak = MonthlyCycle.Korak.PAKETNI_PREGLED
     data["cycle"].save(update_fields=["trenutni_korak"])

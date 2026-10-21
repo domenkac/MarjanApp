@@ -7,10 +7,10 @@ from django.core.exceptions import ValidationError
 from django.db import transaction
 
 from catalogs.models import VatRegime
+from companies import issuance_assets
 from companies.models import Company, NumberSequence, Signatory
-from companies.services import potrdi_ddv_nastavitve
+from companies.services import potrdi_ddv_nastavitve, pripravi_fingerprint_predogleda
 from contracts.models import Lease, LeaseItem, Property, Tenant, Unit
-from invoicing import services as invoicing_services
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.rendering import nastavi_eslog_artifact
 from invoicing.services import (
@@ -34,7 +34,7 @@ DATUM_IZDAJE = date(2026, 9, 1)
 
 
 @pytest.fixture
-def pogodba(db, tmp_path, settings):
+def pogodba(transactional_db, tmp_path, settings):
     settings.MEDIA_ROOT = tmp_path
     (tmp_path / "logo.png").write_bytes(slika_bytes())
     (tmp_path / "podpis.png").write_bytes(slika_bytes())
@@ -411,6 +411,7 @@ def test_potrditev_ne_prebere_tipa_in_ddv_rezima_iz_zivih_modelov(pogodba):
 def test_potrditev_zavrne_manjkajoco_ali_napacno_eslog_kodo(pogodba, koda):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    pripravi_fingerprint_predogleda(invoice.company, invoice.lease, datum_izdaje=invoice.datum_izdaje)
     InvoiceLine.objects.filter(invoice=invoice).update(ddv_eslog_koda=koda)
 
     with pytest.raises(ValueError, match="eSLOG kod"):
@@ -549,12 +550,13 @@ def test_ostevilcen_osnutek_se_ne_popravlja_tiho(pogodba):
 def test_osnutek_brez_vrstic_je_zavrnjen(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     InvoiceLine.objects.filter(invoice=invoice).delete()
 
     with pytest.raises(ValueError):
         potrdi_osnutek_np(invoice)
 
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
 
 
 def test_drug_tip_dokumenta_je_zavrnjen(pogodba):
@@ -606,14 +608,14 @@ def test_np_nespremenljive_assete_pripravi_zunaj_transakcije(
 ):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
-    shrani = invoicing_services.shrani_nespremenljiv_asset
+    shrani = issuance_assets.shrani_nespremenljiv_asset
     globina = len(transaction.get_connection().atomic_blocks)
 
     def preveri(pot):
         assert len(transaction.get_connection().atomic_blocks) == globina
         return shrani(pot)
 
-    monkeypatch.setattr(invoicing_services, "shrani_nespremenljiv_asset", preveri)
+    monkeypatch.setattr(issuance_assets, "shrani_nespremenljiv_asset", preveri)
 
     prepare_initial_setup(invoice.company, invoice.lease)
     assert potrdi_osnutek_np(invoice).stevilka == "NP-00001"
@@ -679,6 +681,7 @@ def test_np_neveljaven_koncni_podpisnik_ne_porabi_stevilke(
 def test_np_potrditev_zavrne_neskladno_vsoto_vrstice(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     vrstica = InvoiceLine.objects.get(invoice=invoice)
     spremeni_vrstico(vrstica, skupaj=Decimal("999.00"))
 
@@ -687,18 +690,19 @@ def test_np_potrditev_zavrne_neskladno_vsoto_vrstice(pogodba):
 
     invoice.refresh_from_db()
     assert (invoice.stevilka, invoice.status) == (None, Invoice.Status.OSNUTEK)
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
 
 
 def test_np_potrditev_zavrne_vrstico_brez_izvorne_postavke(pogodba):
     dodaj_postavko(pogodba)
     invoice = pripravi(pogodba).invoice
+    prepare_initial_setup(invoice.company, invoice.lease)
     InvoiceLine.objects.filter(invoice=invoice).update(lease_item=None)
 
     with pytest.raises(ValueError, match="postavko"):
         potrdi_osnutek_np(invoice)
 
-    assert not NumberSequence.objects.exists()
+    assert not NumberSequence.objects.filter(zadnja_stevilka__gt=0).exists()
 
 
 def test_np_potrditev_zavrne_podjetje_drugo_od_pogodbe(pogodba):
@@ -862,6 +866,7 @@ def test_potrditev_zavrne_mesanje_o_in_obdavcene_pred_stevilcenjem(pogodba):
     dodaj_postavko(pogodba, nacin="OBDAVCENO")
     dodaj_postavko(pogodba, nacin="NI_PREDMET")
     invoice = pripravi(pogodba).invoice
+    pripravi_fingerprint_predogleda(invoice.company, invoice.lease, datum_izdaje=invoice.datum_izdaje)
 
     with pytest.raises(ValueError, match="kategorije O in obdavčenih"):
         potrdi_osnutek_np(invoice)

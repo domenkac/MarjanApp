@@ -6,8 +6,8 @@ import pytest
 from django.core.exceptions import ValidationError
 from django.db import transaction
 
+from companies import issuance_assets
 from companies.models import NumberSequence, Signatory
-from invoicing import services as invoicing_services
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     dodaj_vrstico,
@@ -235,14 +235,14 @@ def test_korekcija_nespremenljive_assete_pripravi_zunaj_transakcije(
     storno = pripravi_korekcijski_osnutek(
         original, Invoice.DocumentType.STORNO, "Napaka", date(2026, 9, 2)
     )
-    shrani = invoicing_services.shrani_nespremenljiv_asset
+    shrani = issuance_assets.shrani_nespremenljiv_asset
     globina = len(transaction.get_connection().atomic_blocks)
 
     def preveri(pot):
         assert len(transaction.get_connection().atomic_blocks) == globina
         return shrani(pot)
 
-    monkeypatch.setattr(invoicing_services, "shrani_nespremenljiv_asset", preveri)
+    monkeypatch.setattr(issuance_assets, "shrani_nespremenljiv_asset", preveri)
 
     assert potrdi_korekcijski_osnutek(storno).stevilka == "NP-00002"
 

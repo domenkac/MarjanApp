@@ -5,9 +5,10 @@ from threading import Barrier
 import pytest
 from django.db import IntegrityError, connections, transaction
 
+from companies.issuance_assets import prepare_issuance_assets
 from companies.models import Company, NumberSequence
 from companies.readiness import verify_numbering
-from companies.services import dodeli_naslednjo_stevilko
+from tests.setup_helpers import allocate_verified_number as dodeli_naslednjo_stevilko
 from tests.setup_helpers import prepare_initial_setup
 from tests.ui import test_company_confirmations
 
@@ -84,9 +85,10 @@ def test_number_sequence_zavrne_neveljavno_kombinacijo_tipa_in_leta(tip, leto):
 @pytest.mark.django_db
 def test_neuspesna_transakcija_ne_zazge_stevilke(numbering_setup):
     company = numbering_setup
+    evidence = prepare_issuance_assets(company, date(2026, 1, 1))
 
     with pytest.raises(RuntimeError), transaction.atomic():
-        dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1))
+        dodeli_naslednjo_stevilko(company, NumberSequence.Tip.NP, date(2026, 1, 1), asset_evidence=evidence)
         raise RuntimeError
 
     assert (
