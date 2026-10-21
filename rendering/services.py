@@ -1,6 +1,5 @@
 import base64
 import hashlib
-import mimetypes
 import os
 from contextlib import contextmanager
 from dataclasses import asdict, dataclass, field
@@ -16,7 +15,6 @@ if os.name == "nt":
         os.add_dll_directory(str(_msys_bin))
 
 from django.conf import settings
-from django.core.files.storage import default_storage
 from django.db import transaction
 from django.template import Context, Engine
 from weasyprint import HTML
@@ -32,7 +30,7 @@ from .contexts import (
     EslogRenderNapaka,
     PdfContext,
     PdfRenderNapaka,
-    preveri_nespremenljiv_asset,
+    preberi_pdf_sliko,
     pripravi_mesecni_pdf_context,
     pripravi_pdf_context,
     pripravi_vzorcni_pdf_context,
@@ -76,19 +74,8 @@ def _datum(vrednost) -> str:
     return vrednost.strftime("%d.%m.%Y")
 
 
-def _data_uri(pot: str) -> str:
-    try:
-        with default_storage.open(pot, "rb") as datoteka:
-            vsebina = datoteka.read()
-    except OSError as napaka:
-        raise PdfRenderNapaka("ASSET_MANJKA", f"Slika ne obstaja: {pot}.") from napaka
-    mime, _ = mimetypes.guess_type(pot)
-    if vsebina.startswith(bytes.fromhex("ffd8ff")):
-        mime = "image/jpeg"
-    elif vsebina.startswith(bytes.fromhex("89504e470d0a1a0a")) or mime is None:
-        mime = "image/png"
-    if mime not in {"image/jpeg", "image/png"}:
-        raise PdfRenderNapaka("ASSET_NEVELJAVEN", f"Slika ni dovoljena: {pot}.")
+def _data_uri(pot: str, *, nespremenljiva: bool = True) -> str:
+    vsebina, mime = preberi_pdf_sliko(pot, nespremenljiva=nespremenljiva)
     return f"data:{mime};base64,{base64.b64encode(vsebina).decode()}"
 
 
@@ -152,8 +139,8 @@ def pripravi_html(context: PdfContext) -> str:
     predloga = _ENGINE.get_template(predloga_pot.name)
     return predloga.render(Context({
         "context": context,
-        "logo": _data_uri(context.izdajatelj_logotip_slika_pot),
-        "podpis": _data_uri(context.izdajatelj_podpisnik_slika_pot),
+        "logo": _data_uri(context.izdajatelj_logotip_slika_pot, nespremenljiva=context.stevilka is not None),
+        "podpis": _data_uri(context.izdajatelj_podpisnik_slika_pot, nespremenljiva=context.stevilka is not None),
         "datum_izdaje": _datum(context.datum_izdaje),
         "obdobje": f"{_datum(context.obdobje_od)} \u2013 {_datum(context.obdobje_do)}",
         "rok_placila": _datum(context.rok_placila) if context.rok_placila else None,
@@ -470,8 +457,6 @@ def renderiraj_koncne_pdfje_mesecnega_paketa(cycle):
             else:
                 invoice = stanje["invoice"]
                 try:
-                    preveri_nespremenljiv_asset(invoice.izdajatelj_logotip_slika_pot)
-                    preveri_nespremenljiv_asset(invoice.izdajatelj_podpisnik_slika_pot)
                     artifact = render_pdf(invoice)
                     svezi = Invoice.objects.get(pk=invoice.pk)
                     pdf_state = stanje_koncnega_pdf(svezi)

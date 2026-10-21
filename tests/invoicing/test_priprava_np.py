@@ -629,7 +629,7 @@ def test_np_ob_potrditvi_uporabi_podpisnika_za_koncni_datum(
     podpisnik_a = Signatory.objects.get(company=invoice.company)
     podpisnik_a.velja_do = date(2026, 9, 1)
     save_business_record(podpisnik_a, update_fields=["velja_do"])
-    (tmp_path / "podpis-b.png").write_bytes(b"podpis-b")
+    (tmp_path / "podpis-b.png").write_bytes(slika_bytes())
     Signatory.objects.create(
         company=invoice.company,
         ime_priimek="Boris Podpisnik",

@@ -86,7 +86,16 @@ a database. This follows the permitted fail-closed fallback in T11-A. A source
 venv is required once by the installer; normal .app use will not require Python.
 
 Use native arm64 Python 3.12+ on the TEST Mac. Do not use Apple's system Python,
-Rosetta, or a production environment. From the reviewed source checkout:
+Rosetta, or a production environment. Before creating the venv, follow the source
+verification gate in the [dated operator checklist](desktop-macos-acceptance-2026-10-23.md).
+The preferred route requires the exact independently approved GitHub commit SHA
+and a clean tracked worktree/index. The operator must fill and verify the approved
+SHA; a missing value, different HEAD, or tracked change stops the procedure.
+No local review patch is required after commit. Do not automatically pull,
+checkout, reset, clean, or apply patches. An uncommitted build requires the separate
+explicitly authorized verification route documented in that checklist.
+The following commands assume source verification passed and the fixed TEST
+profile does not exist, including as a symlink:
 
 ```sh
 python3 -m venv .venv-desktop
@@ -108,9 +117,9 @@ publishes the TEST receipt. No companies, invoices, or numbering are fabricated.
 
 On failure, retain the partial directory for operator diagnosis. Do not rerun
 against it, delete a database to reset it, or edit its receipt. A new empty profile
-requires an explicit operator investigation and moving the retained failed
-installation out of the fixed location while all launchers are stopped. That
-recovery action is manual and outside this launcher. No automatic cleanup occurs.
+requires a separate operator investigation outside this TEST acceptance procedure.
+This procedure never deletes, resets, moves, or overwrites an existing profile.
+No automatic cleanup occurs.
 
 After setup, double-click the reviewed `MarjanApp.app`. Complete only synthetic
 initial setup records. Enter the exact three synthetic archive paths above in
@@ -163,6 +172,10 @@ the actual transfer method. Do not globally disable Gatekeeper. Inspect bundled
 licenses and retain required notices before distribution.
 
 ## T11-B acceptance — actual Apple Silicon Mac required
+
+The dated [T12-B7 operator checklist](desktop-macos-acceptance-2026-10-23.md)
+provides commands and a separate acceptance ledger for Friday 2026-10-23.
+Its existence does not establish native acceptance.
 
 - Build arm64 on the TEST Mac; record source revision, Python/pip/Homebrew/macOS
   versions, staging/build output, library architecture, and signing status.

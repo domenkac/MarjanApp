@@ -25,7 +25,7 @@ from tests.rendering.test_contexts import (
 
 
 @pytest.fixture(name="izdani_racun")
-def fixture_izdani_racun(request, db):
+def fixture_izdani_racun(request, transactional_db):
     return request.getfixturevalue("source_izdani_racun")
 
 

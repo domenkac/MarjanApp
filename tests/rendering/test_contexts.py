@@ -516,7 +516,7 @@ def test_nespremenljiv_asset_preveri_obstoj_in_hash(settings, tmp_path):
     from rendering.contexts import preveri_nespremenljiv_asset
 
     settings.MEDIA_ROOT = tmp_path
-    vsebina = b"asset"
+    vsebina = VALID_PNG_LOGO
     checksum = sha256(vsebina).hexdigest()
     pot = f"nespremenljivi-asseti/{checksum}"
     mapa = tmp_path / "nespremenljivi-asseti"

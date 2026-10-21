@@ -10,7 +10,6 @@ from django.test import Client
 from django.utils import timezone
 
 from archive.configuration import ArchiveConfigurationError
-from archive.models import ArchiveConfiguration
 from companies.models import Company, NumberSequence
 from contracts.models import Lease, Property, RecipientContact, Tenant, Unit
 from core.models import AuditLogEntry
@@ -54,6 +53,7 @@ from tests.invoicing.test_preflight import (
     _freeze_ready_package,
     ready_company,  # noqa: F401
 )
+from tests.setup_helpers import verified_archive_configuration
 from ui.views import _sporocilo_mesecnega_racuna
 
 
@@ -1480,11 +1480,8 @@ def unknown_delivery(ready_company, settings, tmp_path):  # noqa: F811
     unrelated["obdobje_od"] = date(2025, 1, 1)
     unrelated["obdobje_do"] = date(2025, 1, 31)
     Invoice.objects.create(**unrelated)
-    ArchiveConfiguration.objects.update_or_create(
-        pk=1, defaults={"local_root": str(tmp_path / "local"),
-                       "icloud_root": str(tmp_path / "icloud"),
-                       "verified_at": timezone.now()},
-    )
+    # Keep archive roots outside MEDIA_ROOT and retain matching probe evidence.
+    verified_archive_configuration()
     return cycle, attempt
 
 

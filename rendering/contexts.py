@@ -3,10 +3,13 @@ import re
 from dataclasses import dataclass
 from datetime import date, timedelta
 from decimal import Decimal
+from io import BytesIO
+from pathlib import Path, PurePosixPath
 
 from django.conf import settings
 from django.core.exceptions import SuspiciousFileOperation, ValidationError
 from django.core.files.storage import default_storage
+from PIL import Image
 
 from catalogs.models import VatRegime
 from companies.models import Company
@@ -14,6 +17,7 @@ from companies.services import izberi_veljavnega_podpisnika
 from contracts.models import Lease, Tenant
 from contracts.vat_eligibility import preveri_upravicenost_prejemnika
 from core.pravila import izracunaj_iz_bruto
+from core.validators import NAJVECJA_SLIKA, preveri_sliko
 from invoicing.models import Invoice, InvoiceLine
 from invoicing.services import (
     _company_validation_issues,
@@ -176,25 +180,52 @@ def _snapshot_asset(checksum: str) -> str:
     if len(checksum or "") != 64 or any(c not in "0123456789abcdef" for c in checksum):
         raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Nespremenljiv asset ni veljaven.")
     pot = f"nespremenljivi-asseti/{checksum}"
-    _preveri_sliko(pot)
-    try:
-        with default_storage.open(pot, "rb") as datoteka:
-            dejanski = hashlib.sha256(datoteka.read()).hexdigest()
-    except (OSError, SuspiciousFileOperation, ValueError) as napaka:
-        raise PdfRenderNapaka("ASSET_MANJKA", "Nespremenljiv asset ni dostopen.") from napaka
-    if dejanski != checksum:
-        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Nespremenljiv asset je poškodovan.")
+    preveri_nespremenljiv_asset(pot)
     return pot
 
 
 def preveri_nespremenljiv_asset(pot: str) -> str:
-    predpona = "nespremenljivi-asseti/"
-    if not isinstance(pot, str) or not pot.startswith(predpona):
-        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot nespremenljivega asseta ni veljavna.")
-    checksum = pot[len(predpona):]
-    if "/" in checksum or _snapshot_asset(checksum) != pot:
-        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot nespremenljivega asseta ni veljavna.")
+    preberi_pdf_sliko(pot)
     return pot
+
+
+def preberi_pdf_sliko(pot: str, *, nespremenljiva: bool = True) -> tuple[bytes, str]:
+    """Return the exact verified content for embedding, never a reopen instruction.
+
+    Only the unnumbered setup sample may use mutable upload paths. Issued NP/ST,
+    their corrections and frozen monthly previews require a content address.
+    """
+    if (not isinstance(pot, str) or not pot or "\\" in pot or ":" in pot
+            or pot.startswith("/") or ".." in PurePosixPath(pot).parts
+            or PurePosixPath(pot).as_posix() != pot):
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot slike ni veljavna.")
+    digest = None
+    if nespremenljiva or pot.startswith("nespremenljivi-asseti/"):
+        match = re.fullmatch(r"nespremenljivi-asseti/([0-9a-f]{64})", pot)
+        if match is None:
+            raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot nespremenljivega asseta ni veljavna.")
+        digest = match[1]
+    try:
+        root = Path(settings.MEDIA_ROOT).resolve(strict=True)
+        path = Path(default_storage.path(pot))
+        # Reject aliases, including symlinks that point back inside MEDIA_ROOT.
+        if path.resolve() != root.joinpath(*PurePosixPath(pot).parts):
+            raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot slike ni dovoljena.")
+        with default_storage.open(pot, "rb") as datoteka:
+            vsebina = datoteka.read(NAJVECJA_SLIKA + 1)
+    except (SuspiciousFileOperation, ValueError, RuntimeError) as napaka:
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Pot slike ni dovoljena.") from napaka
+    except OSError as napaka:
+        raise PdfRenderNapaka("ASSET_MANJKA", "Slika ni dostopna.") from napaka
+    if digest is not None and hashlib.sha256(vsebina).hexdigest() != digest:
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Nespremenljiv asset je poškodovan.")
+    try:
+        preveri_sliko(BytesIO(vsebina))
+        with Image.open(BytesIO(vsebina)) as slika:
+            mime = Image.MIME[slika.format]
+    except ValidationError as napaka:
+        raise PdfRenderNapaka("ASSET_NEVELJAVEN", "Slika mora biti varna datoteka JPG ali PNG.") from napaka
+    return vsebina, mime
 
 
 def _snapshot_vrednost(zapis, kljuc):
@@ -395,8 +426,8 @@ def preveri_pdf_predpogoje(invoice: Invoice) -> tuple[Invoice, tuple[InvoiceLine
             )
         if not svezi.povezan_racun.stevilka:
             raise PdfRenderNapaka("KOREKCIJA_NEPOPOLNA", "Izvirni račun nima številke.")
-    _preveri_sliko(svezi.izdajatelj_logotip_slika_pot)
-    _preveri_sliko(svezi.izdajatelj_podpisnik_slika_pot)
+    preveri_nespremenljiv_asset(svezi.izdajatelj_logotip_slika_pot)
+    preveri_nespremenljiv_asset(svezi.izdajatelj_podpisnik_slika_pot)
 
     vrstice = tuple(InvoiceLine.objects.filter(invoice=svezi).order_by("pk"))
     if not vrstice:
