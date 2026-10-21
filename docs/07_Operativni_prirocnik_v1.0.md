@@ -211,22 +211,22 @@ Izvedene so domenske storitve izračuna in potrditve indeksacije ter predlogov p
 
 ### Tehnična priprava
 
-SAD v1.2 §1 »Odločitev o skladu« določa Python 3.12+, Django 5.2, SQLite in `venv` neposredno na macOS. Potrebujete kodo dogovorjene različice, zapisljive lokalne mape, dostopna iCloud in Dropbox ter SMTP podatke. `requirements.txt` vključuje WeasyPrint, Pillow, lxml in keyring. Sistemskih knjižnic za WeasyPrint repozitorij ne namesti sam; njihovo namestitev in delujoč PDF na konkretnem Macu preveri izvajalec. Popoln avtomatiziran namestitveni postopek za macOS ni priložen.
+SAD v1.2 §1 »Odločitev o skladu« določa Python 3.12+, Django 5.2, SQLite in `venv` neposredno na macOS. Produkcijska pot je [lokalni brskalniški strežnik T12-B8a](local-browser-macos.md), ne namizni profil TEST ali `.app`. Pred namestitvijo preverite odobreni GitHub commit in sledite ločenim postopkom za novo, obstoječo ter obnovljeno namestitev. `requirements-server.txt` doda Waitress in WhiteNoise k osnovnim odvisnostim. Sistemske knjižnice WeasyPrint, Keychain, PDF in obnašanje po ponovnem zagonu mora izvajalec preveriti na ciljnem Macu; Windows testi niso dokaz produkcijske predaje.
 
 Za **novo, prazno namestitev**, v terminalu macOS:
 
 ```sh
-cd "<MAPA_NOVE_NAMESTITVE>"
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -r requirements.txt
+cd "<POT_DO_ODOBRENE_KODE>"
+python3 -m venv "<ABSOLUTNA_POT_NOVEGA_VENV_ZUNAJ_GIT>"
+source "<ABSOLUTNA_POT_NOVEGA_VENV_ZUNAJ_GIT>/bin/activate"
+python -m pip install -r requirements-server.txt
 ```
 
 Nato sledite [varnemu postopku prve namestitve](persistent-paths.md#first-installation-a-brand-new-database-only): izrecno določite `MARJAN_DB_PATH`, `MARJAN_MEDIA_ROOT` in `MARJAN_RENDERING_ROOT` zunaj repozitorija, preverite izpis ukaza `python -m app.provision_database --check-paths` in šele nato izvedite `python -m app.provision_database --confirm-new-install`. Nadrejena mapa baze mora že obstajati; ciljna baza in njene stranske datoteke ne smejo obstajati. Ukaz obstoječe baze nikoli ne prepiše, izbriše, ponastavi ali migrira. Uspeh zahteva izhodno kodo nič in sporočilo `New installation database provisioned and verified:` s preverjeno potjo.
 
-Po uspehu obdržite iste okoljske spremenljivke, izvedite `python manage.py check --database default` in `python manage.py showmigrations --plan` (vse migracije morajo biti označene `[X]`), nato `python manage.py runserver 127.0.0.1:8000`. Ob napaki ne zaganjajte aplikacije; ohranite morebitno ciljno datoteko za diagnostiko in uporabite drugo, še neuporabljeno pot. Običajen zagon ne pripravi manjkajoče izrecno nastavljene baze.
+Po uspehu pripravite zasebni JSON in trajni Django ključ po navodilih T12-B8a. Z izrecno absolutno potjo do konfiguracije izvedite `python -m app.local_server --config "/ABSOLUTNA/POT/server.json" --check`, nato isti ukaz brez `--check`. Preverjanje zahteva skladne migracije in shemo; ničesar ne migrira. Ob napaki ohranite podatke za diagnostiko in ne zaženite aplikacije z drugo ali prazno nadomestno bazo.
 
-`python3` mora biti nameščeni Python ustrezne različice. Brskalnik odprite na `http://127.0.0.1:8000/`. Strežnik ustavite s `Ctrl+C`. Zagon je lokalni razvojni strežnik, podprt v repozitoriju; ni priloženega produkcijskega zaganjalnika ali samodejnega zagona ob prijavi. Ne uporabite omrežnega naslova `0.0.0.0`.
+`python3` mora biti nameščeni Python ustrezne različice. Običajni brskalnik odprite na `http://127.0.0.1:8000/`. Produkcijski zaganjalnik uporablja Waitress samo na tem naslovu; `runserver` ostaja razvojni ukaz. Pri ročnem zagonu uporabite `Ctrl+C` in pred ponovnim zagonom počakajte na zaključek aktivnih opravil ter zaprtje poslušalca. Uporabniški LaunchAgent je izključno ročno odobren korak na Macu po navodilih T12-B8a. Ne uporabite `0.0.0.0`, korenskega uporabnika ali profila TEST.
 
 **Ta korak ni postopek obnove.** Na izvirnem ZIP-u ali preverjeni obnovitveni bazi ne izvajajte migracij. Ob selitvi obstoječih podatkov združljivost različice in morebitne migracije preveri izvajalec pred produkcijskim preklopom.
 

@@ -2,6 +2,12 @@
 
 M1 adds explicit deployment configuration. It does not install or launch MarjanApp.
 
+For production browser operation use [T12-B8a local macOS installation](local-browser-macos.md).
+That launcher requires a private explicit configuration, stable Django key,
+existing-only SQLite and DEBUG=False. The defaults below remain development and
+offline-tool behavior; they are not the production startup path. Desktop TEST
+launchers and bundles are not part of this release path.
+
 - `MARJAN_DB_PATH`: absolute path to an existing SQLite database file.
 - `MARJAN_RENDERING_ROOT`: absolute directory path for rendered documents.
 - `MARJAN_MEDIA_ROOT`: existing setting for uploaded images and attachments.
@@ -113,15 +119,17 @@ After success, retain the same explicit environment for every application run:
 ```sh
 python manage.py check --database default
 python manage.py showmigrations --plan
-python manage.py runserver 127.0.0.1:8000
+python -m app.local_server --config "$HOME/Library/Application Support/MarjanApp/config/server.json" --check
+python -m app.local_server --config "$HOME/Library/Application Support/MarjanApp/config/server.json"
 ```
 
 All migration entries must be marked `[X]`. Open `http://127.0.0.1:8000/`.
 The first-run wizard remains incomplete and issuance remains blocked until its
 existing checks pass (PRD v1.2 §16.4; SAD v1.2 §6.4). Saved wizard progress can be
 resumed after closing the browser. Provisioning does not complete onboarding.
-No launcher or environment-file loader is added. Normal startup still uses M1's
-`mode=rw` factory and cannot create a missing explicitly configured database.
+Prepare the private production JSON and stable key first, using the linked B8a
+procedure. The production launcher does not provision or migrate; it retains
+M1's `mode=rw` factory and cannot create a missing configured database.
 
 ### Verification on the production MacBook
 
