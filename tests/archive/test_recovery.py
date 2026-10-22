@@ -197,6 +197,92 @@ def test_valid_v2_is_verified_offline_but_production_is_blocked(recovery, tmp_pa
         assert sha(before[name]) == invoice.checksum
 
 
+def test_application_smtp_triggers_are_preserved(recovery):
+    with sqlite3.connect(recovery["target"] / "database/db.sqlite3") as database:
+        names = {
+            row[0]
+            for row in database.execute(
+                "SELECT name FROM sqlite_master WHERE type='trigger'"
+            )
+        }
+    assert names == {
+        "smtp_company_identity_changed",
+        "smtp_summary_identity_changed",
+        "smtp_summary_identity_deleted",
+    }
+    before = tree_bytes(recovery["target"])
+    with connection.execute_wrapper(lambda *args: pytest.fail("No live SQL")):
+        result = inspect(recovery)
+    assert result["offline_state"] == "VERIFIED_OFFLINE", result["hard_blockers"]
+    assert "CURRENT_SCHEMA_AND_MIGRATIONS" in result["verified_checks"]
+    assert tree_bytes(recovery["target"]) == before
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "smtp_company_identity_changed",
+        "smtp_summary_identity_changed",
+        "smtp_summary_identity_deleted",
+    ],
+)
+@pytest.mark.parametrize(
+    "damage", ["missing", "renamed", "timing", "table", "body", "predicate", "extra_sql"]
+)
+def test_modified_smtp_trigger_fails_closed(recovery, tmp_path, name, damage):
+    with sqlite3.connect(recovery["target"] / "database/db.sqlite3") as database:
+        table, original = database.execute(
+            "SELECT tbl_name, sql FROM sqlite_master WHERE type='trigger' AND name=?",
+            (name,),
+        ).fetchone()
+        database.execute(f'DROP TRIGGER "{name}"')
+        if damage != "missing":
+            old, new = {
+                "renamed": (name, "unexpected_trigger"),
+                "timing": ("AFTER", "BEFORE"),
+                "table": ("ON " + table, "ON core_auditlogentry"),
+                "body": ("CURRENT_TIMESTAMP", "NULL"),
+                "predicate": ("invalidated_at IS NULL", "0"),
+                "extra_sql": ("END", "DELETE FROM delivery_smtpverification; END"),
+            }[damage]
+            assert old in original
+            database.execute(original.replace(old, new))
+    rebind(recovery, tmp_path / "modified-trigger")
+    before = tree_bytes(recovery["target"])
+    result = inspect(recovery)
+    assert result["state"] == "BLOCKED_INTEGRITY", result
+    assert {
+        "code": "PREFLIGHT_REJECTED",
+        "reference": "Unsupported executable database schema.",
+    } in result["hard_blockers"]
+    assert "CURRENT_SCHEMA_AND_MIGRATIONS" not in result["verified_checks"]
+    assert tree_bytes(recovery["target"]) == before
+
+
+@pytest.mark.parametrize("kind", ["trigger", "table_named_trigger", "view"])
+def test_unexpected_executable_schema_fails_closed(recovery, tmp_path, kind):
+    name = "companies_company" if kind == "table_named_trigger" else "unexpected"
+    sql = (
+        f"CREATE VIEW {name} AS SELECT * FROM companies_company;"
+        if kind == "view"
+        else f"CREATE TRIGGER {name} AFTER DELETE ON companies_company "
+        "BEGIN DELETE FROM delivery_smtpverification; END;"
+    )
+    rebind(recovery, tmp_path / "executable-schema", sql=sql)
+    before = tree_bytes(recovery["target"])
+    result = inspect(recovery)
+    assert result["state"] == "BLOCKED_INTEGRITY", result
+    assert any(
+        issue["code"] == "PREFLIGHT_REJECTED"
+        and issue["reference"] in {
+            "Unsupported executable database schema.",
+            "Unrecognizable recovery database schema.",
+        }
+        for issue in result["hard_blockers"]
+    )
+    assert tree_bytes(recovery["target"]) == before
+
+
 @pytest.mark.parametrize("damage", ["missing", "corrupt"])
 def test_registered_pdf_loss_or_corruption_blocks(recovery, damage):
     path = recovery["target"] / "rendering" / recovery["invoices"][0].rendered_pdf_path

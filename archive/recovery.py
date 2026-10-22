@@ -16,6 +16,7 @@ import unicodedata
 from collections import Counter
 from contextlib import closing
 from datetime import UTC, date, datetime
+from importlib import import_module
 from pathlib import Path
 from zipfile import ZipFile
 
@@ -93,9 +94,30 @@ def _overlaps(left, right):
 
 
 def _schema(database):
-    objects = dict(database.execute("SELECT name, type FROM sqlite_master"))
-    if any(kind in {"trigger", "view"} for kind in objects.values()):
+    schema = list(database.execute("SELECT name, type, tbl_name, sql FROM sqlite_master"))
+    migration = import_module("delivery.migrations.0009_smtp_identity_invalidation")
+    # SQLite removes the final semicolon; otherwise require the exact trusted DDL.
+    expected_triggers = {
+        (name, "trigger", table, operation.sql.strip().removesuffix(";"))
+        for (name, table), operation in zip(
+            (
+                ("smtp_company_identity_changed", "companies_company"),
+                (
+                    "smtp_summary_identity_changed",
+                    "delivery_monthlysummaryconfiguration",
+                ),
+                (
+                    "smtp_summary_identity_deleted",
+                    "delivery_monthlysummaryconfiguration",
+                ),
+            ),
+            migration.Migration.operations,
+            strict=True,
+        )
+    }
+    if {row for row in schema if row[1] not in {"table", "index"}} != expected_triggers:
         raise RestoreError("Unsupported executable database schema.")
+    objects = {name: kind for name, kind, _, _ in schema}
     for model in apps.get_models():
         table = model._meta.db_table
         info = list(database.execute(f'PRAGMA table_info("{table}")'))
