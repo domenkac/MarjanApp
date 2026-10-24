@@ -30,7 +30,7 @@ class LocalGateway:
                 "access-control-allow-origin",
             }]
             headers.extend([
-                ("Cache-Control", "no-store"), ("Referrer-Policy", "no-referrer"),
+                ("Cache-Control", "no-store"), ("Referrer-Policy", "same-origin"),
                 ("Content-Security-Policy", ("default-src 'self'; style-src 'self' 'unsafe-inline'; "
                  "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
                  "frame-ancestors 'none'; form-action 'self'; base-uri 'none'")),

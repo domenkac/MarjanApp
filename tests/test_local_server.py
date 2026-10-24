@@ -237,21 +237,27 @@ def test_private_configuration_limits(installation, change):
     {"HTTP_HOST": "localhost:8000"}, {"HTTP_HOST": "evil.invalid:8000"},
     {"HTTP_HOST": "127.0.0.1:9000"}, {"REMOTE_ADDR": "192.0.2.1"},
     {"HTTP_ORIGIN": "https://evil.invalid"}, {"HTTP_ORIGIN": "null"},
+    {"HTTP_ORIGIN": "http://127.0.0.1:9000"}, {"HTTP_ORIGIN": "https://127.0.0.1:8000"},
     {"HTTP_SEC_FETCH_SITE": "cross-site"}, {"HTTP_SEC_FETCH_SITE": "same-site"},
 ])
 def test_host_and_origin_gate_runs_before_application(headers):
     from app.local_gateway import LocalGateway
 
-    environ = {"HTTP_HOST": "127.0.0.1:8000", "REMOTE_ADDR": "127.0.0.1", **headers}
+    environ = {
+        "HTTP_HOST": "127.0.0.1:8000", "REMOTE_ADDR": "127.0.0.1",
+        "HTTP_ORIGIN": "http://127.0.0.1:8000", "HTTP_SEC_FETCH_SITE": "same-origin",
+        "REQUEST_METHOD": "POST", **headers,
+    }
     status = []
     gateway = LocalGateway(lambda *args: pytest.fail("Unsafe request reached Django"), 8000)
     assert gateway(environ, lambda value, headers: status.append(value)) == [b"Request denied."]
     assert status == ["403 Forbidden"]
 
 
-def test_real_socket_binding_occupied_port_and_shutdown():
+@pytest.mark.parametrize("method", ["GET", "POST"])
+def test_real_socket_binding_occupied_port_and_shutdown(method):
     import socket
-    from urllib.request import ProxyHandler, build_opener
+    from urllib.request import ProxyHandler, Request, build_opener
 
     from app.local_server import LocalServer
 
@@ -266,8 +272,21 @@ def test_real_socket_binding_occupied_port_and_shutdown():
         with pytest.raises(OSError):
             LocalServer(application, port=port)
         first.start()
-        with build_opener(ProxyHandler({})).open(f"http://127.0.0.1:{port}/", timeout=5) as response:
+        origin = f"http://127.0.0.1:{port}"
+        request = Request(origin + "/", method=method, headers={
+            "Origin": origin, "Sec-Fetch-Site": "same-origin",
+        })
+        with build_opener(ProxyHandler({})).open(request, timeout=5) as response:
+            assert response.status == 200
             assert response.read() == b"synthetic"
+            assert response.headers["Referrer-Policy"] == "same-origin"
+            assert response.headers["Cache-Control"] == "no-store"
+            assert response.headers["Content-Security-Policy"] == (
+                "default-src 'self'; style-src 'self' 'unsafe-inline'; "
+                "img-src 'self' data:; font-src 'self'; connect-src 'self'; "
+                "frame-ancestors 'none'; form-action 'self'; base-uri 'none'"
+            )
+            assert response.headers.get("Access-Control-Allow-Origin") is None
     finally:
         first.close()
     assert not first.thread.is_alive()
@@ -370,6 +389,7 @@ assert settings.MARJAN_SMTP_HOST == ''
 assert settings.DATABASES['default']['NAME'] == config.database
 assert settings.EMAIL_BACKEND != 'django.core.mail.backends.dummy.EmailBackend'
 from django.core.management import call_command
+from django.test.client import encode_multipart
 call_command('check', databases=['default'], verbosity=0)
 module = importlib.import_module('app.production_settings')
 assert importlib.reload(module).SECRET_KEY == config.secret
@@ -406,11 +426,21 @@ try:
     target = url + '/zacetna-nastavitev/?korak=unit'
     # A valid setup navigation POST is accepted without approving any business readiness.
     token = re.search(r'name="csrfmiddlewaretoken" value="([^"]+)"', html)[1]
-    body = urlencode({'action': 'restart', 'csrfmiddlewaretoken': token}).encode()
-    with client.open(Request(target, data=body, headers={'Origin': url}), timeout=10) as response:
-        assert response.status == 200
+    data = {'action': 'restart', 'csrfmiddlewaretoken': token}
+    body = urlencode(data).encode()
+    for payload, content_type in [
+        (body, 'application/x-www-form-urlencoded'),
+        (encode_multipart('synthetic-boundary', data), 'multipart/form-data; boundary=synthetic-boundary'),
+    ]:
+        headers = {'Origin': url, 'Sec-Fetch-Site': 'same-origin', 'Content-Type': content_type}
+        with client.open(Request(target, data=payload, headers=headers), timeout=10) as response:
+            assert response.status == 200
+            assert response.headers['Referrer-Policy'] == 'same-origin'
+            assert response.headers['Cache-Control'] == 'no-store'
     for request in [
         Request(target, data=b'action=restart'),
+        Request(target, data=b'action=restart', headers={'Origin': url}),
+        Request(target, data=b'action=restart&csrfmiddlewaretoken=invalid', headers={'Origin': url}),
         Request(target, data=body, headers={'Origin': 'http://evil.invalid'}),
         Request(url + '/', headers={'Host': 'evil.invalid'}),
     ]:
