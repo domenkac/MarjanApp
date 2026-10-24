@@ -1,45 +1,49 @@
 {% extends "ui/base.html" %}
 {% block title %}{{ invoice.stevilka }} · Marjan{% endblock %}
 {% block content %}
-<header class="page-heading">
+<div class="workflow-page invoice-detail">
+<header class="page-heading settings-heading">
   <div><p class="eyebrow">Izdani storitveni račun</p><h1>{{ invoice.stevilka }}</h1></div>
-  <a href="{% url 'ui:st_list' %}?company={{ invoice.company_id }}">Nazaj na račune izdajatelja</a>
+  <a class="button-secondary" href="{% url 'ui:st_list' %}?company={{ invoice.company_id }}">Nazaj na račune izdajatelja</a>
 </header>
 <p class="status-badge">Oštevilčen in izdan — finančna vsebina je nespremenljiva</p>
 {% include "ui/partials/st_snapshots.html" %}
 <section class="panel"><h2>Uradni PDF</h2>
-{% if pdf_error %}<p role="alert">Priprava PDF ni uspela. Račun ostaja izdan z isto trajno številko.</p>{% endif %}
+{% if pdf_error %}<p class="form-errors" role="alert">Priprava PDF ni uspela. Račun ostaja izdan z isto trajno številko.</p>{% endif %}
 {% if pdf_state.state == 'READY' %}
   <p>Uradni PDF je pripravljen. Celovitost je preverjena s shranjeno kontrolno vsoto.</p>
-  <a href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}" target="_blank" rel="noopener">Odpri PDF</a>
-  <a href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}?download=1">Prenesi PDF</a>
+  <div class="form-actions">
+  <a class="button-primary" href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}" target="_blank" rel="noopener">Odpri PDF</a>
+  <a class="button-secondary" href="{% url 'ui:st_pdf' invoice.company_id invoice.pk %}?download=1">Prenesi PDF</a>
+  </div>
 {% elif pdf_state.state == 'ERROR' %}
-  <p role="alert">Celovitost uradnega PDF ni potrjena. Prenos je blokiran. Registriranega manjkajočega ali poškodovanega PDF ni dovoljeno samodejno zamenjati. Potreben je pregled shranjenega dokumenta.</p>
+  <p class="form-errors" role="alert">Celovitost uradnega PDF ni potrjena. Prenos je blokiran. Registriranega manjkajočega ali poškodovanega PDF ni dovoljeno samodejno zamenjati. Potreben je pregled shranjenega dokumenta.</p>
 {% else %}
   <p>PDF še ni pripravljen ali priprava ni uspela. Račun ostaja izdan z isto trajno številko.</p>
 {% endif %}
 {% if pdf_state.state != 'READY' %}
-<form method="post" action="{% url 'ui:st_retry_pdf' invoice.company_id invoice.pk %}">
+<form class="form-actions" method="post" action="{% url 'ui:st_retry_pdf' invoice.company_id invoice.pk %}">
   {% csrf_token %}<button class="button-secondary" type="submit">Ponovi samo pripravo PDF</button>
 </form>
 {% endif %}
 </section>
 <section class="panel"><h2>Dostava</h2>
 {% if invoice.status == 'IZBRAN_ZA_POSILJANJE' %}<p>Še ni poslan.</p>{% else %}<p>Stanje dostave: {{ invoice.get_status_display }}</p>{% endif %}
-<a href="{% url 'ui:st_delivery' invoice.company_id invoice.pk %}">Odpri dostavo in pregled prejemnikov</a>
+<a class="button-secondary" href="{% url 'ui:st_delivery' invoice.company_id invoice.pk %}">Odpri dostavo in pregled prejemnikov</a>
 <p>Izdaja in priprava PDF ne pomenita pošiljanja ali arhiviranja.</p>
 </section>
 <section class="panel"><h2>Arhiviranje ST</h2>
-{% if archive_error %}<p role="alert">{{ archive_error }}</p>{% endif %}
-<p role="status">{{ archive_state.message }}</p>
+{% if archive_error %}<p class="form-errors" role="alert">{{ archive_error }}</p>{% endif %}
+<p class="form-note" role="status">{{ archive_state.message }}</p>
 {% if archive_state.can_archive %}
-<form method="post" action="{% url 'ui:st_archive' invoice.company_id invoice.pk %}">
+<form class="form-actions" method="post" action="{% url 'ui:st_archive' invoice.company_id invoice.pk %}">
   {% csrf_token %}<button class="button-primary" type="submit">{% if archive_state.retry %}Ponovi nepopolno arhiviranje{% else %}Arhiviraj ST račun{% endif %}</button>
 </form>
 {% endif %}
 {% if archive_state.verified %}
 <p>Celovitost obeh kopij je preverjena ob tem prikazu. Varnostna kopija je ločeno dejanje; arhiviranje je ne ustvari.</p>
-<a href="{% url 'ui:nastavitve_arhiv' %}#varnostne-kopije">Odpri ročno varnostno kopijo v Dropbox</a>
+<a class="button-secondary" href="{% url 'ui:nastavitve_arhiv' %}#varnostne-kopije">Odpri ročno varnostno kopijo v Dropbox</a>
 {% endif %}
 </section>
+</div>
 {% endblock %}

@@ -1,19 +1,24 @@
 {% extends "ui/base.html" %}
 {% block title %}Pregled poračunov · Marjan{% endblock %}
 {% block content %}
-<header class="page-heading"><h1>Pregled poračunov indeksacije</h1></header>
-<p>Odločitve ostanejo shranjene. Potrditev ne izda računa in ne vključi poračuna v račun.</p>
-<form method="get">{{ form.as_p }}<button class="button-primary" type="submit">Filtriraj</button> <a href="{% url 'ui:adjustment_list' %}">Vsi poračuni</a></form>
+<div class="workflow-page">
+<header class="page-heading settings-heading"><div><p class="eyebrow">Pogodbe · Poračuni</p><h1>Pregled poračunov indeksacije</h1></div></header>
+<p class="form-note">Odločitve ostanejo shranjene. Potrditev ne izda računa in ne vključi poračuna v račun.</p>
+<section class="settings-card">
+<div class="card-heading"><h2>Filtri poračunov</h2></div>
+<form method="get">{% include "ui/partials/form_fields.html" %}<div class="form-actions"><a class="button-secondary" href="{% url 'ui:adjustment_list' %}">Vsi poračuni</a><button class="button-primary" type="submit">Filtriraj</button></div></form>
+</section>
 {% for group in groups %}
-<section class="settings-table-wrap">
-<h2>{{ group.company.naziv }} / {{ group.lease.oznaka_pogodbe }} (#{{ group.lease.pk }}) / {{ group.evidence_state }}</h2>
+<section class="settings-card">
+<div class="card-heading"><h2>{{ group.company.naziv }} / {{ group.lease.oznaka_pogodbe }} (#{{ group.lease.pk }}) / {{ group.evidence_state }}</h2></div>
 {% for entry in group.entries %}
-<article>
+<article class="confirmation-block">
 <h3><a href="{% url 'ui:adjustment_detail' group.company.pk entry.row.pk %}">Poračun #{{ entry.row.pk }} — {{ entry.row.get_status_display }}</a></h3>
-{% include "ui/partials/adjustment_evidence.html" with row=entry.row old_amount=entry.old_amount new_amount=entry.new_amount signed_difference=entry.signed_difference vat=entry.vat blockers=entry.blockers %}
+<div class="adjustment-evidence">{% include "ui/partials/adjustment_evidence.html" with row=entry.row old_amount=entry.old_amount new_amount=entry.new_amount signed_difference=entry.signed_difference vat=entry.vat blockers=entry.blockers %}</div>
 {% if entry.row.razlog_zavrnitve %}<p>Razlog zavrnitve: {{ entry.row.razlog_zavrnitve }}</p>{% endif %}
 </article>
 {% endfor %}
 </section>
-{% empty %}<p>Ni poračunov za izbrane filtre.</p>{% endfor %}
+{% empty %}<div class="settings-card empty-state compact-empty"><p>Ni poračunov za izbrane filtre.</p></div>{% endfor %}
+</div>
 {% endblock %}
